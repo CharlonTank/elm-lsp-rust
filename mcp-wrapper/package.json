@@ -1,0 +1,14 @@
+{
+  "name": "elm-lsp-rust-mcp",
+  "version": "0.1.0",
+  "description": "MCP wrapper for Rust Elm LSP",
+  "type": "module",
+  "main": "index.mjs",
+  "bin": {
+    "elm-lsp-mcp": "./index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "zod": "^3.23.0"
+  }
+}
