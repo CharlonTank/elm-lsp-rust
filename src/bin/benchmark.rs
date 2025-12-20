@@ -30,10 +30,8 @@ fn main() {
     println!("  Indexed {} modules in {:?}", workspace.modules.len(), init_time);
     println!();
 
-    // Get the test file URI
+    // Get the test file path
     let full_path = PathBuf::from(&project_path).join(&test_file);
-    let uri = tower_lsp::lsp_types::Url::from_file_path(&full_path)
-        .expect("Failed to create URI");
 
     // Find the module for the test file
     let module = workspace.modules.values()

@@ -729,7 +729,6 @@ impl Workspace {
 
         // Read target file content
         let target_content = std::fs::read_to_string(target_path)?;
-        let target_lines: Vec<&str> = target_content.lines().collect();
 
         // Find insertion point in target (after imports, before first definition)
         let target_insert_line = self.find_insertion_point(&target_content);

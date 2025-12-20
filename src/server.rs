@@ -173,23 +173,6 @@ impl LanguageServer for ElmLanguageServer {
                     }
                 }
             }
-        } else if let Some(root_path) = params.root_path {
-            let path = PathBuf::from(&root_path);
-            tracing::info!("Initializing workspace at {:?} (from root_path)", path);
-
-            // Set diagnostics provider workspace root
-            if let Ok(mut diag) = self.diagnostics_provider.write() {
-                diag.set_workspace_root(&root_path);
-            }
-
-            let mut workspace = Workspace::new(path);
-            if let Err(e) = workspace.initialize() {
-                tracing::error!("Failed to initialize workspace: {}", e);
-            } else {
-                if let Ok(mut ws) = self.workspace.write() {
-                    *ws = Some(workspace);
-                }
-            }
         }
 
         Ok(InitializeResult {
@@ -746,7 +729,7 @@ impl LanguageServer for ElmLanguageServer {
                         };
 
                         // Apply the edit
-                        self.client.apply_edit(edit).await;
+                        let _ = self.client.apply_edit(edit).await;
 
                         Ok(Some(serde_json::json!({
                             "success": true,
