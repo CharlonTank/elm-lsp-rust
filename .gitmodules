@@ -1,0 +1,3 @@
+[submodule "tests/meetdown"]
+	path = tests/meetdown
+	url = https://github.com/MartinSStewart/meetdown.git

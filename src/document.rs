@@ -1,6 +1,13 @@
 use tower_lsp::lsp_types::*;
 
 #[derive(Debug, Clone)]
+pub struct VariantInfo {
+    pub name: String,
+    pub range: Range,
+    pub full_range: Range,
+}
+
+#[derive(Debug, Clone)]
 pub struct ElmSymbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -9,6 +16,7 @@ pub struct ElmSymbol {
     pub signature: Option<String>,
     pub documentation: Option<String>,
     pub references: Vec<Range>,
+    pub variants: Vec<VariantInfo>,
 }
 
 impl ElmSymbol {
@@ -21,6 +29,7 @@ impl ElmSymbol {
             signature: None,
             documentation: None,
             references: Vec::new(),
+            variants: Vec::new(),
         }
     }
 

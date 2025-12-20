@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::*;
 use tree_sitter::{Language, Parser, Tree};
 
-use crate::document::ElmSymbol;
+use crate::document::{ElmSymbol, VariantInfo};
 
 fn elm_language() -> Language {
     tree_sitter_elm::LANGUAGE.into()
@@ -116,14 +116,15 @@ impl ElmParser {
         }
 
         let name = name?;
-        let range = name_range.unwrap_or_else(|| self.node_to_range(node));
+        // Use the full node range so contains_position works for finding enclosing functions
+        let full_range = self.node_to_range(node);
 
         // Look up the type annotation from the pre-collected map
         let signature = type_annotations.get(&name).cloned();
 
-        let mut symbol = ElmSymbol::new(name, SymbolKind::FUNCTION, range);
+        let mut symbol = ElmSymbol::new(name, SymbolKind::FUNCTION, full_range);
         symbol.signature = signature;
-        symbol.definition_range = Some(self.node_to_range(node));
+        symbol.definition_range = name_range;
 
         Some(symbol)
     }
@@ -154,14 +155,20 @@ impl ElmParser {
         &self,
         node: tree_sitter::Node,
         source: &str,
-        _parent_symbol: &mut ElmSymbol,
+        parent_symbol: &mut ElmSymbol,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "union_variant" {
                 if let Some(name_node) = child.child(0) {
-                    let _name = self.node_text(name_node, source);
-                    let _range = self.node_to_range(name_node);
+                    let name = self.node_text(name_node, source).to_string();
+                    let range = self.node_to_range(name_node);
+                    let full_range = self.node_to_range(child);
+                    parent_symbol.variants.push(VariantInfo {
+                        name,
+                        range,
+                        full_range,
+                    });
                 }
             }
         }

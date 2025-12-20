@@ -902,6 +902,131 @@ server.tool(
   }
 );
 
+server.tool(
+  "elm_prepare_remove_variant",
+  "Check if a variant can be removed from a custom type. Returns variant info, usage count, and other variants for reference.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    line: z.number().describe("Line number of the variant name (0-indexed)"),
+    character: z.number().describe("Character position within the variant name (0-indexed)"),
+  },
+  async ({ file_path, line, character }) => {
+    const workspaceRoot = findWorkspaceRoot(file_path);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${file_path}`;
+    const content = readFileSync(file_path, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.prepareRemoveVariant", [uri, line, character]);
+
+    if (!result || !result.success) {
+      return { content: [{ type: "text", text: result?.error || "No variant found at this position" }] };
+    }
+
+    const otherVariants = result.otherVariants?.join(", ") || "none";
+
+    return {
+      content: [{
+        type: "text",
+        text: `Variant: ${result.variantName} (${result.variantIndex + 1}/${result.totalVariants} in type ${result.typeName})\n` +
+              `Other variants: [${otherVariants}]\n` +
+              `Usages: ${result.usagesCount}\n` +
+              `Can remove: ${result.canRemove ? "Yes" : "No (only variant)"}\n` +
+              `Line: ${result.range.start.line + 1}:${result.range.start.character}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "elm_remove_variant",
+  "Remove a variant from a custom type. Will fail if the variant is used anywhere (showing blocking usages with call chain context).",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    line: z.number().describe("Line number of the variant name (0-indexed)"),
+    character: z.number().describe("Character position within the variant name (0-indexed)"),
+  },
+  async ({ file_path, line, character }) => {
+    const workspaceRoot = findWorkspaceRoot(file_path);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${file_path}`;
+    const content = readFileSync(file_path, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.removeVariant", [uri, line, character]);
+
+    if (!result) {
+      return { content: [{ type: "text", text: "No variant found at this position" }] };
+    }
+
+    if (!result.success) {
+      // Format blocking usages with call chain
+      const usages = result.blockingUsages || [];
+      const otherVariants = result.otherVariants?.join(", ") || "none";
+
+      let usageText = usages.slice(0, 10).map((u, idx) => {
+        const func = u.function_name || "(top-level)";
+        let text = `  ${idx + 1}. ${u.module_name}.${func}:${u.line + 1}\n`;
+        text += `     Context: "${u.context}"\n`;
+
+        if (u.call_chain && u.call_chain.length > 0) {
+          text += `     Call chain:\n`;
+          u.call_chain.forEach((c, i) => {
+            const marker = c.is_entry_point ? " [ENTRY]" : "";
+            const indent = "       " + "  ".repeat(i);
+            text += `${indent}→ ${c.module_name}.${c.function}:${c.line + 1}${marker}\n`;
+          });
+        }
+        return text;
+      }).join("\n");
+
+      if (usages.length > 10) {
+        usageText += `\n  ... and ${usages.length - 10} more usages`;
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `Cannot remove variant '${result.variantName}' from type ${result.typeName}\n` +
+                `Reason: ${result.error}\n\n` +
+                `Other variants you can use instead: [${otherVariants}]\n\n` +
+                `Blocking usages:\n${usageText}`,
+        }],
+      };
+    }
+
+    // Success - apply the changes
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Successfully removed variant '${result.variantName}' from type ${result.typeName}\n` +
+                `Applied ${totalEdits} edit(s) in ${fileCount} file(s)`,
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: result.message || "Variant removed successfully",
+      }],
+    };
+  }
+);
+
 // Helper to extract module name from Elm source
 function extractModuleName(content) {
   const match = content.match(/^module\s+([A-Za-z.]+)\s+exposing/m);

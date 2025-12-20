@@ -1028,6 +1028,362 @@ impl Workspace {
     pub fn path_to_module_name_public(&self, path: &Path) -> String {
         self.path_to_module_name(path)
     }
+
+    /// Remove a variant from a custom type
+    pub fn remove_variant(
+        &self,
+        uri: &Url,
+        _type_name: &str,
+        variant_name: &str,
+        _variant_index: usize,
+        total_variants: usize,
+    ) -> anyhow::Result<RemoveVariantResult> {
+        // 1. Validate: can't remove if only 1 variant
+        if total_variants <= 1 {
+            return Ok(RemoveVariantResult::error("Cannot remove the only variant from a type"));
+        }
+
+        // 2. Check for blocking usages
+        let usages = self.get_variant_usages(uri, variant_name);
+        let blocking: Vec<_> = usages.iter().filter(|u| u.is_blocking).cloned().collect();
+
+        if !blocking.is_empty() {
+            return Ok(RemoveVariantResult {
+                success: false,
+                message: format!(
+                    "Variant '{}' is used in {} place(s). Replace these usages with other variants first.",
+                    variant_name,
+                    blocking.len()
+                ),
+                blocking_usages: blocking,
+                changes: None,
+            });
+        }
+
+        // 3. Safe to remove - read file and find the variant line
+        let path = uri.to_file_path()
+            .map_err(|_| anyhow::anyhow!("Invalid URI"))?;
+        let content = std::fs::read_to_string(&path)?;
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Find the variant in the source
+        let mut variant_line = None;
+        let mut is_first_variant = false;
+        let mut next_variant_line = None;
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            // Look for the variant name in a type declaration context
+            if (trimmed.starts_with('=') || trimmed.starts_with('|')) && trimmed.contains(variant_name) {
+                // Check if this is actually our variant (not just containing the name)
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 && parts[1] == variant_name {
+                    variant_line = Some(i);
+                    is_first_variant = trimmed.starts_with('=');
+
+                    // Find next variant line if exists
+                    for j in (i + 1)..lines.len() {
+                        let next_trimmed = lines[j].trim();
+                        if next_trimmed.starts_with('|') {
+                            next_variant_line = Some(j);
+                            break;
+                        } else if !next_trimmed.is_empty() && !next_trimmed.starts_with('|') {
+                            // Hit something else (not a variant continuation)
+                            break;
+                        }
+                    }
+                    break;
+                } else if parts.len() >= 1 && parts[0] == variant_name {
+                    // variant without = or | prefix (shouldn't happen but handle it)
+                    variant_line = Some(i);
+                    break;
+                }
+            }
+        }
+
+        let variant_line = variant_line.ok_or_else(|| anyhow::anyhow!("Variant line not found in source"))?;
+
+        // 4. Create TextEdit to remove the variant
+        let mut changes = HashMap::new();
+        let edit = if is_first_variant {
+            // First variant: need to change next | to =
+            if let Some(next_line) = next_variant_line {
+                // Delete from start of variant line to start of next variant line
+                // and replace the | with =
+                let next_line_content = lines[next_line];
+                let new_next_line = next_line_content.replacen('|', "=", 1);
+
+                vec![
+                    TextEdit {
+                        range: Range {
+                            start: Position { line: variant_line as u32, character: 0 },
+                            end: Position { line: next_line as u32, character: 0 },
+                        },
+                        new_text: String::new(),
+                    },
+                    TextEdit {
+                        range: Range {
+                            start: Position { line: next_line as u32, character: 0 },
+                            end: Position { line: next_line as u32, character: next_line_content.len() as u32 },
+                        },
+                        new_text: new_next_line,
+                    },
+                ]
+            } else {
+                // Only variant (shouldn't happen - we checked total_variants > 1)
+                return Ok(RemoveVariantResult::error("Cannot determine next variant"));
+            }
+        } else {
+            // Middle or last variant: just delete the line
+            vec![TextEdit {
+                range: Range {
+                    start: Position { line: variant_line as u32, character: 0 },
+                    end: Position { line: (variant_line + 1) as u32, character: 0 },
+                },
+                new_text: String::new(),
+            }]
+        };
+
+        changes.insert(uri.clone(), edit);
+
+        Ok(RemoveVariantResult::success(
+            &format!("Removed variant '{}'", variant_name),
+            changes,
+        ))
+    }
+
+    /// Find the enclosing function for a given position in a file
+    fn find_enclosing_function(&self, uri: &Url, position: Position) -> Option<(String, String)> {
+        // Find the module for this URI
+        let path = uri.to_file_path().ok()?;
+
+        for (module_name, module) in &self.modules {
+            if module.path == path {
+                // Find the function that contains this position
+                for symbol in &module.symbols {
+                    if symbol.kind == SymbolKind::FUNCTION {
+                        // Check if position is within this function's range
+                        if position.line >= symbol.range.start.line
+                            && position.line <= symbol.range.end.line
+                        {
+                            return Some((symbol.name.clone(), module_name.clone()));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    /// Get the module name from a URI
+    fn get_module_name_from_uri(&self, uri: &Url) -> String {
+        let path = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return String::new(),
+        };
+
+        for (module_name, module) in &self.modules {
+            if module.path == path {
+                return module_name.clone();
+            }
+        }
+
+        // Fallback: extract from path
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Build call chain from a function up to entry points
+    fn build_call_chain(
+        &self,
+        function_name: &str,
+        module_name: &str,
+        uri: &Url,
+        line: u32,
+        visited: &mut std::collections::HashSet<String>,
+        depth: usize,
+    ) -> Vec<CallChainEntry> {
+        const MAX_DEPTH: usize = 10;
+
+        if depth >= MAX_DEPTH {
+            return Vec::new();
+        }
+
+        let key = format!("{}:{}", module_name, function_name);
+        if visited.contains(&key) {
+            return Vec::new(); // Avoid cycles
+        }
+        visited.insert(key);
+
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_default();
+
+        let is_entry_point = ENTRY_POINTS.contains(&function_name);
+
+        let mut chain = vec![CallChainEntry {
+            function: function_name.to_string(),
+            file: file_name,
+            module_name: module_name.to_string(),
+            line,
+            is_entry_point,
+        }];
+
+        // If this is an entry point, stop here
+        if is_entry_point {
+            return chain;
+        }
+
+        // Find who calls this function
+        let refs = self.find_references(function_name, None);
+
+        for r in refs {
+            // Skip the definition and same-file self-references
+            if r.is_definition {
+                continue;
+            }
+
+            // Skip Evergreen files
+            if r.uri.path().contains("/Evergreen/") {
+                continue;
+            }
+
+            // Find the enclosing function of this reference
+            if let Some((caller_fn, caller_module)) =
+                self.find_enclosing_function(&r.uri, r.range.start)
+            {
+                // Don't recurse into the same function
+                if caller_fn == function_name && caller_module == module_name {
+                    continue;
+                }
+
+                // Recurse to find the caller's callers
+                let caller_chain = self.build_call_chain(
+                    &caller_fn,
+                    &caller_module,
+                    &r.uri,
+                    r.range.start.line,
+                    visited,
+                    depth + 1,
+                );
+
+                if !caller_chain.is_empty() {
+                    chain.extend(caller_chain);
+                    // Take the first valid chain we find (could be extended to find all paths)
+                    break;
+                }
+            }
+        }
+
+        chain
+    }
+
+    /// Get usages of a variant and determine if they are blocking
+    fn get_variant_usages(&self, source_uri: &Url, variant_name: &str) -> Vec<VariantUsage> {
+        let refs = self.find_references(variant_name, None);
+        let mut usages = Vec::new();
+
+        // Get the variant definition line to skip it
+        let source_path = source_uri.to_file_path().ok();
+        let source_content = source_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+
+        for r in refs {
+            // Skip the definition itself
+            if r.is_definition {
+                continue;
+            }
+
+            // Skip Evergreen migration files - they are historical snapshots
+            if r.uri.path().contains("/Evergreen/") {
+                continue;
+            }
+
+            // Skip the variant declaration in the type definition
+            // Check if this reference is in the type definition area
+            if r.uri == *source_uri {
+                if let Some(ref content) = source_content {
+                    let lines: Vec<&str> = content.lines().collect();
+                    if let Some(line) = lines.get(r.range.start.line as usize) {
+                        let trimmed = line.trim();
+                        // Skip lines that look like type variant declarations
+                        if (trimmed.starts_with('=') || trimmed.starts_with('|'))
+                            && trimmed.contains(variant_name)
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // ANY explicit usage of the variant is blocking
+            // If you use Red -> ... in a case, removing Red breaks that line
+            // Wildcards only help when the variant is NOT explicitly mentioned
+            let is_blocking = true;
+
+            let context = self.get_usage_context(&r.uri, r.range.start.line);
+
+            // Find the enclosing function and module
+            let (function_name, module_name) = self
+                .find_enclosing_function(&r.uri, r.range.start)
+                .unwrap_or_else(|| (String::new(), self.get_module_name_from_uri(&r.uri)));
+
+            // Build the call chain from this function up to entry points
+            let call_chain = if !function_name.is_empty() {
+                let mut visited = std::collections::HashSet::new();
+                self.build_call_chain(
+                    &function_name,
+                    &module_name,
+                    &r.uri,
+                    r.range.start.line,
+                    &mut visited,
+                    0,
+                )
+            } else {
+                Vec::new()
+            };
+
+            usages.push(VariantUsage {
+                uri: r.uri.to_string(),
+                line: r.range.start.line,
+                character: r.range.start.character,
+                is_blocking,
+                context,
+                function_name: if function_name.is_empty() {
+                    None
+                } else {
+                    Some(function_name)
+                },
+                module_name,
+                call_chain,
+            });
+        }
+
+        usages
+    }
+
+    /// Get context around a usage for display
+    fn get_usage_context(&self, uri: &Url, line: u32) -> String {
+        let path = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return String::new(),
+        };
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        };
+
+        content
+            .lines()
+            .nth(line as usize)
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default()
+    }
 }
 
 /// Result of a move function operation
@@ -1038,4 +1394,72 @@ pub struct MoveResult {
     pub target_module: String,
     pub function_name: String,
     pub references_updated: usize,
+}
+
+/// Entry in a call chain showing how a function is called
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CallChainEntry {
+    pub function: String,
+    pub file: String,
+    pub module_name: String,
+    pub line: u32,
+    pub is_entry_point: bool,
+}
+
+/// Known entry points in Elm/Lamdera apps
+const ENTRY_POINTS: &[&str] = &[
+    "app",
+    "main",
+    "update",
+    "updateLoaded",
+    "updateFromBackend",
+    "updateLoadedFromBackend",
+    "updateFromFrontend",
+    "view",
+    "viewLoaded",
+    "viewPage",
+    "subscriptions",
+    "init",
+];
+
+/// Information about a variant usage
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VariantUsage {
+    pub uri: String,
+    pub line: u32,
+    pub character: u32,
+    pub is_blocking: bool,
+    pub context: String,
+    pub function_name: Option<String>,
+    pub module_name: String,
+    pub call_chain: Vec<CallChainEntry>,
+}
+
+/// Result of a remove variant operation
+#[derive(Debug)]
+pub struct RemoveVariantResult {
+    pub success: bool,
+    pub message: String,
+    pub blocking_usages: Vec<VariantUsage>,
+    pub changes: Option<HashMap<Url, Vec<TextEdit>>>,
+}
+
+impl RemoveVariantResult {
+    pub fn error(message: &str) -> Self {
+        Self {
+            success: false,
+            message: message.to_string(),
+            blocking_usages: Vec::new(),
+            changes: None,
+        }
+    }
+
+    pub fn success(message: &str, changes: HashMap<Url, Vec<TextEdit>>) -> Self {
+        Self {
+            success: true,
+            message: message.to_string(),
+            blocking_usages: Vec::new(),
+            changes: Some(changes),
+        }
+    }
 }

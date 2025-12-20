@@ -6,13 +6,15 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::diagnostics::DiagnosticsProvider;
-use crate::document::Document;
+use crate::document::{Document, VariantInfo};
 use crate::parser::ElmParser;
 use crate::workspace::Workspace;
 
 // Custom commands
 const CMD_MOVE_FUNCTION: &str = "elm.moveFunction";
 const CMD_GET_DIAGNOSTICS: &str = "elm.getDiagnostics";
+const CMD_PREPARE_REMOVE_VARIANT: &str = "elm.prepareRemoveVariant";
+const CMD_REMOVE_VARIANT: &str = "elm.removeVariant";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -114,6 +116,33 @@ impl ElmLanguageServer {
             None
         }
     }
+
+    fn get_variant_at_position(&self, uri: &Url, position: Position) -> Option<(String, VariantInfo, usize, usize, Vec<String>)> {
+        if let Some(doc) = self.documents.get(uri) {
+            for symbol in &doc.symbols {
+                if symbol.kind == SymbolKind::ENUM {
+                    for (idx, variant) in symbol.variants.iter().enumerate() {
+                        if variant.range.start.line == position.line
+                            && position.character >= variant.range.start.character
+                            && position.character <= variant.range.end.character
+                        {
+                            let all_variants: Vec<String> = symbol.variants.iter()
+                                .map(|v| v.name.clone())
+                                .collect();
+                            return Some((
+                                symbol.name.clone(),
+                                variant.clone(),
+                                idx,
+                                symbol.variants.len(),
+                                all_variants,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -183,7 +212,12 @@ impl LanguageServer for ElmLanguageServer {
                 })),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec![CMD_MOVE_FUNCTION.to_string()],
+                    commands: vec![
+                        CMD_MOVE_FUNCTION.to_string(),
+                        CMD_GET_DIAGNOSTICS.to_string(),
+                        CMD_PREPARE_REMOVE_VARIANT.to_string(),
+                        CMD_REMOVE_VARIANT.to_string(),
+                    ],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -770,6 +804,161 @@ impl LanguageServer for ElmLanguageServer {
                     "uri": file_uri,
                     "diagnostics": diagnostics_json
                 })))
+            }
+            CMD_PREPARE_REMOVE_VARIANT => {
+                // Expected arguments: [uri, line, character]
+                if params.arguments.len() != 3 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 3 arguments: uri, line, character"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let character: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let position = Position { line, character };
+
+                if let Some((type_name, variant, idx, total, all_variants)) = self.get_variant_at_position(&uri, position) {
+                    // Count usages
+                    let usages_count = if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.find_references(&variant.name, None).len()
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+
+                    let can_remove = total > 1;
+
+                    // Other variants (excluding the one being removed)
+                    let other_variants: Vec<&String> = all_variants.iter()
+                        .filter(|v| *v != &variant.name)
+                        .collect();
+
+                    Ok(Some(serde_json::json!({
+                        "success": true,
+                        "typeName": type_name,
+                        "variantName": variant.name,
+                        "variantIndex": idx,
+                        "totalVariants": total,
+                        "otherVariants": other_variants,
+                        "usagesCount": usages_count,
+                        "canRemove": can_remove,
+                        "range": {
+                            "start": { "line": variant.range.start.line, "character": variant.range.start.character },
+                            "end": { "line": variant.range.end.line, "character": variant.range.end.character }
+                        }
+                    })))
+                } else {
+                    Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "No variant found at this position"
+                    })))
+                }
+            }
+            CMD_REMOVE_VARIANT => {
+                // Expected arguments: [uri, line, character]
+                if params.arguments.len() != 3 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 3 arguments: uri, line, character"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let character: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let position = Position { line, character };
+
+                if let Some((type_name, variant, idx, total, all_variants)) = self.get_variant_at_position(&uri, position) {
+                    // Other variants (excluding the one being removed)
+                    let other_variants: Vec<&String> = all_variants.iter()
+                        .filter(|v| *v != &variant.name)
+                        .collect();
+
+                    // Execute removal
+                    let remove_result = {
+                        if let Ok(ws) = self.workspace.read() {
+                            if let Some(workspace) = ws.as_ref() {
+                                workspace.remove_variant(&uri, &type_name, &variant.name, idx, total)
+                            } else {
+                                Err(anyhow::anyhow!("Workspace not initialized"))
+                            }
+                        } else {
+                            Err(anyhow::anyhow!("Could not acquire workspace lock"))
+                        }
+                    };
+
+                    match remove_result {
+                        Ok(result) => {
+                            if result.success {
+                                // Return the changes for the caller to apply
+                                // (instead of trying to apply via workspace/applyEdit which may not be supported)
+                                let changes_json = if let Some(ref changes) = result.changes {
+                                    let mut changes_map = serde_json::Map::new();
+                                    for (uri, edits) in changes {
+                                        let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                            serde_json::json!({
+                                                "range": {
+                                                    "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                                    "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                                },
+                                                "newText": edit.new_text
+                                            })
+                                        }).collect();
+                                        changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                                    }
+                                    Some(serde_json::Value::Object(changes_map))
+                                } else {
+                                    None
+                                };
+
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "message": result.message,
+                                    "typeName": type_name,
+                                    "variantName": variant.name,
+                                    "changes": changes_json
+                                })))
+                            } else {
+                                Ok(Some(serde_json::json!({
+                                    "success": false,
+                                    "error": result.message,
+                                    "typeName": type_name,
+                                    "variantName": variant.name,
+                                    "otherVariants": other_variants,
+                                    "blockingUsages": result.blocking_usages
+                                })))
+                            }
+                        }
+                        Err(e) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "error": e.to_string()
+                            })))
+                        }
+                    }
+                } else {
+                    Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "No variant found at this position"
+                    })))
+                }
             }
             _ => {
                 Ok(Some(serde_json::json!({
