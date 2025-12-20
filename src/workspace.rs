@@ -1284,7 +1284,7 @@ impl Workspace {
     }
 
     /// Get usages of a variant and determine if they are blocking
-    fn get_variant_usages(&self, source_uri: &Url, variant_name: &str) -> Vec<VariantUsage> {
+    pub fn get_variant_usages(&self, source_uri: &Url, variant_name: &str) -> Vec<VariantUsage> {
         let refs = self.find_references(variant_name, None);
         let mut usages = Vec::new();
 

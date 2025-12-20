@@ -826,18 +826,19 @@ impl LanguageServer for ElmLanguageServer {
                 let position = Position { line, character };
 
                 if let Some((type_name, variant, idx, total, all_variants)) = self.get_variant_at_position(&uri, position) {
-                    // Count usages
-                    let usages_count = if let Ok(ws) = self.workspace.read() {
+                    // Get detailed blocking usages (same as remove_variant)
+                    let blocking_usages = if let Ok(ws) = self.workspace.read() {
                         if let Some(workspace) = ws.as_ref() {
-                            workspace.find_references(&variant.name, None).len()
+                            workspace.get_variant_usages(&uri, &variant.name)
                         } else {
-                            0
+                            Vec::new()
                         }
                     } else {
-                        0
+                        Vec::new()
                     };
 
-                    let can_remove = total > 1;
+                    let usages_count = blocking_usages.len();
+                    let can_remove = total > 1 && usages_count == 0;
 
                     // Other variants (excluding the one being removed)
                     let other_variants: Vec<&String> = all_variants.iter()
@@ -853,6 +854,7 @@ impl LanguageServer for ElmLanguageServer {
                         "otherVariants": other_variants,
                         "usagesCount": usages_count,
                         "canRemove": can_remove,
+                        "blockingUsages": blocking_usages,
                         "range": {
                             "start": { "line": variant.range.start.line, "character": variant.range.start.character },
                             "end": { "line": variant.range.end.line, "character": variant.range.end.character }
