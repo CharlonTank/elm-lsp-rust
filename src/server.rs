@@ -5,18 +5,21 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::diagnostics::DiagnosticsProvider;
 use crate::document::Document;
 use crate::parser::ElmParser;
 use crate::workspace::Workspace;
 
-// Custom command for move function
+// Custom commands
 const CMD_MOVE_FUNCTION: &str = "elm.moveFunction";
+const CMD_GET_DIAGNOSTICS: &str = "elm.getDiagnostics";
 
 pub struct ElmLanguageServer {
     client: Client,
     documents: DashMap<Url, Document>,
     parser: ElmParser,
     workspace: RwLock<Option<Workspace>>,
+    diagnostics_provider: RwLock<DiagnosticsProvider>,
 }
 
 impl ElmLanguageServer {
@@ -26,6 +29,7 @@ impl ElmLanguageServer {
             documents: DashMap::new(),
             parser: ElmParser::new(),
             workspace: RwLock::new(None),
+            diagnostics_provider: RwLock::new(DiagnosticsProvider::new()),
         }
     }
 
@@ -57,16 +61,36 @@ impl ElmLanguageServer {
             .await;
     }
 
-    fn get_diagnostics(&self, _uri: &Url) -> Vec<Diagnostic> {
-        Vec::new()
+    fn get_diagnostics(&self, uri: &Url) -> Vec<Diagnostic> {
+        if let Ok(provider) = self.diagnostics_provider.read() {
+            provider.get_diagnostics(uri)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Get the word at a position in the document
     fn get_word_at_position(&self, uri: &Url, position: Position) -> Option<String> {
-        let doc = self.documents.get(uri)?;
-        let line = doc.get_line(position.line)?;
-        let col = position.character as usize;
+        // Try from open document first
+        if let Some(doc) = self.documents.get(uri) {
+            if let Some(line) = doc.get_line(position.line) {
+                return self.extract_word_from_line(&line, position.character as usize);
+            }
+        }
 
+        // Fallback: read from disk if document not open
+        if let Ok(path) = uri.to_file_path() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(line) = content.lines().nth(position.line as usize) {
+                    return self.extract_word_from_line(line, position.character as usize);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn extract_word_from_line(&self, line: &str, col: usize) -> Option<String> {
         if col >= line.len() {
             return None;
         }
@@ -101,6 +125,12 @@ impl LanguageServer for ElmLanguageServer {
         if let Some(root_uri) = params.root_uri {
             if let Ok(path) = root_uri.to_file_path() {
                 tracing::info!("Initializing workspace at {:?}", path);
+
+                // Set diagnostics provider workspace root
+                if let Ok(mut diag) = self.diagnostics_provider.write() {
+                    diag.set_workspace_root(&path.to_string_lossy());
+                }
+
                 let mut workspace = Workspace::new(path);
                 if let Err(e) = workspace.initialize() {
                     tracing::error!("Failed to initialize workspace: {}", e);
@@ -117,6 +147,12 @@ impl LanguageServer for ElmLanguageServer {
         } else if let Some(root_path) = params.root_path {
             let path = PathBuf::from(&root_path);
             tracing::info!("Initializing workspace at {:?} (from root_path)", path);
+
+            // Set diagnostics provider workspace root
+            if let Ok(mut diag) = self.diagnostics_provider.write() {
+                diag.set_workspace_root(&root_path);
+            }
+
             let mut workspace = Workspace::new(path);
             if let Err(e) = workspace.initialize() {
                 tracing::error!("Failed to initialize workspace: {}", e);
@@ -501,8 +537,16 @@ impl LanguageServer for ElmLanguageServer {
             // Get cross-file references from workspace
             if let Ok(ws) = self.workspace.read() {
                 if let Some(workspace) = ws.as_ref() {
-                    // Add definition location
-                    if let Some(symbol) = workspace.find_definition(&name) {
+                    // Add definition location - prefer definition in the current file, skip Evergreen
+                    let definition = workspace.get_symbols(&name)
+                        .into_iter()
+                        .find(|s| &s.definition_uri == uri && !s.definition_uri.path().contains("/Evergreen/"))
+                        .or_else(|| {
+                            workspace.find_definition(&name)
+                                .filter(|s| !s.definition_uri.path().contains("/Evergreen/"))
+                        });
+
+                    if let Some(symbol) = definition {
                         changes
                             .entry(symbol.definition_uri.clone())
                             .or_insert_with(Vec::new)
@@ -512,9 +556,13 @@ impl LanguageServer for ElmLanguageServer {
                             });
                     }
 
-                    // Add all references
+                    // Add all references (skip Evergreen migration files)
                     let refs = workspace.find_references(&name, None);
                     for r in refs {
+                        // Skip Evergreen files - they are migration snapshots
+                        if r.uri.path().contains("/Evergreen/") {
+                            continue;
+                        }
                         changes
                             .entry(r.uri)
                             .or_insert_with(Vec::new)
@@ -680,6 +728,48 @@ impl LanguageServer for ElmLanguageServer {
                         })))
                     }
                 }
+            }
+            CMD_GET_DIAGNOSTICS => {
+                // Expected arguments: [file_uri]
+                if params.arguments.is_empty() {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 1 argument: file_uri"
+                    })));
+                }
+
+                let file_uri: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&file_uri)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                tracing::info!("Getting diagnostics for {}", uri);
+
+                let diagnostics = self.get_diagnostics(&uri);
+
+                // Convert diagnostics to JSON-serializable format
+                let diagnostics_json: Vec<serde_json::Value> = diagnostics.iter().map(|d| {
+                    serde_json::json!({
+                        "range": {
+                            "start": { "line": d.range.start.line, "character": d.range.start.character },
+                            "end": { "line": d.range.end.line, "character": d.range.end.character }
+                        },
+                        "severity": match d.severity {
+                            Some(DiagnosticSeverity::ERROR) => 1,
+                            Some(DiagnosticSeverity::WARNING) => 2,
+                            Some(DiagnosticSeverity::INFORMATION) => 3,
+                            Some(DiagnosticSeverity::HINT) => 4,
+                            _ => 1
+                        },
+                        "message": d.message,
+                        "source": d.source
+                    })
+                }).collect();
+
+                Ok(Some(serde_json::json!({
+                    "uri": file_uri,
+                    "diagnostics": diagnostics_json
+                })))
             }
             _ => {
                 Ok(Some(serde_json::json!({

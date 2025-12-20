@@ -52,10 +52,10 @@ pub struct GlobalSymbol {
 pub struct Workspace {
     pub root_path: PathBuf,
     pub source_dirs: Vec<PathBuf>,
-    pub modules: HashMap<String, ElmModule>,  // module_name -> module
-    pub symbols: HashMap<String, Vec<GlobalSymbol>>,  // symbol_name -> definitions
-    pub references: HashMap<String, Vec<SymbolReference>>,  // "ModuleName.symbol" -> references
-    parser: ElmParser,
+    pub modules: HashMap<String, ElmModule>,
+    pub symbols: HashMap<String, Vec<GlobalSymbol>>,
+    pub references: HashMap<String, Vec<SymbolReference>>,
+    pub parser: ElmParser,
 }
 
 impl Workspace {
@@ -421,23 +421,51 @@ impl Workspace {
     ) {
         match node.kind() {
             "value_qid" | "upper_case_qid" => {
-                let text = &source[node.byte_range()];
-                let range = Range {
-                    start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
-                    end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
-                };
+                // Skip module names in import clauses (but allow exposed items)
+                if !self.is_module_name_in_import(node) {
+                    let text = &source[node.byte_range()];
 
-                // Try to resolve the reference
-                let resolved_name = self.resolve_reference(text, imports);
+                    // For qualified names like "Module.symbol", only track the symbol part
+                    // The range should only cover the last part (after the last dot)
+                    if text.contains('.') {
+                        // Extract just the symbol name (last part after dot)
+                        let symbol_name = text.rsplit('.').next().unwrap_or(text);
+                        let symbol_start_col = node.end_position().column - symbol_name.len();
 
-                self.references
-                    .entry(resolved_name)
-                    .or_insert_with(Vec::new)
-                    .push(SymbolReference {
-                        uri: uri.clone(),
-                        range,
-                        is_definition: false,
-                    });
+                        let range = Range {
+                            start: Position::new(node.end_position().row as u32, symbol_start_col as u32),
+                            end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+                        };
+
+                        let resolved_name = self.resolve_reference(text, imports);
+
+                        self.references
+                            .entry(resolved_name)
+                            .or_insert_with(Vec::new)
+                            .push(SymbolReference {
+                                uri: uri.clone(),
+                                range,
+                                is_definition: false,
+                            });
+                    } else {
+                        // Unqualified name - track the whole thing
+                        let range = Range {
+                            start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
+                            end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+                        };
+
+                        let resolved_name = self.resolve_reference(text, imports);
+
+                        self.references
+                            .entry(resolved_name)
+                            .or_insert_with(Vec::new)
+                            .push(SymbolReference {
+                                uri: uri.clone(),
+                                range,
+                                is_definition: false,
+                            });
+                    }
+                }
             }
             "lower_case_identifier" | "upper_case_identifier" => {
                 // Only track if it's a reference (not in declaration context)
@@ -469,13 +497,47 @@ impl Workspace {
         }
     }
 
+    fn is_module_name_in_import(&self, node: tree_sitter::Node) -> bool {
+        // Check if this is a module name directly under import_clause, as_clause, or module_declaration
+        // But NOT if it's in an exposing_list
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "import_clause" {
+                return true;
+            }
+            if parent.kind() == "as_clause" {
+                return true;
+            }
+            if parent.kind() == "module_declaration" {
+                return true;
+            }
+        }
+        false
+    }
+
     fn is_in_declaration_context(&self, node: tree_sitter::Node) -> bool {
         let mut current = node.parent();
         while let Some(parent) = current {
             match parent.kind() {
                 "function_declaration_left" | "type_declaration" |
                 "type_alias_declaration" | "port_annotation" |
-                "module_declaration" | "import_clause" => return true,
+                "module_declaration" => return true,
+                // If inside a qualified identifier, this is a module prefix, not a symbol reference
+                "value_qid" | "upper_case_qid" => return true,
+                // For import clauses, skip the module name but allow exposed items
+                "import_clause" => {
+                    // Check if we're in an exposing_list - those ARE valid references
+                    let mut check = node.parent();
+                    while let Some(p) = check {
+                        if p.kind() == "exposing_list" || p.kind() == "exposed_type" || p.kind() == "exposed_value" {
+                            return false; // This is an exposed item, not a declaration
+                        }
+                        if p.kind() == "import_clause" {
+                            break;
+                        }
+                        check = p.parent();
+                    }
+                    return true; // Module name in import, skip it
+                }
                 _ => {}
             }
             current = parent.parent();

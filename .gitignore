@@ -1,1 +1,8 @@
 /target
+node_modules/
+tests/node_modules/
+tests/fixture/elm-stuff/
+tests/fixture-backup/
+*.elmi
+*.elmo
+.DS_Store

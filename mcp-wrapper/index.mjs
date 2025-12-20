@@ -217,9 +217,11 @@ class ElmLspClient {
   }
 
   async getDiagnostics(uri) {
-    // Diagnostics are pushed via notifications, not pull-based
-    // For now, return empty - we'd need to track publishDiagnostics notifications
-    return [];
+    // Use custom command to get on-demand diagnostics
+    return this.sendRequest("workspace/executeCommand", {
+      command: "elm.getDiagnostics",
+      arguments: [uri],
+    });
   }
 
   async workspaceSymbol(query) {
@@ -542,22 +544,28 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file"),
   },
   async ({ file_path }) => {
-    // Use lamdera make to get diagnostics
-    const { exec } = await import("child_process");
-    const { promisify } = await import("util");
-    const execAsync = promisify(exec);
-
     const workspaceRoot = findWorkspaceRoot(file_path);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     try {
-      await execAsync(`cd "${workspaceRoot}" && lamdera make "${file_path}" --output=/dev/null 2>&1`);
+      const client = await ensureClient(workspaceRoot);
+      const uri = `file://${file_path}`;
+      const result = await client.getDiagnostics(uri);
+
+      if (result && result.diagnostics && result.diagnostics.length > 0) {
+        const messages = result.diagnostics.map((d) => {
+          const line = d.range?.start?.line ?? 0;
+          const col = d.range?.start?.character ?? 0;
+          return `Line ${line + 1}:${col + 1} - ${d.message}`;
+        });
+        return { content: [{ type: "text", text: messages.join("\n\n") }] };
+      }
+
       return { content: [{ type: "text", text: "No errors or warnings" }] };
     } catch (error) {
-      // Parse the error output
-      return { content: [{ type: "text", text: error.stdout || error.stderr || error.message }] };
+      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
     }
   }
 );

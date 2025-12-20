@@ -5,6 +5,14 @@ edition = "2021"
 description = "A fast Elm Language Server written in Rust"
 license = "MIT"
 
+[lib]
+name = "elm_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "elm_lsp"
+path = "src/main.rs"
+
 [dependencies]
 # LSP protocol
 tower-lsp = "0.20"
@@ -33,6 +41,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 anyhow = "1"
 thiserror = "1"
+
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
 
 [build-dependencies]
 cc = "1"

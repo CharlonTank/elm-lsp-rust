@@ -2,12 +2,7 @@ use anyhow::Result;
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
-mod document;
-mod parser;
-mod server;
-mod workspace;
-
-use server::ElmLanguageServer;
+use elm_lsp::server::ElmLanguageServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
