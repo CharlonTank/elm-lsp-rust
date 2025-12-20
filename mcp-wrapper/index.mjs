@@ -928,15 +928,49 @@ server.tool(
     }
 
     const otherVariants = result.otherVariants?.join(", ") || "none";
+    const blockingUsages = result.blockingUsages || [];
+
+    let text = `Variant: ${result.variantName} (${result.variantIndex + 1}/${result.totalVariants} in type ${result.typeName})\n` +
+               `Other variants: [${otherVariants}]\n` +
+               `Usages: ${result.usagesCount}\n` +
+               `Can remove: ${result.canRemove ? "Yes" : "No"}`;
+
+    if (!result.canRemove && result.totalVariants <= 1) {
+      text += " (only variant)";
+    } else if (!result.canRemove && blockingUsages.length > 0) {
+      text += " (has usages)";
+    }
+
+    text += `\nLine: ${result.range.start.line + 1}:${result.range.start.character}`;
+
+    // Add blocking usages with call chain context
+    if (blockingUsages.length > 0) {
+      text += `\n\nBlocking usages:\n`;
+      text += blockingUsages.slice(0, 10).map((u, idx) => {
+        const func = u.function_name || "(top-level)";
+        let uText = `  ${idx + 1}. ${u.module_name}.${func}:${u.line + 1}\n`;
+        uText += `     Context: "${u.context}"\n`;
+
+        if (u.call_chain && u.call_chain.length > 0) {
+          uText += `     Call chain:\n`;
+          u.call_chain.forEach((c, i) => {
+            const marker = c.is_entry_point ? " [ENTRY]" : "";
+            const indent = "       " + "  ".repeat(i);
+            uText += `${indent}→ ${c.module_name}.${c.function}:${c.line + 1}${marker}\n`;
+          });
+        }
+        return uText;
+      }).join("\n");
+
+      if (blockingUsages.length > 10) {
+        text += `\n  ... and ${blockingUsages.length - 10} more usages`;
+      }
+    }
 
     return {
       content: [{
         type: "text",
-        text: `Variant: ${result.variantName} (${result.variantIndex + 1}/${result.totalVariants} in type ${result.typeName})\n` +
-              `Other variants: [${otherVariants}]\n` +
-              `Usages: ${result.usagesCount}\n` +
-              `Can remove: ${result.canRemove ? "Yes" : "No (only variant)"}\n` +
-              `Line: ${result.range.start.line + 1}:${result.range.start.character}`,
+        text,
       }],
     };
   }
