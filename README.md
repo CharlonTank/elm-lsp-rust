@@ -2,6 +2,58 @@
 
 A fast Elm Language Server written in Rust, designed for Claude Code integration via MCP.
 
+## Installation
+
+### Via Claude Code Marketplace (Recommended)
+
+This plugin is distributed through the [elm-marketplace](https://github.com/CharlonTank/elm-lsp-plugin):
+
+```bash
+# Add the Elm marketplace
+claude plugin marketplace add https://github.com/CharlonTank/elm-lsp-plugin
+
+# Install this plugin
+claude plugin install elm-lsp-rust@elm-marketplace
+```
+
+Then restart Claude Code.
+
+### How Plugin Distribution Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     elm-lsp-plugin                              │
+│            (Marketplace Repository)                             │
+│     https://github.com/CharlonTank/elm-lsp-plugin              │
+│                                                                 │
+│  .claude-plugin/marketplace.json                                │
+│  └── plugins: [                                                 │
+│        { name: "elm-lsp-rust",                                  │
+│          source: "CharlonTank/elm-lsp-rust",                   │
+│          version: "0.3.8" }                                     │
+│      ]                                                          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ references
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     elm-lsp-rust                                │
+│              (This Repository - Plugin)                         │
+│      https://github.com/CharlonTank/elm-lsp-rust               │
+│                                                                 │
+│  .claude-plugin/plugin.json ─► Plugin metadata                  │
+│  src/                       ─► Rust LSP server                  │
+│  mcp-wrapper/               ─► MCP server (bridges MCP↔LSP)     │
+│  scripts/setup.sh           ─► Builds Rust binary on install    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+When you install via the marketplace:
+1. Claude Code fetches plugin metadata from `elm-lsp-plugin/marketplace.json`
+2. The marketplace points to this repository (`elm-lsp-rust`)
+3. Claude Code clones this repo and runs `scripts/setup.sh` to build the Rust binary
+4. The MCP wrapper (`mcp-wrapper/index.mjs`) becomes available as `elm-lsp-rust` MCP server
+
 ## Features
 
 | Feature | Description |
@@ -9,20 +61,21 @@ A fast Elm Language Server written in Rust, designed for Claude Code integration
 | **Hover** | Type signatures and documentation |
 | **Go to Definition** | Jump to symbol definitions |
 | **Find References** | All usages across workspace |
-| **Rename** | Safe rename across all files |
+| **Rename** | Safe rename across all files (including exposing lists) |
 | **Document Symbols** | List all symbols in a file |
 | **Workspace Symbols** | Search symbols across project |
 | **Diagnostics** | Compiler errors via `elm make` / `lamdera make` |
 | **Formatting** | Via `elm-format` |
 | **Code Actions** | Quick fixes and refactorings |
 | **Move Function** | Move function to another module with import updates |
+| **File Rename/Move** | Rename or move Elm files with module/import updates |
 | **Remove Variant** | Smart union type variant removal |
 
 ### Remove Variant (Unique Feature)
 
 Intelligently removes union type variants:
 
-- **Blocks** if variant is used as a constructor (you must replace manually)
+- **Replaces** constructor usages with `Debug.todo "VARIANT REMOVAL DONE: <original>"`
 - **Auto-removes** pattern match branches using the variant
 - **Auto-removes** useless wildcards that would cover nothing after removal
 - **Errors** if trying to remove the only variant from a type
@@ -31,34 +84,10 @@ Intelligently removes union type variants:
 type Color = Red | Green | Blue | Unused
 
 -- Remove "Unused": automatically removes pattern branches
--- Remove "Blue": blocked if `Blue` is used as constructor anywhere
+-- Remove "Blue": constructor usages replaced with Debug.todo
 ```
 
-## Installation
-
-### As Claude Code Plugin
-
-The LSP is bundled with the elm-lsp-rust plugin:
-
-```bash
-# Plugin is installed at:
-~/.claude/plugins/marketplaces/elm-marketplace/plugins/elm-lsp-rust/
-```
-
-### Building from Source
-
-```bash
-cd elm-lsp-rust
-cargo build --release
-
-# Binary at: target/release/elm_lsp
-```
-
-## Usage
-
-### With Claude Code
-
-The MCP wrapper exposes these tools:
+## MCP Tools
 
 | Tool | Description |
 |------|-------------|
@@ -70,22 +99,28 @@ The MCP wrapper exposes these tools:
 | `elm_diagnostics` | Get compiler errors |
 | `elm_format` | Format file |
 | `elm_code_actions` | Get available actions |
+| `elm_apply_code_action` | Apply a code action by title |
 | `elm_move_function` | Move function to module |
+| `elm_rename_file` | Rename an Elm file |
+| `elm_move_file` | Move an Elm file to a new location |
 | `elm_prepare_remove_variant` | Analyze variant usages |
 | `elm_remove_variant` | Remove variant from type |
 
-### Standalone LSP
+## Building from Source
 
 ```bash
-./target/release/elm_lsp
-```
+cd elm-lsp-rust
+cargo build --release
 
-Communicates via stdio using LSP JSON-RPC protocol.
+# Binary at: target/release/elm_lsp
+```
 
 ## Architecture
 
 ```
 elm-lsp-rust/
+├── .claude-plugin/
+│   └── plugin.json      # Plugin metadata for marketplace
 ├── src/
 │   ├── main.rs          # Entry point
 │   ├── server.rs        # LSP protocol (tower-lsp)
@@ -95,8 +130,10 @@ elm-lsp-rust/
 │   └── diagnostics.rs   # Elm compiler integration
 ├── mcp-wrapper/         # MCP server (Node.js)
 │   └── index.mjs        # Translates MCP <-> LSP
-├── commands/            # Slash commands
-└── tests/               # Test suite
+├── scripts/
+│   └── setup.sh         # Build script run on plugin install
+├── skills/              # Claude Code skills
+└── tests/               # Test suite (122 tests)
 ```
 
 ### Key Design Decisions
@@ -109,41 +146,21 @@ elm-lsp-rust/
 ## Testing
 
 ```bash
-# Run unit tests
+# Run fixture tests (23 tests)
 node tests/run_tests.mjs
 
-# Run comprehensive tests (real-world codebase)
+# Run comprehensive tests on real-world codebase (99 tests)
 node tests/test_meetdown_comprehensive.mjs
+
+# Run all tests
+node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
 ```
 
-### Test Coverage
-
-- 21 unit tests (basic LSP operations)
-- 61 comprehensive tests (real Elm project)
-
-Tests cover: hover, definition, references, symbols, rename, diagnostics, completion, code actions, move function, remove variant (including edge cases).
-
-## Development
-
-### Deploying to Plugin
-
-```bash
-cargo build --release
-cp target/release/elm_lsp ~/.claude/plugins/marketplaces/elm-marketplace/plugins/elm-lsp-rust/target/release/
-cp mcp-wrapper/index.mjs ~/.claude/plugins/marketplaces/elm-marketplace/plugins/elm-lsp-rust/server/
-```
-
-Then restart Claude Code.
-
-### Running Benchmarks
-
-```bash
-cargo run --release --bin benchmark -- /path/to/elm/project
-```
+All 122 tests cover: hover, definition, references, symbols, rename, diagnostics, completion, code actions, move function, file rename/move, and remove variant (including edge cases).
 
 ## Related
 
-- [elm-claude-improvements](https://github.com/CharlonTank/elm-lsp-rust) - Parent project with full architecture docs
+- [elm-lsp-plugin](https://github.com/CharlonTank/elm-lsp-plugin) - Marketplace that distributes this plugin
 - [elm-language-server](https://github.com/elm-tooling/elm-language-server) - Original TypeScript LSP
 - [tree-sitter-elm](https://github.com/elm-tooling/tree-sitter-elm) - Elm grammar
 - [tower-lsp](https://github.com/ebkalderon/tower-lsp) - Rust LSP framework
