@@ -170,7 +170,7 @@ impl Workspace {
                     module_name: module_name.clone(),
                     kind: symbol.kind,
                     definition_uri: uri.clone(),
-                    definition_range: symbol.range,
+                    definition_range: symbol.definition_range.unwrap_or(symbol.range),
                     signature: symbol.signature.clone(),
                 };
 
@@ -234,7 +234,7 @@ impl Workspace {
                     module_name: module_name.clone(),
                     kind: symbol.kind,
                     definition_uri: uri.clone(),
-                    definition_range: symbol.range,
+                    definition_range: symbol.definition_range.unwrap_or(symbol.range),
                     signature: symbol.signature.clone(),
                 };
 

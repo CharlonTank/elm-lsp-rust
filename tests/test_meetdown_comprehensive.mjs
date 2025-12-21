@@ -214,6 +214,14 @@ class LSPClient {
     return result;
   }
 
+  async rename(path, line, char, newName) {
+    return this.send("textDocument/rename", {
+      textDocument: { uri: `file://${path}` },
+      position: { line, character: char },
+      newName
+    });
+  }
+
   stop() { this.process?.kill(); }
 }
 
@@ -1124,6 +1132,78 @@ async function main() {
     } catch (e) {
       logTest("Correctly threw error", e.message.includes(".elm") || true);
     }
+    console.log();
+  }
+
+  // ===== TEST 38: Rename function - should NOT corrupt file =====
+  console.log(`${CYAN}Test 38: Rename function (newEvent → createEvent) - no corruption${RESET}`);
+  {
+    restoreMeetdown(); // Start fresh
+    const eventFile = join(MEETDOWN, "src/Event.elm");
+    await client.openFile(eventFile);
+
+    // Read original content to verify function body exists
+    const originalContent = readFileSync(eventFile, "utf-8");
+    const originalHasFunctionBody = originalContent.includes("groupOwnerId eventName description_ eventType_ startTime_ duration_ createdAt maxAttendees_");
+    logTest("Original has function body", originalHasFunctionBody);
+
+    // Rename newEvent to createEvent (line 69, 0-indexed = function definition)
+    const renameResult = await client.rename(eventFile, 69, 0, "createEvent");
+    logTest("Rename returned result", renameResult !== null);
+
+    if (renameResult?.changes) {
+      // Apply the edits manually like MCP wrapper does
+      for (const [uri, edits] of Object.entries(renameResult.changes)) {
+        const filePath = uri.replace("file://", "");
+        if (!existsSync(filePath)) continue;
+
+        let content = readFileSync(filePath, "utf-8");
+        const lines = content.split("\n");
+
+        // Sort edits in reverse order (bottom to top)
+        const sortedEdits = [...edits].sort((a, b) => {
+          if (a.range.start.line !== b.range.start.line) {
+            return b.range.start.line - a.range.start.line;
+          }
+          return b.range.start.character - a.range.start.character;
+        });
+
+        for (const edit of sortedEdits) {
+          const { start, end } = edit.range;
+          const startLine = lines[start.line] || "";
+          const endLine = lines[end.line] || "";
+          const before = startLine.substring(0, start.character);
+          const after = endLine.substring(end.character);
+
+          if (start.line === end.line) {
+            lines[start.line] = before + edit.newText + after;
+          } else {
+            lines[start.line] = before + edit.newText + after;
+            lines.splice(start.line + 1, end.line - start.line);
+          }
+        }
+
+        writeFileSync(filePath, lines.join("\n"));
+      }
+
+      // Verify file is NOT corrupted - function body should still exist
+      const afterContent = readFileSync(eventFile, "utf-8");
+      const hasCreateEvent = afterContent.includes("createEvent :");
+      const hasFunctionBody = afterContent.includes("groupOwnerId eventName description_ eventType_ startTime_ duration_ createdAt maxAttendees_");
+
+      logTest("Has createEvent type signature", hasCreateEvent);
+      logTest("Function body preserved (NOT corrupted)", hasFunctionBody);
+
+      if (!hasFunctionBody) {
+        console.log(`     ${RED}CRITICAL: File was corrupted - function body deleted!${RESET}`);
+      }
+
+      console.log(`     → Edits applied to ${Object.keys(renameResult.changes).length} files`);
+    } else {
+      logTest("Changes object exists", false);
+    }
+
+    restoreMeetdown(); // Restore after test
     console.log();
   }
 

@@ -567,7 +567,18 @@ impl LanguageServer for ElmLanguageServer {
                                 .filter(|s| !s.definition_uri.path().contains("/Evergreen/"))
                         });
 
+                    // Track ranges we've already added to avoid duplicates
+                    let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> = std::collections::HashSet::new();
+
                     if let Some(symbol) = definition {
+                        let key = (
+                            symbol.definition_uri.to_string(),
+                            symbol.definition_range.start.line,
+                            symbol.definition_range.start.character,
+                            symbol.definition_range.end.line,
+                            symbol.definition_range.end.character,
+                        );
+                        seen_ranges.insert(key);
                         changes
                             .entry(symbol.definition_uri.clone())
                             .or_insert_with(Vec::new)
@@ -577,13 +588,25 @@ impl LanguageServer for ElmLanguageServer {
                             });
                     }
 
-                    // Add all references (skip Evergreen migration files)
+                    // Add all references (skip Evergreen migration files and duplicates)
                     let refs = workspace.find_references(&name, None);
                     for r in refs {
                         // Skip Evergreen files - they are migration snapshots
                         if r.uri.path().contains("/Evergreen/") {
                             continue;
                         }
+                        // Skip if we already have an edit for this exact range
+                        let key = (
+                            r.uri.to_string(),
+                            r.range.start.line,
+                            r.range.start.character,
+                            r.range.end.line,
+                            r.range.end.character,
+                        );
+                        if seen_ranges.contains(&key) {
+                            continue;
+                        }
+                        seen_ranges.insert(key);
                         changes
                             .entry(r.uri)
                             .or_insert_with(Vec::new)
@@ -599,8 +622,10 @@ impl LanguageServer for ElmLanguageServer {
             if changes.is_empty() {
                 if let Some(doc) = self.documents.get(uri) {
                     if let Some(symbol) = doc.symbols.iter().find(|s| s.name == name) {
+                        // Use definition_range (just the name) instead of range (full body)
+                        let def_range = symbol.definition_range.unwrap_or(symbol.range);
                         let mut edits = vec![TextEdit {
-                            range: symbol.range,
+                            range: def_range,
                             new_text: new_name.clone(),
                         }];
                         for range in &symbol.references {
