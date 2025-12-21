@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "elm-lsp-rust": {
+    "elr": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-wrapper/index.mjs"]
     }

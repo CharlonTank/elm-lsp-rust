@@ -312,8 +312,9 @@ async function applyWorkspaceEdit(changes) {
 }
 
 // Create MCP server with new API
+// Short name to avoid 64-char limit on tool names
 const server = new McpServer(
-  { name: "elm-lsp-rust", version: "0.1.0" },
+  { name: "elr", version: "0.2.0" },
   { capabilities: { tools: {} } }
 );
 

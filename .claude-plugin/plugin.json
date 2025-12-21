@@ -1,7 +1,7 @@
 {
   "name": "elm-lsp-rust",
   "description": "Fast Elm Language Server (Rust) - tree-sitter powered refactoring with move function and smart variant removal",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "Charles-Andre Assus",
     "email": "charlonpub@gmail.com"
