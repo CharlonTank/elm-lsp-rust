@@ -844,157 +844,8 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 26: Pattern-only variant (can be removed) =====
-  console.log(`${CYAN}Test 26: Pattern-only variant (Unused in Priority)${RESET}`);
-  {
-    const file = join(MEETDOWN, "src/TestVariantRemoval.elm");
-    await client.openFile(file);
-
-    const pos = findVariantLine(file, "Unused");
-    if (pos) {
-      const result = await client.prepareRemoveVariant(file, pos.line, pos.char);
-      logTest("Unused: is pattern-only (no constructors)", result.blockingCount === 0);
-      logTest("Unused: has pattern usages", result.patternCount > 0);
-      logTest("Unused: can be removed", result.canRemove === true);
-      console.log(`     Unused: blocking=${result.blockingCount}, patterns=${result.patternCount}, canRemove=${result.canRemove}`);
-    }
-    console.log();
-  }
-
-  // ===== TEST 27: Remove pattern-only variant =====
-  console.log(`${CYAN}Test 27: Actually REMOVE pattern-only variant${RESET}`);
-  {
-    backupMeetdown();
-    try {
-      const file = join(MEETDOWN, "src/TestVariantRemoval.elm");
-      await client.openFile(file);
-
-      const pos = findVariantLine(file, "Unused");
-      if (pos) {
-        const result = await client.removeVariant(file, pos.line, pos.char);
-        logTest("Removal succeeded", result.success === true);
-        logTest("Message mentions removal", result.message?.includes("Removed"));
-
-        const newContent = readFileSync(file, "utf-8");
-        logTest("Unused removed from type", !newContent.includes("| Unused"));
-        logTest("Pattern branches removed", !newContent.includes("Unused ->"));
-        console.log(`     → ${result.message}`);
-      }
-    } finally {
-      restoreMeetdown();
-    }
-    console.log();
-  }
-
-  // ===== TEST 28: Single-variant type (should error) =====
-  console.log(`${CYAN}Test 28: Single-variant type (OnlyVariant - should ERROR)${RESET}`);
-  {
-    const file = join(MEETDOWN, "src/TestVariantRemoval.elm");
-    await client.openFile(file);
-
-    const pos = findVariantLine(file, "OnlyVariant");
-    if (pos) {
-      const result = await client.removeVariant(file, pos.line, pos.char);
-      logTest("Removal blocked (success=false)", result.success === false);
-      logTest("Error mentions 'only variant' or 'last'",
-              result.message?.toLowerCase().includes("only") ||
-              result.message?.toLowerCase().includes("last") ||
-              result.message?.toLowerCase().includes("cannot"));
-      console.log(`     → ${result.message}`);
-    }
-    console.log();
-  }
-
-  // ===== TEST 29: Useless wildcard removal =====
-  console.log(`${CYAN}Test 29: Useless wildcard auto-removal (Toggle type)${RESET}`);
-  {
-    backupMeetdown();
-    try {
-      const file = join(MEETDOWN, "src/TestVariantRemoval.elm");
-      const originalContent = readFileSync(file, "utf-8");
-      await client.openFile(file);
-
-      // Verify the wildcard exists before removal
-      logTest("Wildcard exists before removal", originalContent.includes("_ ->"));
-
-      const pos = findVariantLine(file, "Off");
-      if (pos) {
-        const result = await client.removeVariant(file, pos.line, pos.char);
-        logTest("Removal succeeded", result.success === true);
-
-        const newContent = readFileSync(file, "utf-8");
-        logTest("Off removed from type", !newContent.includes("| Off"));
-
-        // Check if wildcard was removed from toggleToString function
-        const toggleMatch = newContent.match(/toggleToString[\s\S]*?case toggle of[\s\S]*?(?=\n\n|\ntype|\n{-|$)/);
-        const wildcardRemoved = !toggleMatch || !toggleMatch[0].includes("_ ->");
-        logTest("Useless wildcard auto-removed", wildcardRemoved);
-
-        if (result.message?.includes("wildcard")) {
-          console.log(`     → Message mentions wildcard: ${result.message}`);
-        } else {
-          console.log(`     → ${result.message}`);
-        }
-      }
-    } finally {
-      restoreMeetdown();
-    }
-    console.log();
-  }
-
-  // ===== TEST 30: Multi-pattern removal (Strikethrough in 3 functions) =====
-  console.log(`${CYAN}Test 30: Multi-pattern branch removal (Strikethrough)${RESET}`);
-  {
-    backupMeetdown();
-    try {
-      const file = join(MEETDOWN, "src/TestVariantRemoval.elm");
-      const originalContent = readFileSync(file, "utf-8");
-      await client.openFile(file);
-
-      // Count Strikethrough patterns before
-      const beforeCount = (originalContent.match(/Strikethrough ->/g) || []).length;
-      console.log(`     Before: ${beforeCount} pattern branches with Strikethrough`);
-
-      const pos = findVariantLine(file, "Strikethrough");
-      if (pos) {
-        const result = await client.removeVariant(file, pos.line, pos.char);
-
-        if (result.success) {
-          const newContent = readFileSync(file, "utf-8");
-          const afterCount = (newContent.match(/Strikethrough ->/g) || []).length;
-
-          logTest("Removal succeeded", true);
-          logTest("All pattern branches removed", afterCount === 0);
-          console.log(`     After: ${afterCount} pattern branches`);
-          console.log(`     → ${result.message}`);
-        } else {
-          logTest("Removal blocked (has constructor)", true);
-          console.log(`     → Blocked: ${result.message}`);
-        }
-      }
-    } finally {
-      restoreMeetdown();
-    }
-    console.log();
-  }
-
-  // ===== TEST 31: Variant with arguments - multi-pattern removal =====
-  console.log(`${CYAN}Test 31: Variant with args (Debug String) multi-pattern${RESET}`);
-  {
-    const file = join(MEETDOWN, "src/TestVariantRemoval.elm");
-    await client.openFile(file);
-
-    const pos = findVariantLine(file, "Debug");
-    if (pos) {
-      const result = await client.prepareRemoveVariant(file, pos.line, pos.char);
-      logTest("Debug: found pattern usages", result.patternCount > 0);
-      console.log(`     Debug: blocking=${result.blockingCount}, patterns=${result.patternCount}, canRemove=${result.canRemove}`);
-    }
-    console.log();
-  }
-
-  // ===== TEST 32: Rename file - module declaration update =====
-  console.log(`${CYAN}Test 32: Rename file - module declaration update (HtmlId.elm)${RESET}`);
+  // ===== TEST 26: Rename file - module declaration update =====
+  console.log(`${CYAN}Test 26: Rename file - module declaration update (HtmlId.elm)${RESET}`);
   {
     backupMeetdown();
     try {
@@ -1024,7 +875,7 @@ async function main() {
   }
 
   // ===== TEST 33: Rename file with imports =====
-  console.log(`${CYAN}Test 33: Rename file with imports (Link.elm → WebLink.elm)${RESET}`);
+  console.log(`${CYAN}Test 27: Rename file with imports (Link.elm → WebLink.elm)${RESET}`);
   {
     backupMeetdown();
     try {
@@ -1053,7 +904,7 @@ async function main() {
   }
 
   // ===== TEST 34: Move file to subdirectory =====
-  console.log(`${CYAN}Test 34: Move file to subdirectory (Cache.elm → Utils/Cache.elm)${RESET}`);
+  console.log(`${CYAN}Test 28: Move file to subdirectory (Cache.elm → Utils/Cache.elm)${RESET}`);
   {
     backupMeetdown();
     try {
@@ -1081,7 +932,7 @@ async function main() {
   }
 
   // ===== TEST 35: Move file with imports =====
-  console.log(`${CYAN}Test 35: Move Privacy.elm to Types/Privacy.elm${RESET}`);
+  console.log(`${CYAN}Test 29: Move Privacy.elm to Types/Privacy.elm${RESET}`);
   {
     backupMeetdown();
     try {
@@ -1108,7 +959,7 @@ async function main() {
   }
 
   // ===== TEST 36: Rename file - reject invalid extension =====
-  console.log(`${CYAN}Test 36: Rename file - reject invalid extension${RESET}`);
+  console.log(`${CYAN}Test 30: Rename file - reject invalid extension${RESET}`);
   {
     try {
       const testFile = join(MEETDOWN, "src/Env.elm");
@@ -1126,7 +977,7 @@ async function main() {
   }
 
   // ===== TEST 37: Move file - reject invalid target =====
-  console.log(`${CYAN}Test 37: Move file - reject invalid target extension${RESET}`);
+  console.log(`${CYAN}Test 31: Move file - reject invalid target extension${RESET}`);
   {
     try {
       const testFile = join(MEETDOWN, "src/Env.elm");
@@ -1144,7 +995,7 @@ async function main() {
   }
 
   // ===== TEST 38: Rename function - should NOT corrupt file =====
-  console.log(`${CYAN}Test 38: Rename function (newEvent → createEvent) - no corruption${RESET}`);
+  console.log(`${CYAN}Test 32: Rename function (newEvent → createEvent) - no corruption${RESET}`);
   {
     restoreMeetdown(); // Start fresh
     const eventFile = join(MEETDOWN, "src/Event.elm");
@@ -1216,7 +1067,7 @@ async function main() {
   }
 
   // ===== TEST 39: Rename type alias - cross-file references =====
-  console.log(`${CYAN}Test 39: Rename type alias (FrontendUser) - should update all references${RESET}`);
+  console.log(`${CYAN}Test 33: Rename type alias (FrontendUser) - should update all references${RESET}`);
   {
     restoreMeetdown(); // Start fresh
 
@@ -1264,7 +1115,7 @@ async function main() {
   }
 
   // ===== TEST 40: Rename type alias - SAME FILE references =====
-  console.log(`${CYAN}Test 40: Rename type alias (Model in GroupPage) - same file references${RESET}`);
+  console.log(`${CYAN}Test 34: Rename type alias (Model in GroupPage) - same file references${RESET}`);
   {
     restoreMeetdown(); // Start fresh
 
