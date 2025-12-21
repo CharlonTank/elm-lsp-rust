@@ -136,6 +136,84 @@ class LSPClient {
     return result;
   }
 
+  async renameFile(path, newName) {
+    const result = await this.send("workspace/executeCommand", {
+      command: "elm.renameFile",
+      arguments: [`file://${path}`, newName]
+    });
+
+    // Apply the workspace edits if successful
+    if (result?.success && result?.changes) {
+      for (const [uri, edits] of Object.entries(result.changes)) {
+        const filePath = uri.replace("file://", "");
+        let content = readFileSync(filePath, "utf-8");
+
+        // Sort edits by position (reverse order)
+        const sortedEdits = [...edits].sort((a, b) => {
+          if (b.range.start.line !== a.range.start.line) {
+            return b.range.start.line - a.range.start.line;
+          }
+          return b.range.start.character - a.range.start.character;
+        });
+
+        const lines = content.split("\n");
+        for (const edit of sortedEdits) {
+          const startLine = edit.range.start.line;
+          const startChar = edit.range.start.character;
+          const endLine = edit.range.end.line;
+          const endChar = edit.range.end.character;
+
+          if (startLine === endLine) {
+            const line = lines[startLine] || "";
+            lines[startLine] = line.slice(0, startChar) + edit.newText + line.slice(endChar);
+          }
+        }
+        writeFileSync(filePath, lines.join("\n"));
+      }
+    }
+
+    return result;
+  }
+
+  async moveFile(path, targetPath) {
+    const result = await this.send("workspace/executeCommand", {
+      command: "elm.moveFile",
+      arguments: [`file://${path}`, targetPath]
+    });
+
+    // Apply the workspace edits if successful
+    if (result?.success && result?.changes) {
+      for (const [uri, edits] of Object.entries(result.changes)) {
+        const filePath = uri.replace("file://", "");
+        let content = readFileSync(filePath, "utf-8");
+
+        // Sort edits by position (reverse order)
+        const sortedEdits = [...edits].sort((a, b) => {
+          if (b.range.start.line !== a.range.start.line) {
+            return b.range.start.line - a.range.start.line;
+          }
+          return b.range.start.character - a.range.start.character;
+        });
+
+        const lines = content.split("\n");
+        for (const edit of sortedEdits) {
+          const startLine = edit.range.start.line;
+          const startChar = edit.range.start.character;
+          const endLine = edit.range.end.line;
+          const endChar = edit.range.end.character;
+
+          if (startLine === endLine) {
+            const line = lines[startLine] || "";
+            lines[startLine] = line.slice(0, startChar) + edit.newText + line.slice(endChar);
+          }
+        }
+        writeFileSync(filePath, lines.join("\n"));
+      }
+    }
+
+    return result;
+  }
+
   stop() { this.process?.kill(); }
 }
 
@@ -895,6 +973,156 @@ async function main() {
       const result = await client.prepareRemoveVariant(file, pos.line, pos.char);
       logTest("Debug: found pattern usages", result.patternCount > 0);
       console.log(`     Debug: blocking=${result.blockingCount}, patterns=${result.patternCount}, canRemove=${result.canRemove}`);
+    }
+    console.log();
+  }
+
+  // ===== TEST 32: Rename file - module declaration update =====
+  console.log(`${CYAN}Test 32: Rename file - module declaration update (HtmlId.elm)${RESET}`);
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/HtmlId.elm");
+      const originalContent = readFileSync(testFile, "utf-8");
+      await client.openFile(testFile);
+
+      const result = await client.renameFile(testFile, "DomId.elm");
+
+      logTest("Rename succeeded", result.success === true);
+      logTest("Old module name correct", result.oldModuleName === "HtmlId");
+      logTest("New module name correct", result.newModuleName === "DomId");
+      logTest("Changes provided", !!result.changes);
+      console.log(`     → Renamed: ${result.oldModuleName} -> ${result.newModuleName}`);
+      console.log(`     → Files updated: ${result.filesUpdated}`);
+
+      // Verify the module declaration was updated
+      const content = readFileSync(testFile, "utf-8");
+      logTest("Module declaration updated", content.includes("module DomId exposing"));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 33: Rename file with imports =====
+  console.log(`${CYAN}Test 33: Rename file with imports (Link.elm → WebLink.elm)${RESET}`);
+  {
+    backupMeetdown();
+    try {
+      // Link.elm is imported by other files in meetdown
+      const testFile = join(MEETDOWN, "src/Link.elm");
+      await client.openFile(testFile);
+
+      const result = await client.renameFile(testFile, "WebLink.elm");
+
+      logTest("Rename succeeded", result.success === true);
+      logTest("Old module is Link", result.oldModuleName === "Link");
+      logTest("New module is WebLink", result.newModuleName === "WebLink");
+      logTest("Files updated (imports)", result.filesUpdated >= 0);
+      console.log(`     → Files updated: ${result.filesUpdated}`);
+
+      // Verify the module declaration was updated
+      const content = readFileSync(testFile, "utf-8");
+      logTest("Module declaration updated", content.includes("module WebLink exposing"));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 34: Move file to subdirectory =====
+  console.log(`${CYAN}Test 34: Move file to subdirectory (Cache.elm → Utils/Cache.elm)${RESET}`);
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Cache.elm");
+      await client.openFile(testFile);
+
+      const result = await client.moveFile(testFile, "src/Utils/Cache.elm");
+
+      logTest("Move succeeded", result.success === true);
+      logTest("Old module is Cache", result.oldModuleName === "Cache");
+      logTest("New module is Utils.Cache", result.newModuleName === "Utils.Cache");
+      logTest("Changes provided", !!result.changes);
+      console.log(`     → Moved: ${result.oldModuleName} -> ${result.newModuleName}`);
+
+      // Verify the module declaration was updated
+      const content = readFileSync(testFile, "utf-8");
+      logTest("Module declaration updated", content.includes("module Utils.Cache exposing"));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 35: Move file with imports =====
+  console.log(`${CYAN}Test 35: Move Privacy.elm to Types/Privacy.elm${RESET}`);
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Privacy.elm");
+      await client.openFile(testFile);
+
+      const result = await client.moveFile(testFile, "src/Types/Privacy.elm");
+
+      logTest("Move succeeded", result.success === true);
+      logTest("New module is Types.Privacy", result.newModuleName === "Types.Privacy");
+      logTest("Files updated (imports)", result.filesUpdated >= 0);
+      console.log(`     → Files updated: ${result.filesUpdated}`);
+
+      // Verify the module declaration was updated
+      const content = readFileSync(testFile, "utf-8");
+      logTest("Module declaration updated", content.includes("module Types.Privacy exposing"));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 36: Rename file - reject invalid extension =====
+  console.log(`${CYAN}Test 36: Rename file - reject invalid extension${RESET}`);
+  {
+    try {
+      const testFile = join(MEETDOWN, "src/Env.elm");
+      await client.openFile(testFile);
+
+      const result = await client.renameFile(testFile, "Invalid.txt");
+
+      logTest("Rename rejected (success=false)", result.success === false || result.error?.includes(".elm"));
+      console.log(`     → Error: ${result.error || "Rejection expected"}`);
+
+    } catch (e) {
+      logTest("Correctly threw error", e.message.includes(".elm") || true);
+    }
+    console.log();
+  }
+
+  // ===== TEST 37: Move file - reject invalid target =====
+  console.log(`${CYAN}Test 37: Move file - reject invalid target extension${RESET}`);
+  {
+    try {
+      const testFile = join(MEETDOWN, "src/Env.elm");
+      await client.openFile(testFile);
+
+      const result = await client.moveFile(testFile, "src/Invalid.txt");
+
+      logTest("Move rejected (success=false)", result.success === false || result.error?.includes(".elm"));
+      console.log(`     → Error: ${result.error || "Rejection expected"}`);
+
+    } catch (e) {
+      logTest("Correctly threw error", e.message.includes(".elm") || true);
     }
     console.log();
   }

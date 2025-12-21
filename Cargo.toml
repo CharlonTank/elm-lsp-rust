@@ -46,5 +46,8 @@ thiserror = "1"
 name = "benchmark"
 path = "src/bin/benchmark.rs"
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 cc = "1"

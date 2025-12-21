@@ -1893,6 +1893,307 @@ impl Workspace {
         let path = uri.to_file_path().ok()?;
         std::fs::read_to_string(&path).ok()
     }
+
+    /// Rename a file and update its module declaration + all imports
+    pub fn rename_file(&self, uri: &Url, new_name: &str) -> anyhow::Result<FileOperationResult> {
+        let old_path = uri.to_file_path()
+            .map_err(|_| anyhow::anyhow!("Invalid file URI"))?;
+
+        // Validate new name
+        if !new_name.ends_with(".elm") {
+            return Err(anyhow::anyhow!("New name must end with .elm"));
+        }
+
+        // Get old module name from file content
+        let content = std::fs::read_to_string(&old_path)?;
+        let old_module_name = self.extract_module_name_from_content(&content)
+            .ok_or_else(|| anyhow::anyhow!("Could not extract module name from file"))?;
+
+        // Compute new module name (just the filename without .elm)
+        let new_module_base = new_name.trim_end_matches(".elm");
+
+        // The new module name keeps the same path prefix, just changes the final component
+        let old_parts: Vec<&str> = old_module_name.split('.').collect();
+        let new_module_name = if old_parts.len() > 1 {
+            let prefix: Vec<&str> = old_parts[..old_parts.len()-1].to_vec();
+            format!("{}.{}", prefix.join("."), new_module_base)
+        } else {
+            new_module_base.to_string()
+        };
+
+        // Compute new path
+        let new_path = old_path.parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?
+            .join(new_name);
+
+        // Collect all edits
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+        // 1. Update module declaration in the file itself
+        if let Some(module_range) = self.find_module_declaration_range(&content) {
+            let new_module_decl = format!("module {} exposing", new_module_name);
+            let old_module_decl_match = format!("module {} exposing", old_module_name);
+
+            if content.contains(&old_module_decl_match) {
+                changes.entry(uri.clone())
+                    .or_insert_with(Vec::new)
+                    .push(TextEdit {
+                        range: module_range,
+                        new_text: new_module_decl,
+                    });
+            }
+        }
+
+        // 2. Update all imports across the workspace
+        let files_updated = self.update_imports_for_rename(
+            &old_module_name,
+            &new_module_name,
+            uri,
+            &mut changes,
+        )?;
+
+        Ok(FileOperationResult {
+            old_module_name,
+            new_module_name,
+            old_path: old_path.to_string_lossy().to_string(),
+            new_path: new_path.to_string_lossy().to_string(),
+            files_updated,
+            changes,
+        })
+    }
+
+    /// Move a file to a new location and update its module declaration + all imports
+    pub fn move_file(&self, uri: &Url, target_path: &str) -> anyhow::Result<FileOperationResult> {
+        let old_path = uri.to_file_path()
+            .map_err(|_| anyhow::anyhow!("Invalid file URI"))?;
+
+        // Validate target path
+        if !target_path.ends_with(".elm") {
+            return Err(anyhow::anyhow!("Target path must end with .elm"));
+        }
+
+        // Get old module name from file content
+        let content = std::fs::read_to_string(&old_path)?;
+        let old_module_name = self.extract_module_name_from_content(&content)
+            .ok_or_else(|| anyhow::anyhow!("Could not extract module name from file"))?;
+
+        // Compute new module name from target path
+        let new_module_name = self.path_string_to_module_name(target_path);
+
+        // Compute full new path (relative to workspace root or absolute)
+        let new_path = if Path::new(target_path).is_absolute() {
+            PathBuf::from(target_path)
+        } else {
+            self.root_path.join(target_path)
+        };
+
+        // Collect all edits
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+        // 1. Update module declaration in the file itself
+        if let Some(module_range) = self.find_module_declaration_range(&content) {
+            let new_module_decl = format!("module {} exposing", new_module_name);
+            changes.entry(uri.clone())
+                .or_insert_with(Vec::new)
+                .push(TextEdit {
+                    range: module_range,
+                    new_text: new_module_decl,
+                });
+        }
+
+        // 2. Update all imports across the workspace
+        let files_updated = self.update_imports_for_rename(
+            &old_module_name,
+            &new_module_name,
+            uri,
+            &mut changes,
+        )?;
+
+        Ok(FileOperationResult {
+            old_module_name,
+            new_module_name,
+            old_path: old_path.to_string_lossy().to_string(),
+            new_path: new_path.to_string_lossy().to_string(),
+            files_updated,
+            changes,
+        })
+    }
+
+    /// Extract module name from file content using simple string parsing
+    fn extract_module_name_from_content(&self, content: &str) -> Option<String> {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(after_module) = trimmed.strip_prefix("module ") {
+                // Find "exposing" to extract the module name
+                if let Some(exposing_pos) = after_module.find(" exposing") {
+                    let module_name = after_module[..exposing_pos].trim();
+                    // Validate it's a proper module name (starts with uppercase)
+                    if module_name.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                        return Some(module_name.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find the range of the module declaration (just "module ModuleName exposing" part)
+    fn find_module_declaration_range(&self, content: &str) -> Option<Range> {
+        for (line_num, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if let Some(after_module) = trimmed.strip_prefix("module ") {
+                if let Some(exposing_pos) = after_module.find(" exposing") {
+                    let module_name = after_module[..exposing_pos].trim();
+                    // Validate it's a proper module name
+                    if module_name.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                        let line_start = line.find("module")?;
+                        // Calculate end: "module " + module_name + " exposing"
+                        let decl_len = "module ".len() + module_name.len() + " exposing".len();
+                        return Some(Range {
+                            start: Position {
+                                line: line_num as u32,
+                                character: line_start as u32,
+                            },
+                            end: Position {
+                                line: line_num as u32,
+                                character: (line_start + decl_len) as u32,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Convert a path string like "src/Utils/Helper.elm" to module name "Utils.Helper"
+    fn path_string_to_module_name(&self, path_str: &str) -> String {
+        let path = Path::new(path_str);
+
+        // Remove .elm extension
+        let stem = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        // Get parent path components, skipping "src" if present
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(parent) = path.parent() {
+            for component in parent.components() {
+                if let std::path::Component::Normal(s) = component {
+                    let s_str = s.to_str().unwrap_or("");
+                    // Skip common source directories
+                    if s_str != "src" && s_str != "." && !s_str.is_empty() {
+                        parts.push(s_str);
+                    }
+                }
+            }
+        }
+
+        // Add the filename stem
+        parts.push(stem);
+
+        parts.join(".")
+    }
+
+    /// Update all imports of old_module to new_module across the workspace
+    fn update_imports_for_rename(
+        &self,
+        old_module: &str,
+        new_module: &str,
+        skip_uri: &Url,
+        changes: &mut HashMap<Url, Vec<TextEdit>>,
+    ) -> anyhow::Result<usize> {
+        let import_pattern = format!("import {}", old_module);
+        let mut files_updated = 0;
+
+        for module in self.modules.values() {
+            let file_uri = Url::from_file_path(&module.path)
+                .map_err(|_| anyhow::anyhow!("Invalid path"))?;
+
+            // Skip Evergreen files
+            if module.path.to_string_lossy().contains("/Evergreen/") {
+                continue;
+            }
+
+            // Skip the file being renamed/moved (already handled)
+            if &file_uri == skip_uri {
+                continue;
+            }
+
+            let content = std::fs::read_to_string(&module.path)?;
+
+            // Find all import statements for the old module
+            for (line_num, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with(&import_pattern) {
+                    // Check it's not a prefix match (e.g., "import Foo" shouldn't match "import FooBar")
+                    let after_import = &trimmed[import_pattern.len()..];
+                    if after_import.is_empty()
+                        || after_import.starts_with(' ')
+                        || after_import.starts_with('\n')
+                        || after_import.starts_with('\t')
+                    {
+                        let line_start = line.find("import").unwrap_or(0);
+                        let old_end = line_start + "import ".len() + old_module.len();
+
+                        changes.entry(file_uri.clone())
+                            .or_insert_with(Vec::new)
+                            .push(TextEdit {
+                                range: Range {
+                                    start: Position {
+                                        line: line_num as u32,
+                                        character: (line_start + "import ".len()) as u32,
+                                    },
+                                    end: Position {
+                                        line: line_num as u32,
+                                        character: old_end as u32,
+                                    },
+                                },
+                                new_text: new_module.to_string(),
+                            });
+
+                        files_updated += 1;
+                    }
+                }
+
+                // Also check for qualified references like "OldModule.function"
+                // This handles cases where the module is used with qualification
+                let qualified_pattern = format!("{}.", old_module);
+                if trimmed.contains(&qualified_pattern) && !trimmed.starts_with("import ") && !trimmed.starts_with("module ") {
+                    // Find all occurrences in the line
+                    let mut search_start = 0;
+                    while let Some(pos) = line[search_start..].find(&qualified_pattern) {
+                        let actual_pos = search_start + pos;
+
+                        // Make sure it's not part of a larger identifier
+                        let before_ok = actual_pos == 0 || !line.chars().nth(actual_pos - 1).map_or(false, |c| c.is_alphanumeric() || c == '_' || c == '.');
+
+                        if before_ok {
+                            changes.entry(file_uri.clone())
+                                .or_insert_with(Vec::new)
+                                .push(TextEdit {
+                                    range: Range {
+                                        start: Position {
+                                            line: line_num as u32,
+                                            character: actual_pos as u32,
+                                        },
+                                        end: Position {
+                                            line: line_num as u32,
+                                            character: (actual_pos + old_module.len()) as u32,
+                                        },
+                                    },
+                                    new_text: new_module.to_string(),
+                                });
+                        }
+
+                        search_start = actual_pos + qualified_pattern.len();
+                    }
+                }
+            }
+        }
+
+        Ok(files_updated)
+    }
 }
 
 /// Result of a move function operation
@@ -1903,6 +2204,17 @@ pub struct MoveResult {
     pub target_module: String,
     pub function_name: String,
     pub references_updated: usize,
+}
+
+/// Result of a file rename/move operation
+#[derive(Debug)]
+pub struct FileOperationResult {
+    pub old_module_name: String,
+    pub new_module_name: String,
+    pub old_path: String,
+    pub new_path: String,
+    pub files_updated: usize,
+    pub changes: HashMap<Url, Vec<TextEdit>>,
 }
 
 /// Entry in a call chain showing how a function is called
@@ -1987,5 +2299,238 @@ impl RemoveVariantResult {
             blocking_usages: Vec::new(),
             changes: Some(changes),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn create_test_workspace() -> (TempDir, Workspace) {
+        let temp_dir = TempDir::new().unwrap();
+        let src_dir = temp_dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // Create elm.json
+        let elm_json = r#"{ "source-directories": ["src"] }"#;
+        fs::write(temp_dir.path().join("elm.json"), elm_json).unwrap();
+
+        let mut workspace = Workspace::new(temp_dir.path().to_path_buf());
+        workspace.initialize().unwrap();
+
+        (temp_dir, workspace)
+    }
+
+    #[test]
+    fn test_extract_module_name_from_content() {
+        let (temp_dir, workspace) = create_test_workspace();
+
+        let content = "module MyModule exposing (..)";
+        assert_eq!(
+            workspace.extract_module_name_from_content(content),
+            Some("MyModule".to_string())
+        );
+
+        let content2 = "module Utils.Helper exposing (helper)";
+        assert_eq!(
+            workspace.extract_module_name_from_content(content2),
+            Some("Utils.Helper".to_string())
+        );
+
+        let content3 = "-- no module declaration";
+        assert_eq!(workspace.extract_module_name_from_content(content3), None);
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_path_string_to_module_name() {
+        let (temp_dir, workspace) = create_test_workspace();
+
+        assert_eq!(
+            workspace.path_string_to_module_name("src/Main.elm"),
+            "Main"
+        );
+
+        assert_eq!(
+            workspace.path_string_to_module_name("src/Utils/Helper.elm"),
+            "Utils.Helper"
+        );
+
+        assert_eq!(
+            workspace.path_string_to_module_name("src/Pages/Home/View.elm"),
+            "Pages.Home.View"
+        );
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_rename_file_updates_module_declaration() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+
+        // Create a test file
+        let src_dir = temp_dir.path().join("src");
+        let old_content = r#"module OldName exposing (..)
+
+value : Int
+value = 42
+"#;
+        fs::write(src_dir.join("OldName.elm"), old_content).unwrap();
+
+        // Re-initialize to pick up the new file
+        workspace.initialize().unwrap();
+
+        let uri = Url::from_file_path(src_dir.join("OldName.elm")).unwrap();
+        let result = workspace.rename_file(&uri, "NewName.elm").unwrap();
+
+        assert_eq!(result.old_module_name, "OldName");
+        assert_eq!(result.new_module_name, "NewName");
+        assert!(result.new_path.ends_with("NewName.elm"));
+
+        // Check that we have changes for the module declaration
+        assert!(result.changes.contains_key(&uri));
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_rename_file_updates_imports() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+
+        // Create files
+        let src_dir = temp_dir.path().join("src");
+
+        let helper_content = r#"module Helper exposing (help)
+
+help : Int
+help = 42
+"#;
+        fs::write(src_dir.join("Helper.elm"), helper_content).unwrap();
+
+        let main_content = r#"module Main exposing (..)
+
+import Helper exposing (help)
+
+value : Int
+value = help
+"#;
+        fs::write(src_dir.join("Main.elm"), main_content).unwrap();
+
+        // Re-initialize to pick up the new files
+        workspace.initialize().unwrap();
+
+        let helper_uri = Url::from_file_path(src_dir.join("Helper.elm")).unwrap();
+        let result = workspace.rename_file(&helper_uri, "NewHelper.elm").unwrap();
+
+        assert_eq!(result.old_module_name, "Helper");
+        assert_eq!(result.new_module_name, "NewHelper");
+
+        // Should have updates in Main.elm for the import
+        assert!(result.files_updated > 0);
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_move_file_to_subdirectory() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+
+        // Create a test file in src root
+        let src_dir = temp_dir.path().join("src");
+        let old_content = r#"module Helper exposing (..)
+
+value : Int
+value = 42
+"#;
+        fs::write(src_dir.join("Helper.elm"), old_content).unwrap();
+
+        // Re-initialize to pick up the new file
+        workspace.initialize().unwrap();
+
+        let uri = Url::from_file_path(src_dir.join("Helper.elm")).unwrap();
+        let result = workspace.move_file(&uri, "src/Utils/Helper.elm").unwrap();
+
+        assert_eq!(result.old_module_name, "Helper");
+        assert_eq!(result.new_module_name, "Utils.Helper");
+        assert!(result.new_path.contains("Utils"));
+
+        // Check that we have changes for the module declaration
+        assert!(result.changes.contains_key(&uri));
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_move_file_updates_imports() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+
+        // Create files
+        let src_dir = temp_dir.path().join("src");
+
+        let helper_content = r#"module Helper exposing (help)
+
+help : Int
+help = 42
+"#;
+        fs::write(src_dir.join("Helper.elm"), helper_content).unwrap();
+
+        let main_content = r#"module Main exposing (..)
+
+import Helper exposing (help)
+
+value : Int
+value = help
+"#;
+        fs::write(src_dir.join("Main.elm"), main_content).unwrap();
+
+        // Re-initialize
+        workspace.initialize().unwrap();
+
+        let helper_uri = Url::from_file_path(src_dir.join("Helper.elm")).unwrap();
+        let result = workspace.move_file(&helper_uri, "src/Utils/Helper.elm").unwrap();
+
+        assert_eq!(result.old_module_name, "Helper");
+        assert_eq!(result.new_module_name, "Utils.Helper");
+
+        // Should have updates in Main.elm for the import
+        assert!(result.files_updated > 0);
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_find_module_declaration_range() {
+        let (temp_dir, workspace) = create_test_workspace();
+
+        let content = "module MyModule exposing (..)\n\nvalue = 42";
+        let range = workspace.find_module_declaration_range(content);
+
+        assert!(range.is_some());
+        let range = range.unwrap();
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 0);
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_rename_file_rejects_invalid_extension() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+
+        let src_dir = temp_dir.path().join("src");
+        let old_content = r#"module OldName exposing (..)"#;
+        fs::write(src_dir.join("OldName.elm"), old_content).unwrap();
+        workspace.initialize().unwrap();
+
+        let uri = Url::from_file_path(src_dir.join("OldName.elm")).unwrap();
+        let result = workspace.rename_file(&uri, "NewName.txt");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".elm"));
+
+        drop(temp_dir);
     }
 }

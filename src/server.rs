@@ -15,6 +15,8 @@ const CMD_MOVE_FUNCTION: &str = "elm.moveFunction";
 const CMD_GET_DIAGNOSTICS: &str = "elm.getDiagnostics";
 const CMD_PREPARE_REMOVE_VARIANT: &str = "elm.prepareRemoveVariant";
 const CMD_REMOVE_VARIANT: &str = "elm.removeVariant";
+const CMD_RENAME_FILE: &str = "elm.renameFile";
+const CMD_MOVE_FILE: &str = "elm.moveFile";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -200,6 +202,8 @@ impl LanguageServer for ElmLanguageServer {
                         CMD_GET_DIAGNOSTICS.to_string(),
                         CMD_PREPARE_REMOVE_VARIANT.to_string(),
                         CMD_REMOVE_VARIANT.to_string(),
+                        CMD_RENAME_FILE.to_string(),
+                        CMD_MOVE_FILE.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -958,6 +962,144 @@ impl LanguageServer for ElmLanguageServer {
                         "success": false,
                         "message": "No variant found at this position"
                     })))
+                }
+            }
+            CMD_RENAME_FILE => {
+                // Expected arguments: [file_uri, new_name]
+                // new_name is just the filename without path, e.g. "NewName.elm"
+                if params.arguments.len() != 2 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 2 arguments: file_uri, new_name"
+                    })));
+                }
+
+                let file_uri: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let new_name: String = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&file_uri)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                tracing::info!("Renaming file {} to {}", file_uri, new_name);
+
+                let rename_result = {
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.rename_file(&uri, &new_name)
+                        } else {
+                            Err(anyhow::anyhow!("Workspace not initialized"))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("Could not acquire workspace lock"))
+                    }
+                };
+
+                match rename_result {
+                    Ok(result) => {
+                        // Convert changes to JSON
+                        let changes_json = {
+                            let mut changes_map = serde_json::Map::new();
+                            for (uri, edits) in &result.changes {
+                                let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                    serde_json::json!({
+                                        "range": {
+                                            "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                            "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                        },
+                                        "newText": edit.new_text
+                                    })
+                                }).collect();
+                                changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                            }
+                            serde_json::Value::Object(changes_map)
+                        };
+
+                        Ok(Some(serde_json::json!({
+                            "success": true,
+                            "oldModuleName": result.old_module_name,
+                            "newModuleName": result.new_module_name,
+                            "oldPath": result.old_path,
+                            "newPath": result.new_path,
+                            "filesUpdated": result.files_updated,
+                            "changes": changes_json
+                        })))
+                    }
+                    Err(e) => {
+                        Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": e.to_string()
+                        })))
+                    }
+                }
+            }
+            CMD_MOVE_FILE => {
+                // Expected arguments: [file_uri, target_path]
+                // target_path is the full path where the file should be moved, e.g. "src/Utils/Helper.elm"
+                if params.arguments.len() != 2 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 2 arguments: file_uri, target_path"
+                    })));
+                }
+
+                let file_uri: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let target_path: String = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&file_uri)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                tracing::info!("Moving file {} to {}", file_uri, target_path);
+
+                let move_result = {
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.move_file(&uri, &target_path)
+                        } else {
+                            Err(anyhow::anyhow!("Workspace not initialized"))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("Could not acquire workspace lock"))
+                    }
+                };
+
+                match move_result {
+                    Ok(result) => {
+                        // Convert changes to JSON
+                        let changes_json = {
+                            let mut changes_map = serde_json::Map::new();
+                            for (uri, edits) in &result.changes {
+                                let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                    serde_json::json!({
+                                        "range": {
+                                            "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                            "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                        },
+                                        "newText": edit.new_text
+                                    })
+                                }).collect();
+                                changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                            }
+                            serde_json::Value::Object(changes_map)
+                        };
+
+                        Ok(Some(serde_json::json!({
+                            "success": true,
+                            "oldModuleName": result.old_module_name,
+                            "newModuleName": result.new_module_name,
+                            "oldPath": result.old_path,
+                            "newPath": result.new_path,
+                            "filesUpdated": result.files_updated,
+                            "changes": changes_json
+                        })))
+                    }
+                    Err(e) => {
+                        Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": e.to_string()
+                        })))
+                    }
                 }
             }
             _ => {

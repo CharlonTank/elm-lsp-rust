@@ -314,7 +314,7 @@ async function applyWorkspaceEdit(changes) {
 // Create MCP server with new API
 // Short name to avoid 64-char limit on tool names
 const server = new McpServer(
-  { name: "elr", version: "0.2.0" },
+  { name: "elr", version: "0.3.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -1088,6 +1088,143 @@ server.tool(
         text: result.message || "Variant removed successfully",
       }],
     };
+  }
+);
+
+server.tool(
+  "elm_rename_file",
+  "Rename an Elm file and update its module declaration + all imports across the project",
+  {
+    file_path: z.string().describe("Path to the Elm file to rename"),
+    new_name: z.string().describe('New filename (just the name, e.g., "NewName.elm")'),
+  },
+  async ({ file_path, new_name }) => {
+    const workspaceRoot = findWorkspaceRoot(file_path);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    if (!new_name.endsWith(".elm")) {
+      return { content: [{ type: "text", text: "New name must end with .elm" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${file_path}`;
+    const content = readFileSync(file_path, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.renameFile", [uri, new_name]);
+
+    if (!result) {
+      return { content: [{ type: "text", text: "Failed to rename file" }] };
+    }
+
+    if (!result.success) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }] };
+    }
+
+    // Apply the text edits (module declarations and imports)
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      // Now perform the actual file rename
+      const { rename } = await import("fs/promises");
+      try {
+        await rename(result.oldPath, result.newPath);
+      } catch (err) {
+        return {
+          content: [{
+            type: "text",
+            text: `Applied ${totalEdits} edit(s) but failed to rename file: ${err.message}\n` +
+                  `Please manually rename ${result.oldPath} to ${result.newPath}`,
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `Renamed ${result.oldModuleName} to ${result.newModuleName}\n` +
+                `- Renamed file: ${result.oldPath} → ${result.newPath}\n` +
+                `- Updated module declaration\n` +
+                `- Updated ${result.filesUpdated} import(s) in ${fileCount} file(s)`,
+        }],
+      };
+    }
+
+    return { content: [{ type: "text", text: "No changes needed" }] };
+  }
+);
+
+server.tool(
+  "elm_move_file",
+  "Move an Elm file to a new location and update its module declaration + all imports across the project",
+  {
+    file_path: z.string().describe("Path to the Elm file to move"),
+    target_path: z.string().describe('Target path (e.g., "src/Utils/Helper.elm")'),
+  },
+  async ({ file_path, target_path }) => {
+    const workspaceRoot = findWorkspaceRoot(file_path);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    if (!target_path.endsWith(".elm")) {
+      return { content: [{ type: "text", text: "Target path must end with .elm" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${file_path}`;
+    const content = readFileSync(file_path, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.moveFile", [uri, target_path]);
+
+    if (!result) {
+      return { content: [{ type: "text", text: "Failed to move file" }] };
+    }
+
+    if (!result.success) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }] };
+    }
+
+    // Apply the text edits (module declarations and imports)
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      // Ensure target directory exists
+      const { mkdir, rename } = await import("fs/promises");
+      const targetDir = dirname(result.newPath);
+
+      try {
+        await mkdir(targetDir, { recursive: true });
+        await rename(result.oldPath, result.newPath);
+      } catch (err) {
+        return {
+          content: [{
+            type: "text",
+            text: `Applied ${totalEdits} edit(s) but failed to move file: ${err.message}\n` +
+                  `Please manually move ${result.oldPath} to ${result.newPath}`,
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `Moved ${result.oldModuleName} to ${result.newModuleName}\n` +
+                `- Moved file: ${result.oldPath} → ${result.newPath}\n` +
+                `- Updated module declaration\n` +
+                `- Updated ${result.filesUpdated} import(s) in ${fileCount} file(s)`,
+        }],
+      };
+    }
+
+    return { content: [{ type: "text", text: "No changes needed" }] };
   }
 );
 
