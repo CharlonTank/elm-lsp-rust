@@ -169,6 +169,9 @@ async function testReferences() {
 
   assertContains(result, "Main.elm", "References should include Main.elm");
   assertContains(result, "Utils.elm", "References should include Utils.elm");
+  // Verify we find multiple references (at least 4: 2 imports + 2 type annotations)
+  assertContains(result, "5 references", "Should find 5 references");
+
   logTest("references: find all User references", true);
 }
 

@@ -222,6 +222,14 @@ class LSPClient {
     });
   }
 
+  async references(path, line, char) {
+    return this.send("textDocument/references", {
+      textDocument: { uri: `file://${path}` },
+      position: { line, character: char },
+      context: { includeDeclaration: true }
+    });
+  }
+
   stop() { this.process?.kill(); }
 }
 
@@ -1204,6 +1212,119 @@ async function main() {
     }
 
     restoreMeetdown(); // Restore after test
+    console.log();
+  }
+
+  // ===== TEST 39: Rename type alias - cross-file references =====
+  console.log(`${CYAN}Test 39: Rename type alias (FrontendUser) - should update all references${RESET}`);
+  {
+    restoreMeetdown(); // Start fresh
+
+    // FrontendUser is defined in FrontendUser.elm and used in multiple files
+    const frontendUserFile = join(MEETDOWN, "src/FrontendUser.elm");
+    await client.openFile(frontendUserFile);
+
+    // Find all references BEFORE rename (line 8, 0-indexed = 7)
+    // "type alias FrontendUser =" - FrontendUser starts at column 11
+    const refsBefore = await client.references(frontendUserFile, 7, 11);
+    const refsBeforeCount = refsBefore?.length || 0;
+    console.log(`     → References found BEFORE rename: ${refsBeforeCount}`);
+
+    // Count how many files have FrontendUser in type annotations
+    const groupPageContent = readFileSync(join(MEETDOWN, "src/GroupPage.elm"), "utf-8");
+    const frontendUserInGroupPage = (groupPageContent.match(/FrontendUser/g) || []).length;
+    console.log(`     → FrontendUser occurrences in GroupPage.elm: ${frontendUserInGroupPage}`);
+
+    logTest("Found references in multiple files", refsBeforeCount > 5);
+
+    // Now test rename (same position: line 7, column 11)
+    const renameResult = await client.rename(frontendUserFile, 7, 11, "AppUser");
+
+    if (renameResult?.changes) {
+      const filesChanged = Object.keys(renameResult.changes).length;
+      let totalEdits = 0;
+      for (const [uri, edits] of Object.entries(renameResult.changes)) {
+        totalEdits += edits.length;
+        const fileName = uri.split("/").pop();
+        console.log(`     → ${fileName}: ${edits.length} edits`);
+      }
+
+      logTest("Rename affects multiple files", filesChanged >= 3);
+      // Note: References includes imports, module decls, Evergreen migrations etc.
+      // The rename correctly filters to only rename actual type usages (~24 in src/)
+      logTest("Has reasonable number of edits", totalEdits >= 20 && totalEdits <= 30);
+
+      console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+    } else {
+      logTest("Rename returned changes", false);
+    }
+
+    restoreMeetdown();
+    console.log();
+  }
+
+  // ===== TEST 40: Rename type alias - SAME FILE references =====
+  console.log(`${CYAN}Test 40: Rename type alias (Model in GroupPage) - same file references${RESET}`);
+  {
+    restoreMeetdown(); // Start fresh
+
+    const groupPageFile = join(MEETDOWN, "src/GroupPage.elm");
+    await client.openFile(groupPageFile);
+
+    // Model is defined on line 81 and used ~16 times in the same file
+    const originalContent = readFileSync(groupPageFile, "utf-8");
+    const modelCount = (originalContent.match(/\bModel\b/g) || []).length;
+    console.log(`     → Model occurrences in GroupPage.elm: ${modelCount}`);
+
+    // Rename Model to PageModel (line 81, 0-indexed = 80, "type alias Model =" column 11)
+    const renameResult = await client.rename(groupPageFile, 80, 11, "PageModel");
+
+    if (renameResult?.changes) {
+      const groupPageUri = `file://${groupPageFile}`;
+      const groupPageEdits = renameResult.changes[groupPageUri]?.length || 0;
+      console.log(`     → Edits in GroupPage.elm: ${groupPageEdits}`);
+
+      // Should have close to modelCount edits (some might be in type annotations)
+      logTest("Most Model references renamed in same file", groupPageEdits >= modelCount - 2);
+
+      // Verify the actual content after applying edits
+      if (groupPageEdits > 0) {
+        // Apply edits to check
+        let content = originalContent;
+        const lines = content.split("\n");
+        const sortedEdits = [...(renameResult.changes[groupPageUri] || [])].sort((a, b) => {
+          if (b.range.start.line !== a.range.start.line) {
+            return b.range.start.line - a.range.start.line;
+          }
+          return b.range.start.character - a.range.start.character;
+        });
+
+        for (const edit of sortedEdits) {
+          const startLine = edit.range.start.line;
+          const startChar = edit.range.start.character;
+          const endLine = edit.range.end.line;
+          const endChar = edit.range.end.character;
+
+          if (startLine === endLine) {
+            const line = lines[startLine] || "";
+            lines[startLine] = line.slice(0, startChar) + edit.newText + line.slice(endChar);
+          }
+        }
+
+        const newContent = lines.join("\n");
+        const oldModelCount = (newContent.match(/\bModel\b/g) || []).length;
+        const newModelCount = (newContent.match(/\bPageModel\b/g) || []).length;
+        console.log(`     → After rename: ${oldModelCount} 'Model' remaining, ${newModelCount} 'PageModel' created`);
+
+        // Model should be mostly gone (maybe a few in comments/strings), PageModel should appear
+        logTest("Old name mostly replaced", oldModelCount <= 2);
+        logTest("New name appears", newModelCount >= modelCount - 2);
+      }
+    } else {
+      logTest("Rename returned changes", false);
+    }
+
+    restoreMeetdown();
     console.log();
   }
 
