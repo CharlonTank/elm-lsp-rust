@@ -223,9 +223,16 @@ async function testRename() {
 
     assertContains(result, "formatHelper", "Rename result should mention new name");
 
-    // Verify the file was actually changed
+    // Verify the file was actually changed AND syntax is preserved
     const content = readFileSync(utilsFile, "utf-8");
     assertContains(content, "formatHelper", "Utils.elm should contain formatHelper");
+    // Critical: verify full function signature is preserved
+    assertContains(content, "formatHelper : String -> String", "Function signature must be preserved");
+    assertContains(content, "formatHelper name =", "Function definition must be preserved");
+    // Ensure old name is gone from definition (but may still appear in calls)
+    if (content.includes("helper : String")) {
+      throw new Error("Old function signature 'helper : String' should be renamed");
+    }
 
     logTest("rename: helper -> formatHelper", true);
   } finally {
@@ -250,9 +257,15 @@ async function testRenameTypeAlias() {
 
     assertContains(result, "Visitor", "Rename result should mention new name");
 
-    // Verify the file was actually changed
+    // Verify the file was actually changed AND syntax is preserved
     const content = readFileSync(typesFile, "utf-8");
     assertContains(content, "Visitor", "Types.elm should contain Visitor");
+    // Critical: verify full syntax is preserved, not just the name
+    assertContains(content, "type alias Visitor =", "Type alias syntax must be preserved");
+    // Ensure old name is gone
+    if (content.includes("type alias Guest")) {
+      throw new Error("Old type alias name 'Guest' should be renamed to 'Visitor'");
+    }
 
     logTest("rename: type alias Guest -> Visitor", true);
   } finally {

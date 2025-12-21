@@ -138,9 +138,11 @@ impl ElmParser {
         for child in node.children(&mut cursor) {
             if child.kind() == "upper_case_identifier" {
                 let name = self.node_text(child, source).to_string();
-                let range = self.node_to_range(child);
-                let mut symbol = ElmSymbol::new(name, SymbolKind::ENUM, range);
-                symbol.definition_range = Some(self.node_to_range(node));
+                let name_range = self.node_to_range(child);
+                let full_range = self.node_to_range(node);
+                let mut symbol = ElmSymbol::new(name, SymbolKind::ENUM, full_range);
+                // definition_range is just the identifier name (for renaming)
+                symbol.definition_range = Some(name_range);
                 symbol.signature = Some(self.node_text(node, source).to_string());
 
                 self.extract_type_constructors(node, source, &mut symbol);
@@ -183,9 +185,11 @@ impl ElmParser {
         for child in node.children(&mut cursor) {
             if child.kind() == "upper_case_identifier" {
                 let name = self.node_text(child, source).to_string();
-                let range = self.node_to_range(child);
-                let mut symbol = ElmSymbol::new(name, SymbolKind::STRUCT, range);
-                symbol.definition_range = Some(self.node_to_range(node));
+                let name_range = self.node_to_range(child);
+                let full_range = self.node_to_range(node);
+                let mut symbol = ElmSymbol::new(name, SymbolKind::STRUCT, full_range);
+                // definition_range is just the identifier name (for renaming)
+                symbol.definition_range = Some(name_range);
                 symbol.signature = Some(self.node_text(node, source).to_string());
                 return Some(symbol);
             }
@@ -202,9 +206,11 @@ impl ElmParser {
         for child in node.children(&mut cursor) {
             if child.kind() == "lower_case_identifier" {
                 let name = self.node_text(child, source).to_string();
-                let range = self.node_to_range(child);
-                let mut symbol = ElmSymbol::new(name, SymbolKind::INTERFACE, range);
-                symbol.definition_range = Some(self.node_to_range(node));
+                let name_range = self.node_to_range(child);
+                let full_range = self.node_to_range(node);
+                let mut symbol = ElmSymbol::new(name, SymbolKind::INTERFACE, full_range);
+                // definition_range is just the identifier name (for renaming)
+                symbol.definition_range = Some(name_range);
                 symbol.signature = Some(self.node_text(node, source).to_string());
                 return Some(symbol);
             }
