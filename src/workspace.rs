@@ -519,24 +519,23 @@ impl Workspace {
         while let Some(parent) = current {
             match parent.kind() {
                 "function_declaration_left" | "type_declaration" |
-                "type_alias_declaration" | "port_annotation" |
-                "module_declaration" => return true,
+                "type_alias_declaration" | "port_annotation" => return true,
                 // If inside a qualified identifier, this is a module prefix, not a symbol reference
                 "value_qid" | "upper_case_qid" => return true,
-                // For import clauses, skip the module name but allow exposed items
-                "import_clause" => {
+                // For module declarations and import clauses, skip the module name but allow exposed items
+                "module_declaration" | "import_clause" => {
                     // Check if we're in an exposing_list - those ARE valid references
                     let mut check = node.parent();
                     while let Some(p) = check {
                         if p.kind() == "exposing_list" || p.kind() == "exposed_type" || p.kind() == "exposed_value" {
                             return false; // This is an exposed item, not a declaration
                         }
-                        if p.kind() == "import_clause" {
+                        if p.kind() == "module_declaration" || p.kind() == "import_clause" {
                             break;
                         }
                         check = p.parent();
                     }
-                    return true; // Module name in import, skip it
+                    return true; // Module name, skip it
                 }
                 _ => {}
             }
