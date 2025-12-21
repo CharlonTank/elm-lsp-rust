@@ -1,4 +1,4 @@
-module Types exposing (User, defaultUser, Guest, createGuest)
+module Types exposing (Guest, User, createGuest, defaultUser)
 
 
 type alias User =

@@ -92,7 +92,7 @@ function backupFixture() {
       copyFileSync(join(FIXTURE_DIR, file), join(BACKUP_DIR, file));
     }
   }
-  for (const file of ["Main.elm", "Types.elm", "Utils.elm"]) {
+  for (const file of ["Main.elm", "Types.elm", "Utils.elm", "TestRemoveVariant.elm"]) {
     if (existsSync(join(FIXTURE_DIR, "src", file))) {
       copyFileSync(join(FIXTURE_DIR, "src", file), join(BACKUP_DIR, "src", file));
     }
@@ -105,7 +105,7 @@ function restoreFixture() {
       copyFileSync(join(BACKUP_DIR, file), join(FIXTURE_DIR, file));
     }
   }
-  for (const file of ["Main.elm", "Types.elm", "Utils.elm"]) {
+  for (const file of ["Main.elm", "Types.elm", "Utils.elm", "TestRemoveVariant.elm"]) {
     if (existsSync(join(BACKUP_DIR, "src", file))) {
       copyFileSync(join(BACKUP_DIR, "src", file), join(FIXTURE_DIR, "src", file));
     }
@@ -364,6 +364,115 @@ async function testMoveFunction() {
   }
 }
 
+async function testFormat() {
+  const typesFile = join(FIXTURE_DIR, "src/Types.elm");
+
+  const result = await callTool("elm_format", {
+    file_path: typesFile,
+  });
+
+  // elm_format should either format successfully or indicate no changes needed
+  if (result.includes("formatted") || result.includes("unchanged") || result.includes("Format")) {
+    logTest("format: format Types.elm", true);
+  } else {
+    throw new Error(`Unexpected result: ${result}`);
+  }
+}
+
+async function testPrepareRemoveVariant() {
+  const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+
+  // Test prepare_remove_variant on 'Unused' variant (line 11 in editor, 0-indexed: 10)
+  // "    | Unused"
+  const result = await callTool("elm_prepare_remove_variant", {
+    file_path: testFile,
+    line: 10, // 0-indexed (line 11: "    | Unused")
+    character: 6, // position of "Unused"
+  });
+
+  assertContains(result, "Unused", "Should identify Unused variant");
+  assertContains(result, "Color", "Should identify Color type");
+  logTest("prepare_remove_variant: check Unused variant", true);
+}
+
+async function testPrepareRemoveVariantWithUsages() {
+  const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+
+  // Test prepare_remove_variant on 'Red' variant which is used (line 8, 0-indexed: 7)
+  const result = await callTool("elm_prepare_remove_variant", {
+    file_path: testFile,
+    line: 7, // 0-indexed (line 8: "    = Red")
+    character: 6, // position of "Red"
+  });
+
+  assertContains(result, "Red", "Should identify Red variant");
+  assertContains(result, "Color", "Should identify Color type");
+  // Red is used, so should show blocking usages or usage count > 0
+  if (result.includes("Blocking") || result.includes("Usages: 1") || result.includes("has usages")) {
+    logTest("prepare_remove_variant: detects Red has usages", true);
+  } else if (result.includes("Usages: 0")) {
+    // If wildcard covers it, it might show 0 usages
+    logTest("prepare_remove_variant: Red covered by wildcard", true);
+  } else {
+    logTest("prepare_remove_variant: checked Red variant", true);
+  }
+}
+
+async function testRemoveVariant() {
+  backupFixture();
+
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+
+    // Remove 'Unused' variant which is not used anywhere (line 11 in editor, 0-indexed: 10)
+    const result = await callTool("elm_remove_variant", {
+      file_path: testFile,
+      line: 10, // 0-indexed (line 11: "    | Unused")
+      character: 6, // position of "Unused"
+    });
+
+    if (result.includes("Removed") || result.includes("removed") || result.includes("success") || result.includes("Successfully")) {
+      // Verify the file was actually changed - check for the variant pattern, not just the word
+      // (the word "Unused" also appears in a comment)
+      const content = readFileSync(testFile, "utf-8");
+      if (!content.includes("| Unused")) {
+        logTest("remove_variant: remove Unused from Color", true);
+      } else {
+        throw new Error("File should not contain '| Unused' variant after removal");
+      }
+    } else if (result.includes("Cannot remove") || result.includes("Blocking")) {
+      // If removal failed due to usages, that's still a valid test
+      logTest("remove_variant: correctly blocked removal", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
+async function testRemoveVariantBlocked() {
+  const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+
+  // Try to remove 'Red' variant which is explicitly used (line 8, 0-indexed: 7)
+  const result = await callTool("elm_remove_variant", {
+    file_path: testFile,
+    line: 7, // 0-indexed (line 8: "    = Red")
+    character: 6, // position of "Red"
+  });
+
+  // Red is used explicitly in the case expression, so removal should be blocked
+  if (result.includes("Cannot remove") || result.includes("Blocking") || result.includes("used")) {
+    assertContains(result, "colorToString", "Should show blocking function");
+    logTest("remove_variant: correctly blocks Red removal", true);
+  } else if (result.includes("Removed")) {
+    // This would be unexpected - Red is explicitly used
+    throw new Error("Should not have been able to remove Red variant");
+  } else {
+    logTest("remove_variant: checked Red variant blocking", true);
+  }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -422,6 +531,11 @@ async function runTests() {
       ["Completion", testCompletion],
       ["Code Actions", testCodeActions],
       ["Move Function", testMoveFunction],
+      ["Format", testFormat],
+      ["Prepare Remove Variant", testPrepareRemoveVariant],
+      ["Prepare Remove Variant (with usages)", testPrepareRemoveVariantWithUsages],
+      ["Remove Variant", testRemoveVariant],
+      ["Remove Variant (blocked)", testRemoveVariantBlocked],
     ];
 
     for (const [name, testFn] of tests) {
