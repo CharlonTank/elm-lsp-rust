@@ -271,6 +271,14 @@ async function ensureClient(workspaceRoot) {
   return lspClient;
 }
 
+// Restart the LSP client to clear cached file state
+function restartClient() {
+  if (lspClient) {
+    lspClient.stop();
+    lspClient.initialized = false;
+  }
+}
+
 // Find workspace root from a file path
 function findWorkspaceRoot(filePath) {
   let dir = dirname(filePath);
@@ -1158,6 +1166,9 @@ server.tool(
         };
       }
 
+      // Restart LSP to clear cached file state
+      restartClient();
+
       return {
         content: [{
           type: "text",
@@ -1227,6 +1238,9 @@ server.tool(
           }],
         };
       }
+
+      // Restart LSP to clear cached file state
+      restartClient();
 
       return {
         content: [{
