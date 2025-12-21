@@ -131,7 +131,8 @@ class ElmLspClient {
       throw new Error("LSP process not running. Try reconnecting the MCP server.");
     }
     const content = JSON.stringify(message);
-    const header = `Content-Length: ${content.length}\r\n\r\n`;
+    const byteLength = Buffer.byteLength(content, 'utf8');
+    const header = `Content-Length: ${byteLength}\r\n\r\n`;
     this.process.stdin.write(header + content);
   }
 
