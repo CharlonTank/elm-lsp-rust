@@ -1042,28 +1042,14 @@ impl Workspace {
             return Ok(RemoveVariantResult::error("Cannot remove the only variant from a type"));
         }
 
-        // 2. Check for usages and separate blocking from auto-removable
+        // 2. Check for usages and separate by type
         let usages = self.get_variant_usages(uri, variant_name);
 
-        // Constructor usages are blocking - user must replace them manually
-        let blocking: Vec<_> = usages
+        // Constructor usages - will be replaced with Debug.todo
+        let constructor_usages: Vec<_> = usages
             .iter()
             .filter(|u| u.usage_type == UsageType::Constructor)
-            .cloned()
             .collect();
-
-        if !blocking.is_empty() {
-            return Ok(RemoveVariantResult {
-                success: false,
-                message: format!(
-                    "Variant '{}' is used as a constructor in {} place(s). Replace these usages with other variants first.",
-                    variant_name,
-                    blocking.len()
-                ),
-                blocking_usages: blocking,
-                changes: None,
-            });
-        }
 
         // Pattern match usages can be auto-removed
         let pattern_usages: Vec<_> = usages
@@ -1157,6 +1143,51 @@ impl Workspace {
 
         changes.insert(uri.clone(), type_def_edits);
 
+        // 4b. Replace constructor usages with Debug.todo
+        for usage in &constructor_usages {
+            if let Some(ref range) = usage.constructor_usage_range {
+                let usage_uri = Url::parse(&usage.uri)
+                    .map_err(|_| anyhow::anyhow!("Invalid usage URI"))?;
+
+                // Read the original code to include in the Debug.todo message
+                let original_code = if let Some(usage_content) = self.read_file_content(&usage_uri) {
+                    let start_line = range.start.line as usize;
+                    let end_line = range.end.line as usize;
+                    let usage_lines: Vec<&str> = usage_content.lines().collect();
+
+                    if start_line == end_line {
+                        // Single line - extract exact code
+                        usage_lines.get(start_line)
+                            .map(|l| {
+                                let start_char = range.start.character as usize;
+                                let end_char = range.end.character as usize;
+                                if end_char <= l.len() && start_char < end_char {
+                                    l[start_char..end_char].to_string()
+                                } else {
+                                    variant_name.to_string()
+                                }
+                            })
+                            .unwrap_or_else(|| variant_name.to_string())
+                    } else {
+                        // Multi-line - use variant name for simplicity
+                        variant_name.to_string()
+                    }
+                } else {
+                    variant_name.to_string()
+                };
+
+                let replacement = format!("Debug.todo \"VARIANT REMOVAL DONE: {}\"", original_code);
+
+                changes
+                    .entry(usage_uri)
+                    .or_insert_with(Vec::new)
+                    .push(TextEdit {
+                        range: range.clone(),
+                        new_text: replacement,
+                    });
+            }
+        }
+
         // 5. Add edits to remove all pattern match branches
         // Also collect removed pattern lines for useless wildcard detection
         let mut removed_pattern_lines: Vec<u32> = Vec::new();
@@ -1211,20 +1242,26 @@ impl Workspace {
             .filter(|u| u.usage_type == UsageType::PatternMatch && u.pattern_branch_range.is_some())
             .count();
 
-        let message = match (removed_branches, useless_wildcard_count) {
-            (0, 0) => format!("Removed variant '{}'", variant_name),
-            (b, 0) => format!(
-                "Removed variant '{}' and {} pattern match branch(es)",
-                variant_name, b
-            ),
-            (0, w) => format!(
-                "Removed variant '{}' and {} useless wildcard(s)",
-                variant_name, w
-            ),
-            (b, w) => format!(
-                "Removed variant '{}', {} pattern match branch(es), and {} useless wildcard(s)",
-                variant_name, b, w
-            ),
+        let replaced_constructors = constructor_usages.len();
+
+        let message = {
+            let mut parts = vec![format!("Removed variant '{}'", variant_name)];
+
+            if replaced_constructors > 0 {
+                parts.push(format!("replaced {} constructor usage(s) with Debug.todo", replaced_constructors));
+            }
+            if removed_branches > 0 {
+                parts.push(format!("removed {} pattern match branch(es)", removed_branches));
+            }
+            if useless_wildcard_count > 0 {
+                parts.push(format!("removed {} useless wildcard(s)", useless_wildcard_count));
+            }
+
+            if parts.len() == 1 {
+                parts[0].clone()
+            } else {
+                format!("{}, {}", parts[0], parts[1..].join(", "))
+            }
         };
 
         Ok(RemoveVariantResult::success(&message, changes))
@@ -1447,6 +1484,13 @@ impl Workspace {
                     None
                 };
 
+                // Get constructor usage range for Debug.todo replacement
+                let constructor_usage_range = if usage_type == UsageType::Constructor {
+                    self.get_constructor_usage_range_with_tree(&tree, &content, position)
+                } else {
+                    None
+                };
+
                 let is_blocking = usage_type == UsageType::Constructor;
 
                 // Get context from cached content
@@ -1477,6 +1521,7 @@ impl Workspace {
                     call_chain: Vec::new(),
                     usage_type,
                     pattern_branch_range,
+                    constructor_usage_range,
                 });
             }
         }
@@ -1704,6 +1749,59 @@ impl Workspace {
         }
 
         None
+    }
+
+    /// Get constructor usage range using a pre-parsed tree (for Debug.todo replacement)
+    fn get_constructor_usage_range_with_tree(
+        &self,
+        tree: &tree_sitter::Tree,
+        _content: &str,
+        position: Position,
+    ) -> Option<Range> {
+        let point = tree_sitter::Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+
+        let node = tree.root_node().descendant_for_point_range(point, point)?;
+
+        // Check if this is part of a function call (variant with args)
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n.kind() == "function_call_expr" {
+                // Check if the function being called is our variant
+                if let Some(func_node) = n.child(0) {
+                    if func_node.start_position().row == node.start_position().row
+                        && func_node.start_position().column == node.start_position().column
+                    {
+                        // This is a function call where our variant is the function
+                        return Some(Range {
+                            start: Position {
+                                line: n.start_position().row as u32,
+                                character: n.start_position().column as u32,
+                            },
+                            end: Position {
+                                line: n.end_position().row as u32,
+                                character: n.end_position().column as u32,
+                            },
+                        });
+                    }
+                }
+            }
+            current = n.parent();
+        }
+
+        // Simple variant without arguments - just the identifier
+        Some(Range {
+            start: Position {
+                line: node.start_position().row as u32,
+                character: node.start_position().column as u32,
+            },
+            end: Position {
+                line: node.end_position().row as u32,
+                character: node.end_position().column as u32,
+            },
+        })
     }
 
     /// Find enclosing function using a pre-parsed tree (for performance)
@@ -2271,6 +2369,9 @@ pub struct VariantUsage {
     /// Full range of the pattern branch (for auto-removal)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern_branch_range: Option<Range>,
+    /// Full range of the constructor expression (for Debug.todo replacement)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constructor_usage_range: Option<Range>,
 }
 
 /// Result of a remove variant operation

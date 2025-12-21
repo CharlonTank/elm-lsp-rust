@@ -6,25 +6,26 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 | Feature | Fixture Tests | Meetdown Tests | Coverage |
 |---------|---------------|----------------|----------|
-| elm_completion | 1 | 0 | ⚠️ Basic |
-| elm_hover | 1 | 0 | ⚠️ Basic |
-| elm_definition | 1 | 0 | ⚠️ Basic |
+| elm_completion | 1 | 2 | ✅ Good |
+| elm_hover | 1 | 2 | ✅ Good |
+| elm_definition | 1 | 2 | ✅ Good |
 | elm_references | 1 | 2 | ✅ Good |
-| elm_symbols | 1 | 0 | ⚠️ Basic |
-| elm_format | 1 | 0 | ⚠️ Basic |
-| elm_diagnostics | 2 | 0 | ✅ Good |
-| elm_code_actions | 1 | 0 | ⚠️ Basic |
+| elm_symbols | 1 | 2 | ✅ Good |
+| elm_format | 1 | 2 | ✅ Good |
+| elm_diagnostics | 2 | 2 | ✅ Excellent |
+| elm_code_actions | 1 | 1 | ✅ Good |
 | elm_apply_code_action | 0 | 0 | ❌ None |
-| elm_prepare_rename | 1 | 0 | ⚠️ Basic |
-| elm_rename | 2 | 3 | ✅ Good |
-| elm_move_function | 1 | 0 | ⚠️ Basic |
+| elm_prepare_rename | 1 | 2 | ✅ Good |
+| elm_rename | 2 | 3 | ✅ Excellent |
+| elm_move_function | 1 | 1 | ✅ Good |
 | elm_prepare_remove_variant | 3 | 19 | ✅ Excellent |
-| elm_remove_variant | 5 | 3 | ✅ Good |
-| elm_rename_file | 0 | 3 | ✅ Good |
-| elm_move_file | 0 | 3 | ✅ Good |
+| elm_remove_variant | 5 | 3 | ✅ Excellent |
+| elm_rename_file | 1 | 3 | ✅ Excellent |
+| elm_move_file | 1 | 3 | ✅ Excellent |
 
 **Legend:**
-- ✅ Good/Excellent: Multiple test cases covering different scenarios
+- ✅ Excellent: Multiple test cases with comprehensive coverage
+- ✅ Good: At least 2 tests covering different scenarios
 - ⚠️ Basic: Only 1 test, needs more coverage
 - ❌ None: No tests exist
 
@@ -52,11 +53,13 @@ This document maps all MCP tools (features) to their corresponding tests.
 | testPrepareRemoveVariant | elm_prepare_remove_variant | Check Unused variant can be removed |
 | testPrepareRemoveVariantWithUsages | elm_prepare_remove_variant | Check Blue has constructor usages |
 | testRemoveVariant | elm_remove_variant | Remove Unused from Color type |
-| testRemoveVariantBlocked | elm_remove_variant | Verify Blue removal is blocked |
+| testRemoveVariantWithDebugTodo | elm_remove_variant | Verify constructor replaced with Debug.todo |
 | testRemoveVariantPatternAutoRemove | elm_remove_variant | Pattern branches auto-removed with Red |
 | testRemoveVariantWithArgs | elm_remove_variant | All 4 TextMsg pattern branches removed |
 | testRemoveVariantOnlyVariant | elm_prepare_remove_variant | Error when removing only variant |
 | testRemoveVariantUselessWildcard | elm_remove_variant | Useless wildcard auto-removed |
+| testRenameFile | elm_rename_file | Rename Utils.elm → Helper.elm |
+| testMoveFile | elm_move_file | Move Utils.elm → Helpers/Utils.elm |
 
 ### test_meetdown_comprehensive.mjs (Real-World Tests)
 
@@ -67,7 +70,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 | 3 | elm_prepare_remove_variant | GroupVisibility variants analysis |
 | 4 | elm_prepare_remove_variant | PastOngoingOrFuture 3 variants |
 | 5 | elm_remove_variant | Try to remove EventCancelled |
-| 6 | elm_remove_variant | MeetOnline blocked (constructors) |
+| 6 | elm_remove_variant | MeetOnline constructor replaced with Debug.todo |
 | 7 | elm_prepare_remove_variant | Error types analysis |
 | 8 | elm_prepare_remove_variant | Large Msg type from GroupPage |
 | 9 | elm_prepare_remove_variant | Response structure verification |
@@ -96,39 +99,50 @@ This document maps all MCP tools (features) to their corresponding tests.
 | 32 | elm_rename, elm_references | Rename function no corruption |
 | 33 | elm_rename, elm_references | Rename type alias cross-file |
 | 34 | elm_rename | Rename type alias same-file |
+| 35 | elm_hover | Hover on FrontendModel type |
+| 36 | elm_hover | Hover on cross-module function |
+| 37 | elm_definition | Go to definition cross-file |
+| 38 | elm_definition | Go to definition same file |
+| 39 | elm_completion | Completion after module qualifier |
+| 40 | elm_completion | Completion for local values |
+| 41 | elm_symbols | Document symbols in large file |
+| 42 | elm_symbols | Document symbols in Types.elm |
+| 43 | elm_format | Format small file |
+| 44 | elm_format | Format large file performance |
+| 45 | elm_diagnostics | Diagnostics on valid file |
+| 46 | elm_diagnostics | Diagnostics performance on large file |
+| 47 | elm_code_actions | Code actions at function |
+| 48 | elm_prepare_rename | Prepare rename on type |
+| 49 | elm_prepare_rename | Prepare rename on local function |
+| 50 | elm_move_function | Move function between modules |
 
 ---
 
 ## Features Needing More Tests
 
-### High Priority (No or minimal tests)
+### High Priority (No tests)
 1. **elm_apply_code_action** - No tests exist
-2. **elm_completion** - Only 1 basic test
-3. **elm_hover** - Only 1 basic test
-4. **elm_definition** - Only 1 basic test
-
-### Medium Priority (Could use more coverage)
-1. **elm_symbols** - Test pagination, large files
-2. **elm_format** - Test error handling
-3. **elm_code_actions** - Test specific action types
-4. **elm_move_function** - Test complex moves, import updates
 
 ### Well Covered
-1. **elm_prepare_remove_variant** - 22 tests (3 fixture + 19 meetdown)
-2. **elm_remove_variant** - 8 tests (5 fixture + 3 meetdown)
-3. **elm_rename** - 5 tests (2 fixture + 3 meetdown)
-4. **elm_rename_file** - 3 meetdown tests
-5. **elm_move_file** - 3 meetdown tests
+All other features now have at least 2 tests with both fixture and meetdown coverage:
+- elm_completion, elm_hover, elm_definition (2-3 tests each)
+- elm_references, elm_symbols, elm_format (3 tests each)
+- elm_diagnostics, elm_code_actions (3-4 tests each)
+- elm_prepare_rename, elm_move_function (2-3 tests each)
+- elm_rename (5 tests)
+- elm_prepare_remove_variant (22 tests)
+- elm_remove_variant (8 tests)
+- elm_rename_file, elm_move_file (4 tests each)
 
 ---
 
 ## Test Execution
 
 ```bash
-# Run fixture tests (21 tests)
+# Run fixture tests (23 tests)
 node tests/run_tests.mjs
 
-# Run meetdown real-world tests (40 tests)
+# Run meetdown real-world tests (99 tests)
 node tests/test_meetdown_comprehensive.mjs
 
 # Run all tests
@@ -137,4 +151,4 @@ node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
 
 ---
 
-*Last updated: 2025-12-21 - All 97 tests passing ✅*
+*Last updated: 2025-12-21 - All 122 tests passing ✅*

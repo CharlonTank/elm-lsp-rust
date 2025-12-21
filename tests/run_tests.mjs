@@ -100,6 +100,17 @@ function backupFixture() {
 }
 
 function restoreFixture() {
+  // First, clean up any newly created files/directories from tests
+  const helperFile = join(FIXTURE_DIR, "src/Helper.elm");
+  const helpersDir = join(FIXTURE_DIR, "src/Helpers");
+  if (existsSync(helperFile)) {
+    rmSync(helperFile);
+  }
+  if (existsSync(helpersDir)) {
+    rmSync(helpersDir, { recursive: true });
+  }
+
+  // Restore original files
   for (const file of ["elm.json"]) {
     if (existsSync(join(BACKUP_DIR, file))) {
       copyFileSync(join(BACKUP_DIR, file), join(FIXTURE_DIR, file));
@@ -465,26 +476,43 @@ async function testRemoveVariant() {
   }
 }
 
-async function testRemoveVariantBlocked() {
-  const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+async function testRemoveVariantWithDebugTodo() {
+  // Test that constructor usages get replaced with Debug.todo instead of blocking
+  backupFixture();
 
-  // Try to remove 'Blue' variant which is used as CONSTRUCTOR (line 18, 0-indexed: 17)
-  // Blue is used in: getDefaultColor = Blue
-  const result = await callTool("elm_remove_variant", {
-    file_path: testFile,
-    line: 17, // 0-indexed (line 18: "    | Blue")
-    character: 6, // position of "Blue"
-  });
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+    const originalContent = readFileSync(testFile, "utf-8");
 
-  // Blue is used as constructor in getDefaultColor, so removal should be blocked
-  if (result.includes("Cannot remove") || result.includes("Blocking") || result.includes("constructor")) {
-    assertContains(result, "getDefaultColor", "Should show blocking function");
-    logTest("remove_variant: correctly blocks Blue removal", true);
-  } else if (result.includes("Removed")) {
-    // This would be unexpected - Blue is used as constructor
-    throw new Error("Should not have been able to remove Blue variant (used as constructor)");
-  } else {
-    logTest("remove_variant: checked Blue variant blocking", true);
+    // Verify Blue exists and has constructor usage before removal
+    assertContains(originalContent, "| Blue", "Blue should exist in type before removal");
+    assertContains(originalContent, "getDefaultColor =\n    Blue", "Blue should be used as constructor");
+
+    // Remove 'Blue' variant which is used as CONSTRUCTOR (line 18, 0-indexed: 17)
+    const result = await callTool("elm_remove_variant", {
+      file_path: testFile,
+      line: 17, // 0-indexed (line 18: "    | Blue")
+      character: 6, // position of "Blue"
+    });
+
+    if (result.includes("Removed") && result.includes("Debug.todo")) {
+      // Verify the variant was removed and constructor replaced with Debug.todo
+      const newContent = readFileSync(testFile, "utf-8");
+
+      if (newContent.includes("| Blue")) {
+        throw new Error("Blue variant should be removed from type definition");
+      }
+
+      if (!newContent.includes('Debug.todo "VARIANT REMOVAL DONE: Blue"')) {
+        throw new Error("Blue constructor usage should be replaced with Debug.todo");
+      }
+
+      logTest("remove_variant: replaces constructor with Debug.todo", true);
+    } else {
+      throw new Error(`Expected successful removal with Debug.todo replacement, got: ${result.substring(0, 200)}`);
+    }
+  } finally {
+    restoreFixture();
   }
 }
 
@@ -654,6 +682,100 @@ async function testRemoveVariantUselessWildcard() {
   }
 }
 
+async function testRenameFile() {
+  // Test renaming Utils.elm to Helper.elm
+  backupFixture();
+
+  try {
+    const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
+    const helperFile = join(FIXTURE_DIR, "src/Helper.elm");
+    const mainFile = join(FIXTURE_DIR, "src/Main.elm");
+
+    // Verify Utils.elm exists and Main.elm imports it
+    const originalMainContent = readFileSync(mainFile, "utf-8");
+    assertContains(originalMainContent, "import Utils", "Main.elm should import Utils before rename");
+
+    const result = await callTool("elm_rename_file", {
+      file_path: utilsFile,
+      new_name: "Helper.elm",
+    });
+
+    if (result.includes("Renamed") || result.includes("success")) {
+      // Verify new file exists
+      if (!existsSync(helperFile)) {
+        throw new Error("Helper.elm should exist after rename");
+      }
+
+      // Verify old file doesn't exist
+      if (existsSync(utilsFile)) {
+        throw new Error("Utils.elm should not exist after rename");
+      }
+
+      // Verify module declaration updated
+      const helperContent = readFileSync(helperFile, "utf-8");
+      assertContains(helperContent, "module Helper", "Module declaration should be updated");
+
+      // Verify import updated in Main.elm
+      const newMainContent = readFileSync(mainFile, "utf-8");
+      assertContains(newMainContent, "import Helper", "Main.elm should import Helper after rename");
+
+      logTest("rename_file: Utils.elm → Helper.elm", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
+async function testMoveFile() {
+  // Test moving Utils.elm to Helpers/Utils.elm
+  backupFixture();
+
+  try {
+    const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
+    const targetFile = join(FIXTURE_DIR, "src/Helpers/Utils.elm");
+    const mainFile = join(FIXTURE_DIR, "src/Main.elm");
+
+    // Verify Utils.elm exists
+    if (!existsSync(utilsFile)) {
+      throw new Error("Utils.elm should exist before move");
+    }
+
+    // Use relative path for target (relative to workspace root)
+    const result = await callTool("elm_move_file", {
+      file_path: utilsFile,
+      target_path: "src/Helpers/Utils.elm",
+    });
+
+    if (result.includes("Moved") || result.includes("success")) {
+      // Verify new file exists
+      if (!existsSync(targetFile)) {
+        throw new Error("Helpers/Utils.elm should exist after move");
+      }
+
+      // Verify old file doesn't exist
+      if (existsSync(utilsFile)) {
+        throw new Error("Utils.elm should not exist after move");
+      }
+
+      // Verify module declaration updated
+      const newContent = readFileSync(targetFile, "utf-8");
+      assertContains(newContent, "module Helpers.Utils", "Module declaration should be updated to Helpers.Utils");
+
+      // Verify import updated in Main.elm
+      const newMainContent = readFileSync(mainFile, "utf-8");
+      assertContains(newMainContent, "import Helpers.Utils", "Main.elm should import Helpers.Utils after move");
+
+      logTest("move_file: Utils.elm → Helpers/Utils.elm", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -716,11 +838,13 @@ async function runTests() {
       ["Prepare Remove Variant", testPrepareRemoveVariant],
       ["Prepare Remove Variant (with usages)", testPrepareRemoveVariantWithUsages],
       ["Remove Variant", testRemoveVariant],
-      ["Remove Variant (blocked)", testRemoveVariantBlocked],
+      ["Remove Variant (Debug.todo)", testRemoveVariantWithDebugTodo],
       ["Remove Variant (pattern auto-remove)", testRemoveVariantPatternAutoRemove],
       ["Remove Variant (variant with args)", testRemoveVariantWithArgs],
       ["Remove Variant (only variant)", testRemoveVariantOnlyVariant],
       ["Remove Variant (useless wildcard)", testRemoveVariantUselessWildcard],
+      ["Rename File", testRenameFile],
+      ["Move File", testMoveFile],
     ];
 
     for (const [name, testFn] of tests) {
