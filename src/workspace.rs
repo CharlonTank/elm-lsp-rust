@@ -1042,15 +1042,21 @@ impl Workspace {
             return Ok(RemoveVariantResult::error("Cannot remove the only variant from a type"));
         }
 
-        // 2. Check for blocking usages
+        // 2. Check for usages and separate blocking from auto-removable
         let usages = self.get_variant_usages(uri, variant_name);
-        let blocking: Vec<_> = usages.iter().filter(|u| u.is_blocking).cloned().collect();
+
+        // Constructor usages are blocking - user must replace them manually
+        let blocking: Vec<_> = usages
+            .iter()
+            .filter(|u| u.usage_type == UsageType::Constructor)
+            .cloned()
+            .collect();
 
         if !blocking.is_empty() {
             return Ok(RemoveVariantResult {
                 success: false,
                 message: format!(
-                    "Variant '{}' is used in {} place(s). Replace these usages with other variants first.",
+                    "Variant '{}' is used as a constructor in {} place(s). Replace these usages with other variants first.",
                     variant_name,
                     blocking.len()
                 ),
@@ -1059,7 +1065,13 @@ impl Workspace {
             });
         }
 
-        // 3. Safe to remove - read file and find the variant line
+        // Pattern match usages can be auto-removed
+        let pattern_usages: Vec<_> = usages
+            .iter()
+            .filter(|u| u.usage_type == UsageType::PatternMatch)
+            .collect();
+
+        // 3. Read file and find the variant line
         let path = uri.to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid URI"))?;
         let content = std::fs::read_to_string(&path)?;
@@ -1102,9 +1114,9 @@ impl Workspace {
 
         let variant_line = variant_line.ok_or_else(|| anyhow::anyhow!("Variant line not found in source"))?;
 
-        // 4. Create TextEdit to remove the variant
-        let mut changes = HashMap::new();
-        let edit = if is_first_variant {
+        // 4. Create TextEdits to remove the variant from type definition
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let type_def_edits = if is_first_variant {
             // First variant: need to change next | to =
             if let Some(next_line) = next_variant_line {
                 // Delete from start of variant line to start of next variant line
@@ -1143,12 +1155,79 @@ impl Workspace {
             }]
         };
 
-        changes.insert(uri.clone(), edit);
+        changes.insert(uri.clone(), type_def_edits);
 
-        Ok(RemoveVariantResult::success(
-            &format!("Removed variant '{}'", variant_name),
-            changes,
-        ))
+        // 5. Add edits to remove all pattern match branches
+        // Also collect removed pattern lines for useless wildcard detection
+        let mut removed_pattern_lines: Vec<u32> = Vec::new();
+
+        for usage in &pattern_usages {
+            if let Some(ref range) = usage.pattern_branch_range {
+                let usage_uri = Url::parse(&usage.uri)
+                    .map_err(|_| anyhow::anyhow!("Invalid usage URI"))?;
+
+                removed_pattern_lines.push(range.start.line);
+
+                changes
+                    .entry(usage_uri)
+                    .or_insert_with(Vec::new)
+                    .push(TextEdit {
+                        range: range.clone(),
+                        new_text: String::new(),
+                    });
+            }
+        }
+
+        // 5b. Find and remove useless wildcards
+        // A wildcard is useless if after removal it would cover 0 remaining variants
+        let useless_wildcards = self.find_useless_wildcards(
+            &content,
+            variant_name,
+            total_variants,
+            &removed_pattern_lines,
+        );
+
+        let useless_wildcard_count = useless_wildcards.len();
+        for wc_range in useless_wildcards {
+            changes
+                .entry(uri.clone())
+                .or_insert_with(Vec::new)
+                .push(TextEdit {
+                    range: wc_range,
+                    new_text: String::new(),
+                });
+        }
+
+        // 6. Sort edits in reverse order within each file to avoid offset issues
+        for edits in changes.values_mut() {
+            edits.sort_by(|a, b| {
+                b.range.start.line.cmp(&a.range.start.line)
+                    .then_with(|| b.range.start.character.cmp(&a.range.start.character))
+            });
+        }
+
+        let removed_branches = usages
+            .iter()
+            .filter(|u| u.usage_type == UsageType::PatternMatch && u.pattern_branch_range.is_some())
+            .count();
+
+        let message = match (removed_branches, useless_wildcard_count) {
+            (0, 0) => format!("Removed variant '{}'", variant_name),
+            (b, 0) => format!(
+                "Removed variant '{}' and {} pattern match branch(es)",
+                variant_name, b
+            ),
+            (0, w) => format!(
+                "Removed variant '{}' and {} useless wildcard(s)",
+                variant_name, w
+            ),
+            (b, w) => format!(
+                "Removed variant '{}', {} pattern match branch(es), and {} useless wildcard(s)",
+                variant_name, b, w
+            ),
+        };
+
+        Ok(RemoveVariantResult::success(&message, changes))
     }
 
     /// Find the enclosing function for a given position in a file
@@ -1291,7 +1370,9 @@ impl Workspace {
         let source_path = source_uri.to_file_path().ok();
         let source_content = source_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
 
-        for r in refs {
+        // Group references by file for efficient batch processing
+        let mut refs_by_file: HashMap<String, Vec<&SymbolReference>> = HashMap::new();
+        for r in &refs {
             // Skip the definition itself
             if r.is_definition {
                 continue;
@@ -1303,13 +1384,11 @@ impl Workspace {
             }
 
             // Skip the variant declaration in the type definition
-            // Check if this reference is in the type definition area
             if r.uri == *source_uri {
                 if let Some(ref content) = source_content {
                     let lines: Vec<&str> = content.lines().collect();
                     if let Some(line) = lines.get(r.range.start.line as usize) {
                         let trimmed = line.trim();
-                        // Skip lines that look like type variant declarations
                         if (trimmed.starts_with('=') || trimmed.starts_with('|'))
                             && trimmed.contains(variant_name)
                         {
@@ -1319,47 +1398,87 @@ impl Workspace {
                 }
             }
 
-            // ANY explicit usage of the variant is blocking
-            // If you use Red -> ... in a case, removing Red breaks that line
-            // Wildcards only help when the variant is NOT explicitly mentioned
-            let is_blocking = true;
+            refs_by_file
+                .entry(r.uri.to_string())
+                .or_default()
+                .push(r);
+        }
 
-            let context = self.get_usage_context(&r.uri, r.range.start.line);
-
-            // Find the enclosing function and module
-            let (function_name, module_name) = self
-                .find_enclosing_function(&r.uri, r.range.start)
-                .unwrap_or_else(|| (String::new(), self.get_module_name_from_uri(&r.uri)));
-
-            // Build the call chain from this function up to entry points
-            let call_chain = if !function_name.is_empty() {
-                let mut visited = std::collections::HashSet::new();
-                self.build_call_chain(
-                    &function_name,
-                    &module_name,
-                    &r.uri,
-                    r.range.start.line,
-                    &mut visited,
-                    0,
-                )
-            } else {
-                Vec::new()
+        // Process each file once
+        for (uri_str, file_refs) in refs_by_file {
+            let uri = match Url::parse(&uri_str) {
+                Ok(u) => u,
+                Err(_) => continue,
             };
 
-            usages.push(VariantUsage {
-                uri: r.uri.to_string(),
-                line: r.range.start.line,
-                character: r.range.start.character,
-                is_blocking,
-                context,
-                function_name: if function_name.is_empty() {
-                    None
+            // Read content once per file
+            let content = match self.read_file_content(&uri) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Parse once per file
+            let tree = match self.parser.parse(&content) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let module_name = self.get_module_name_from_uri(&uri);
+
+            // Process all refs in this file with the cached tree
+            for r in file_refs {
+                let position = Position {
+                    line: r.range.start.line,
+                    character: r.range.start.character,
+                };
+
+                // Use pre-parsed tree for classification
+                let usage_type = self.classify_usage_with_tree(&tree, &content, position);
+
+                // Skip type signatures and definitions
+                if matches!(usage_type, UsageType::TypeSignature | UsageType::Definition) {
+                    continue;
+                }
+
+                // Get pattern branch range using pre-parsed tree
+                let pattern_branch_range = if usage_type == UsageType::PatternMatch {
+                    self.get_pattern_branch_range_with_tree(&tree, &content, position)
                 } else {
-                    Some(function_name)
-                },
-                module_name,
-                call_chain,
-            });
+                    None
+                };
+
+                let is_blocking = usage_type == UsageType::Constructor;
+
+                // Get context from cached content
+                let context = content
+                    .lines()
+                    .nth(r.range.start.line as usize)
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default();
+
+                // Find enclosing function using cached module symbols (more reliable)
+                let function_name = self
+                    .find_enclosing_function(&uri, r.range.start)
+                    .map(|(fn_name, _)| fn_name)
+                    .unwrap_or_default();
+
+                usages.push(VariantUsage {
+                    uri: r.uri.to_string(),
+                    line: r.range.start.line,
+                    character: r.range.start.character,
+                    is_blocking,
+                    context,
+                    function_name: if function_name.is_empty() {
+                        None
+                    } else {
+                        Some(function_name)
+                    },
+                    module_name: module_name.clone(),
+                    call_chain: Vec::new(),
+                    usage_type,
+                    pattern_branch_range,
+                });
+            }
         }
 
         usages
@@ -1382,6 +1501,397 @@ impl Workspace {
             .nth(line as usize)
             .map(|l| l.trim().to_string())
             .unwrap_or_default()
+    }
+
+    /// Classify a variant usage as Constructor, PatternMatch, or TypeSignature
+    fn classify_usage(&self, content: &str, position: Position) -> UsageType {
+        let tree = match self.parser.parse(content) {
+            Some(t) => t,
+            None => {
+                tracing::warn!("classify_usage: failed to parse content");
+                return UsageType::Constructor;
+            }
+        };
+
+        let point = tree_sitter::Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+
+        let node = match tree.root_node().descendant_for_point_range(point, point) {
+            Some(n) => n,
+            None => {
+                tracing::warn!("classify_usage: no node at position {:?}", position);
+                return UsageType::Constructor;
+            }
+        };
+
+        tracing::debug!(
+            "classify_usage: position {:?}, node kind: {}, text: {:?}",
+            position,
+            node.kind(),
+            &content[node.byte_range()]
+        );
+
+        // Walk up the tree to find context
+        let mut current = Some(node);
+        while let Some(n) = current {
+            tracing::trace!("classify_usage: checking node kind: {}", n.kind());
+            match n.kind() {
+                // Pattern match contexts - union_pattern is a variant in case branches
+                "case_of_branch" | "pattern" | "union_pattern" => {
+                    tracing::debug!("classify_usage: found PatternMatch at {}", n.kind());
+                    return UsageType::PatternMatch;
+                }
+                // Type annotation context
+                "type_annotation" | "type_expression" => {
+                    tracing::debug!("classify_usage: found TypeSignature at {}", n.kind());
+                    return UsageType::TypeSignature;
+                }
+                // Value/expression contexts = constructor
+                "function_call_expr" | "value_expr" | "let_in_expr" | "if_else_expr" | "tuple_expr" | "list_expr" | "record_expr" => {
+                    tracing::debug!("classify_usage: found Constructor at {}", n.kind());
+                    return UsageType::Constructor;
+                }
+                // Type definition = definition
+                "type_declaration" | "union_variant" => {
+                    // Check if this is the variant definition itself, not a usage
+                    let parent = n.parent();
+                    if parent.is_some_and(|p| p.kind() == "type_declaration") {
+                        tracing::debug!("classify_usage: found Definition at {}", n.kind());
+                        return UsageType::Definition;
+                    }
+                }
+                _ => {}
+            }
+            current = n.parent();
+        }
+
+        tracing::warn!("classify_usage: defaulting to Constructor (no context found)");
+        // Default to Constructor (blocking) if context is unclear
+        UsageType::Constructor
+    }
+
+    /// Get the full range of a pattern branch for removal
+    fn get_pattern_branch_range(&self, content: &str, position: Position) -> Option<Range> {
+        let tree = self.parser.parse(content)?;
+
+        let point = tree_sitter::Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+
+        let node = tree.root_node().descendant_for_point_range(point, point)?;
+
+        // Walk up to find the case_of_branch
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n.kind() == "case_of_branch" {
+                // Found the branch - get its full range
+                let start = n.start_position();
+                let end = n.end_position();
+
+                // Include the newline after if present
+                let lines: Vec<&str> = content.lines().collect();
+                let end_line = end.row;
+                let end_char = if end_line + 1 < lines.len() {
+                    0 // Start of next line
+                } else {
+                    lines.get(end_line).map(|l| l.len()).unwrap_or(0)
+                };
+
+                return Some(Range {
+                    start: Position {
+                        line: start.row as u32,
+                        character: start.column as u32,
+                    },
+                    end: Position {
+                        line: (end_line + 1) as u32,
+                        character: end_char as u32,
+                    },
+                });
+            }
+            current = n.parent();
+        }
+
+        None
+    }
+
+    /// Classify a variant usage using a pre-parsed tree (for performance)
+    fn classify_usage_with_tree(
+        &self,
+        tree: &tree_sitter::Tree,
+        _content: &str,
+        position: Position,
+    ) -> UsageType {
+        let point = tree_sitter::Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+
+        let node = match tree.root_node().descendant_for_point_range(point, point) {
+            Some(n) => n,
+            None => return UsageType::Constructor,
+        };
+
+        // Walk up the tree to find context
+        let mut current = Some(node);
+        while let Some(n) = current {
+            match n.kind() {
+                "case_of_branch" | "pattern" | "union_pattern" => {
+                    return UsageType::PatternMatch;
+                }
+                "type_annotation" | "type_expression" => {
+                    return UsageType::TypeSignature;
+                }
+                "function_call_expr" | "value_expr" | "let_in_expr" | "if_else_expr"
+                | "tuple_expr" | "list_expr" | "record_expr" => {
+                    return UsageType::Constructor;
+                }
+                "type_declaration" | "union_variant" => {
+                    if n.parent().is_some_and(|p| p.kind() == "type_declaration") {
+                        return UsageType::Definition;
+                    }
+                }
+                _ => {}
+            }
+            current = n.parent();
+        }
+
+        UsageType::Constructor
+    }
+
+    /// Get pattern branch range using a pre-parsed tree (for performance)
+    fn get_pattern_branch_range_with_tree(
+        &self,
+        tree: &tree_sitter::Tree,
+        content: &str,
+        position: Position,
+    ) -> Option<Range> {
+        let point = tree_sitter::Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+
+        let node = tree.root_node().descendant_for_point_range(point, point)?;
+
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n.kind() == "case_of_branch" {
+                let start = n.start_position();
+                let end = n.end_position();
+
+                let lines: Vec<&str> = content.lines().collect();
+                let end_line = end.row;
+                let end_char = if end_line + 1 < lines.len() {
+                    0
+                } else {
+                    lines.get(end_line).map(|l| l.len()).unwrap_or(0)
+                };
+
+                return Some(Range {
+                    start: Position {
+                        line: start.row as u32,
+                        character: start.column as u32,
+                    },
+                    end: Position {
+                        line: (end_line + 1) as u32,
+                        character: end_char as u32,
+                    },
+                });
+            }
+            current = n.parent();
+        }
+
+        None
+    }
+
+    /// Find enclosing function using a pre-parsed tree (for performance)
+    fn find_enclosing_function_with_tree(
+        &self,
+        tree: &tree_sitter::Tree,
+        _content: &str,
+        position: Position,
+    ) -> Option<String> {
+        let point = tree_sitter::Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+
+        let node = tree.root_node().descendant_for_point_range(point, point)?;
+
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n.kind() == "value_declaration" || n.kind() == "function_declaration_left" {
+                // Get the function name from the first child
+                if let Some(name_node) = n.child_by_field_name("name") {
+                    return Some(
+                        _content[name_node.byte_range()]
+                            .to_string(),
+                    );
+                }
+                // Fallback: get first child that looks like an identifier
+                for i in 0..n.child_count() {
+                    if let Some(child) = n.child(i) {
+                        if child.kind() == "lower_case_identifier" {
+                            return Some(_content[child.byte_range()].to_string());
+                        }
+                    }
+                }
+            }
+            current = n.parent();
+        }
+
+        None
+    }
+
+    /// Find useless wildcards in case expressions after removing a variant.
+    /// A wildcard becomes useless when it was only covering the variant being removed.
+    ///
+    /// Returns a list of (case_start_line, wildcard_branch_range) for wildcards that should be removed.
+    fn find_useless_wildcards(
+        &self,
+        content: &str,
+        _variant_name: &str,
+        total_variants: usize,
+        removed_pattern_lines: &[u32],
+    ) -> Vec<Range> {
+        let mut useless_wildcards = Vec::new();
+
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_elm::LANGUAGE.into()).ok();
+        let tree = match parser.parse(content, None) {
+            Some(t) => t,
+            None => return useless_wildcards,
+        };
+
+        // Find all case_of_expr nodes in the tree
+        let mut cursor = tree.walk();
+        let mut case_exprs = Vec::new();
+        Self::collect_case_expressions(&mut cursor, &mut case_exprs);
+
+        for case_node in case_exprs {
+            // Find all branches in this case expression
+            let mut branches = Vec::new();
+            let mut has_wildcard = false;
+            let mut wildcard_branch: Option<tree_sitter::Node> = None;
+            let mut explicit_count = 0;
+
+            for i in 0..case_node.named_child_count() {
+                if let Some(child) = case_node.named_child(i) {
+                    if child.kind() == "case_of_branch" {
+                        branches.push(child);
+
+                        // Check if this branch is being removed (matched by pattern line)
+                        let branch_start = child.start_position().row as u32;
+                        if removed_pattern_lines.contains(&branch_start) {
+                            continue;
+                        }
+
+                        // Check if this is a wildcard pattern
+                        if let Some(pattern) = child.child_by_field_name("pattern") {
+                            if Self::is_wildcard_pattern(&pattern, content) {
+                                has_wildcard = true;
+                                wildcard_branch = Some(child);
+                            } else if Self::is_union_pattern(&pattern) {
+                                explicit_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if wildcard becomes useless after removal
+            // A wildcard is useless if:
+            // - There is a wildcard
+            // - After removal, (total_variants - 1) == explicit_count
+            // This means the wildcard would cover 0 remaining variants
+            let remaining_variants = total_variants.saturating_sub(1);
+            if has_wildcard && remaining_variants == explicit_count {
+                if let Some(wc_branch) = wildcard_branch {
+                    let start = wc_branch.start_position();
+                    let end = wc_branch.end_position();
+
+                    // Include the newline after if present
+                    let lines: Vec<&str> = content.lines().collect();
+                    let end_line = end.row;
+                    let end_char = if end_line + 1 < lines.len() {
+                        0 // Start of next line
+                    } else {
+                        lines.get(end_line).map(|l| l.len()).unwrap_or(0)
+                    };
+
+                    useless_wildcards.push(Range {
+                        start: Position {
+                            line: start.row as u32,
+                            character: start.column as u32,
+                        },
+                        end: Position {
+                            line: (end_line + 1) as u32,
+                            character: end_char as u32,
+                        },
+                    });
+                }
+            }
+        }
+
+        useless_wildcards
+    }
+
+    /// Recursively collect all case_of_expr nodes in the tree
+    fn collect_case_expressions<'a>(cursor: &mut tree_sitter::TreeCursor<'a>, cases: &mut Vec<tree_sitter::Node<'a>>) {
+        let node = cursor.node();
+        if node.kind() == "case_of_expr" {
+            cases.push(node);
+        }
+
+        if cursor.goto_first_child() {
+            loop {
+                Self::collect_case_expressions(cursor, cases);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+            cursor.goto_parent();
+        }
+    }
+
+    /// Check if a pattern is a wildcard (_) or catchall (lowercase name without constructor)
+    fn is_wildcard_pattern(pattern: &tree_sitter::Node, content: &str) -> bool {
+        let pattern_text = pattern.utf8_text(content.as_bytes()).unwrap_or("");
+        let trimmed = pattern_text.trim();
+
+        // Check for underscore wildcard
+        if trimmed == "_" {
+            return true;
+        }
+
+        // Check for lowercase name (catchall like `other` or `x`)
+        // Must be a single lowercase identifier, not a constructor pattern
+        if pattern.kind() == "lower_pattern" || pattern.kind() == "anything_pattern" {
+            return true;
+        }
+
+        // Check if it's just a lowercase word
+        if trimmed.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+            && !trimmed.contains(' ')
+            && !trimmed.contains('(')
+        {
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if a pattern is a union/constructor pattern (uppercase name)
+    fn is_union_pattern(pattern: &tree_sitter::Node) -> bool {
+        pattern.kind() == "union_pattern" || pattern.kind() == "upper_case_qid"
+    }
+
+    /// Read file content from a URI
+    fn read_file_content(&self, uri: &Url) -> Option<String> {
+        let path = uri.to_file_path().ok()?;
+        std::fs::read_to_string(&path).ok()
     }
 }
 
@@ -1421,6 +1931,19 @@ const ENTRY_POINTS: &[&str] = &[
     "init",
 ];
 
+/// Type of variant usage - determines if it blocks removal
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum UsageType {
+    /// Constructor call like `let x = Blue` - BLOCKING
+    Constructor,
+    /// Pattern match like `Blue -> ...` - can be auto-removed
+    PatternMatch,
+    /// Type signature like `foo : Color -> ...` - not blocking, skip
+    TypeSignature,
+    /// Definition of the variant itself - skip
+    Definition,
+}
+
 /// Information about a variant usage
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VariantUsage {
@@ -1432,10 +1955,14 @@ pub struct VariantUsage {
     pub function_name: Option<String>,
     pub module_name: String,
     pub call_chain: Vec<CallChainEntry>,
+    pub usage_type: UsageType,
+    /// Full range of the pattern branch (for auto-removal)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern_branch_range: Option<Range>,
 }
 
 /// Result of a remove variant operation
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct RemoveVariantResult {
     pub success: bool,
     pub message: String,

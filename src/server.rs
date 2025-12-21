@@ -809,8 +809,8 @@ impl LanguageServer for ElmLanguageServer {
                 let position = Position { line, character };
 
                 if let Some((type_name, variant, idx, total, all_variants)) = self.get_variant_at_position(&uri, position) {
-                    // Get detailed blocking usages (same as remove_variant)
-                    let blocking_usages = if let Ok(ws) = self.workspace.read() {
+                    // Get all usages
+                    let all_usages = if let Ok(ws) = self.workspace.read() {
                         if let Some(workspace) = ws.as_ref() {
                             workspace.get_variant_usages(&uri, &variant.name)
                         } else {
@@ -820,8 +820,21 @@ impl LanguageServer for ElmLanguageServer {
                         Vec::new()
                     };
 
-                    let usages_count = blocking_usages.len();
-                    let can_remove = total > 1 && usages_count == 0;
+                    // Only constructor usages are truly blocking
+                    let blocking_usages: Vec<_> = all_usages.iter()
+                        .filter(|u| u.is_blocking)
+                        .cloned()
+                        .collect();
+
+                    // Pattern match usages can be auto-removed
+                    let pattern_usages: Vec<_> = all_usages.iter()
+                        .filter(|u| !u.is_blocking)
+                        .cloned()
+                        .collect();
+
+                    let blocking_count = blocking_usages.len();
+                    let pattern_count = pattern_usages.len();
+                    let can_remove = total > 1 && blocking_count == 0;
 
                     // Other variants (excluding the one being removed)
                     let other_variants: Vec<&String> = all_variants.iter()
@@ -835,9 +848,11 @@ impl LanguageServer for ElmLanguageServer {
                         "variantIndex": idx,
                         "totalVariants": total,
                         "otherVariants": other_variants,
-                        "usagesCount": usages_count,
+                        "blockingCount": blocking_count,
+                        "patternCount": pattern_count,
                         "canRemove": can_remove,
                         "blockingUsages": blocking_usages,
+                        "patternUsages": pattern_usages,
                         "range": {
                             "start": { "line": variant.range.start.line, "character": variant.range.start.character },
                             "end": { "line": variant.range.end.line, "character": variant.range.end.character }
@@ -846,7 +861,7 @@ impl LanguageServer for ElmLanguageServer {
                 } else {
                     Ok(Some(serde_json::json!({
                         "success": false,
-                        "error": "No variant found at this position"
+                        "message": "No variant found at this position"
                     })))
                 }
             }
@@ -923,7 +938,7 @@ impl LanguageServer for ElmLanguageServer {
                             } else {
                                 Ok(Some(serde_json::json!({
                                     "success": false,
-                                    "error": result.message,
+                                    "message": result.message,
                                     "typeName": type_name,
                                     "variantName": variant.name,
                                     "otherVariants": other_variants,
@@ -934,14 +949,14 @@ impl LanguageServer for ElmLanguageServer {
                         Err(e) => {
                             Ok(Some(serde_json::json!({
                                 "success": false,
-                                "error": e.to_string()
+                                "message": e.to_string()
                             })))
                         }
                     }
                 } else {
                     Ok(Some(serde_json::json!({
                         "success": false,
-                        "error": "No variant found at this position"
+                        "message": "No variant found at this position"
                     })))
                 }
             }

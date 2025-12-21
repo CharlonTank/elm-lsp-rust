@@ -5,4 +5,6 @@ tests/fixture/elm-stuff/
 tests/fixture-backup/
 *.elmi
 *.elmo
+*.backup
+*.backup2
 .DS_Store

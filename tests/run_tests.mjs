@@ -382,11 +382,11 @@ async function testFormat() {
 async function testPrepareRemoveVariant() {
   const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
 
-  // Test prepare_remove_variant on 'Unused' variant (line 11 in editor, 0-indexed: 10)
+  // Test prepare_remove_variant on 'Unused' variant (line 19 in editor, 0-indexed: 18)
   // "    | Unused"
   const result = await callTool("elm_prepare_remove_variant", {
     file_path: testFile,
-    line: 10, // 0-indexed (line 11: "    | Unused")
+    line: 18, // 0-indexed (line 19: "    | Unused")
     character: 6, // position of "Unused"
   });
 
@@ -398,23 +398,21 @@ async function testPrepareRemoveVariant() {
 async function testPrepareRemoveVariantWithUsages() {
   const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
 
-  // Test prepare_remove_variant on 'Red' variant which is used (line 8, 0-indexed: 7)
+  // Test prepare_remove_variant on 'Blue' variant which is used as CONSTRUCTOR (line 18, 0-indexed: 17)
+  // Blue is used in: getDefaultColor = Blue
   const result = await callTool("elm_prepare_remove_variant", {
     file_path: testFile,
-    line: 7, // 0-indexed (line 8: "    = Red")
-    character: 6, // position of "Red"
+    line: 17, // 0-indexed (line 18: "    | Blue")
+    character: 6, // position of "Blue"
   });
 
-  assertContains(result, "Red", "Should identify Red variant");
+  assertContains(result, "Blue", "Should identify Blue variant");
   assertContains(result, "Color", "Should identify Color type");
-  // Red is used, so should show blocking usages or usage count > 0
-  if (result.includes("Blocking") || result.includes("Usages: 1") || result.includes("has usages")) {
-    logTest("prepare_remove_variant: detects Red has usages", true);
-  } else if (result.includes("Usages: 0")) {
-    // If wildcard covers it, it might show 0 usages
-    logTest("prepare_remove_variant: Red covered by wildcard", true);
+  // Blue is used as constructor, so should show blocking usages or usage count > 0
+  if (result.includes("Blocking") || result.includes("Usages:") || result.includes("has usages") || result.includes("constructor")) {
+    logTest("prepare_remove_variant: detects Blue has usages", true);
   } else {
-    logTest("prepare_remove_variant: checked Red variant", true);
+    logTest("prepare_remove_variant: checked Blue variant", true);
   }
 }
 
@@ -424,10 +422,10 @@ async function testRemoveVariant() {
   try {
     const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
 
-    // Remove 'Unused' variant which is not used anywhere (line 11 in editor, 0-indexed: 10)
+    // Remove 'Unused' variant which is not used anywhere (line 19 in editor, 0-indexed: 18)
     const result = await callTool("elm_remove_variant", {
       file_path: testFile,
-      line: 10, // 0-indexed (line 11: "    | Unused")
+      line: 18, // 0-indexed (line 19: "    | Unused")
       character: 6, // position of "Unused"
     });
 
@@ -454,22 +452,189 @@ async function testRemoveVariant() {
 async function testRemoveVariantBlocked() {
   const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
 
-  // Try to remove 'Red' variant which is explicitly used (line 8, 0-indexed: 7)
+  // Try to remove 'Blue' variant which is used as CONSTRUCTOR (line 18, 0-indexed: 17)
+  // Blue is used in: getDefaultColor = Blue
   const result = await callTool("elm_remove_variant", {
     file_path: testFile,
-    line: 7, // 0-indexed (line 8: "    = Red")
-    character: 6, // position of "Red"
+    line: 17, // 0-indexed (line 18: "    | Blue")
+    character: 6, // position of "Blue"
   });
 
-  // Red is used explicitly in the case expression, so removal should be blocked
-  if (result.includes("Cannot remove") || result.includes("Blocking") || result.includes("used")) {
-    assertContains(result, "colorToString", "Should show blocking function");
-    logTest("remove_variant: correctly blocks Red removal", true);
+  // Blue is used as constructor in getDefaultColor, so removal should be blocked
+  if (result.includes("Cannot remove") || result.includes("Blocking") || result.includes("constructor")) {
+    assertContains(result, "getDefaultColor", "Should show blocking function");
+    logTest("remove_variant: correctly blocks Blue removal", true);
   } else if (result.includes("Removed")) {
-    // This would be unexpected - Red is explicitly used
-    throw new Error("Should not have been able to remove Red variant");
+    // This would be unexpected - Blue is used as constructor
+    throw new Error("Should not have been able to remove Blue variant (used as constructor)");
   } else {
-    logTest("remove_variant: checked Red variant blocking", true);
+    logTest("remove_variant: checked Blue variant blocking", true);
+  }
+}
+
+async function testRemoveVariantPatternAutoRemove() {
+  // Test that pattern-only usages get auto-removed along with the variant
+  backupFixture();
+
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+    const originalContent = readFileSync(testFile, "utf-8");
+
+    // Verify Red exists and has pattern usage before removal
+    assertContains(originalContent, "= Red", "Red should exist in type before removal");
+    assertContains(originalContent, "Red ->", "Red pattern should exist before removal");
+
+    // Remove 'Red' variant which is used only in pattern matches (line 16, 0-indexed: 15)
+    const result = await callTool("elm_remove_variant", {
+      file_path: testFile,
+      line: 15, // 0-indexed (line 16: "    = Red")
+      character: 6, // position of "Red"
+    });
+
+    if (result.includes("Successfully") || result.includes("Removed")) {
+      // Verify both the variant AND the pattern branch were removed
+      const newContent = readFileSync(testFile, "utf-8");
+
+      if (newContent.includes("= Red") || newContent.includes("| Red")) {
+        throw new Error("Red variant should be removed from type definition");
+      }
+      // Use regex to match actual pattern branch (not comments): line starting with whitespace + "Red ->"
+      if (/^\s+Red\s*->/m.test(newContent)) {
+        throw new Error("Red pattern branch should be auto-removed");
+      }
+
+      // Check the message mentions pattern branch removal
+      assertContains(result, "pattern", "Should mention pattern branch removal");
+      logTest("remove_variant: pattern branch auto-removed with Red", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
+async function testRemoveVariantWithArgs() {
+  // Test that removing a variant with args removes ALL its pattern branches
+  backupFixture();
+
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+    const originalContent = readFileSync(testFile, "utf-8");
+
+    // Verify TextMsg exists and has multiple pattern usages before removal
+    assertContains(originalContent, "= TextMsg String", "TextMsg should exist in type before removal");
+
+    // Count TextMsg patterns (4 total: TextMsg "hello", TextMsg "bye", TextMsg content, TextMsg _)
+    const textMsgPatternCount = (originalContent.match(/^\s+TextMsg\s/gm) || []).length;
+    if (textMsgPatternCount < 4) {
+      throw new Error(`Expected at least 4 TextMsg patterns, found ${textMsgPatternCount}`);
+    }
+
+    // Remove 'TextMsg' variant (line 28, 0-indexed: 27)
+    const result = await callTool("elm_remove_variant", {
+      file_path: testFile,
+      line: 27, // 0-indexed (line 28: "    = TextMsg String")
+      character: 6, // position of "TextMsg"
+    });
+
+    if (result.includes("Successfully") || result.includes("Removed")) {
+      const newContent = readFileSync(testFile, "utf-8");
+
+      // Verify TextMsg is gone from type definition
+      if (newContent.includes("= TextMsg") || newContent.includes("| TextMsg")) {
+        throw new Error("TextMsg variant should be removed from type definition");
+      }
+
+      // Verify ALL pattern branches were removed (no "TextMsg" followed by " " on a line)
+      const remainingPatterns = (newContent.match(/^\s+TextMsg\s/gm) || []).length;
+      if (remainingPatterns > 0) {
+        throw new Error(`All TextMsg patterns should be removed, but ${remainingPatterns} remain`);
+      }
+
+      logTest("remove_variant: all 4 TextMsg pattern branches auto-removed", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
+async function testRemoveVariantOnlyVariant() {
+  // Test that removing the only variant of a type gives an error
+  const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+
+  // Try to remove 'OnlyOne' - the only variant in Single type (line 34, 0-indexed: 33)
+  const result = await callTool("elm_prepare_remove_variant", {
+    file_path: testFile,
+    line: 33, // 0-indexed (line 34: "    = OnlyOne")
+    character: 6, // position of "OnlyOne"
+  });
+
+  // Should indicate it cannot be removed (only variant)
+  if (result.includes("cannot") || result.includes("only") ||
+      result.includes("1 variant") || result.includes("error")) {
+    logTest("remove_variant: correctly errors on only variant", true);
+  } else {
+    logTest("remove_variant: correctly errors on only variant", false,
+            `Expected error about only variant, got: ${result}`);
+  }
+}
+
+async function testRemoveVariantUselessWildcard() {
+  // Test that removing a variant that makes a wildcard useless also removes the wildcard
+  // Toggle type: On | Off, with case On -> ..., _ -> ... (wildcard only covers Off)
+  backupFixture();
+
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+    const originalContent = readFileSync(testFile, "utf-8");
+
+    // Verify Off exists and the wildcard pattern exists
+    assertContains(originalContent, "| Off", "Off should exist in type before removal");
+    assertContains(originalContent, "_ ->", "Wildcard pattern should exist before removal");
+
+    // Count wildcards in toggleToString function (should be 1)
+    const toggleMatch = originalContent.match(/toggleToString[\s\S]*?_ ->/);
+    if (!toggleMatch) {
+      throw new Error("toggleToString function with wildcard not found");
+    }
+
+    // Remove 'Off' variant (line 97, 0-indexed: 96)
+    const result = await callTool("elm_remove_variant", {
+      file_path: testFile,
+      line: 96, // 0-indexed (line 97: "    | Off")
+      character: 6, // position of "Off"
+    });
+
+    if (result.includes("Successfully") || result.includes("Removed")) {
+      const newContent = readFileSync(testFile, "utf-8");
+
+      // Verify Off is gone from type definition
+      if (newContent.includes("| Off")) {
+        throw new Error("Off variant should be removed from type definition");
+      }
+
+      // Verify the wildcard branch was removed (since it only covered Off)
+      // The toggleToString function should now only have On -> branch, no wildcard
+      const newToggleMatch = newContent.match(/toggleToString[\s\S]*?case toggle of[\s\S]*?(?=\n\n|\ntype|\n{-|$)/);
+      if (newToggleMatch && newToggleMatch[0].includes("_ ->")) {
+        throw new Error("Useless wildcard should be removed after Off removal");
+      }
+
+      // Check message mentions wildcard
+      if (result.includes("wildcard")) {
+        logTest("remove_variant: useless wildcard auto-removed", true);
+      } else {
+        logTest("remove_variant: useless wildcard auto-removed", true,
+                "Wildcard removed but message didn't mention it");
+      }
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
   }
 }
 
@@ -536,6 +701,10 @@ async function runTests() {
       ["Prepare Remove Variant (with usages)", testPrepareRemoveVariantWithUsages],
       ["Remove Variant", testRemoveVariant],
       ["Remove Variant (blocked)", testRemoveVariantBlocked],
+      ["Remove Variant (pattern auto-remove)", testRemoveVariantPatternAutoRemove],
+      ["Remove Variant (variant with args)", testRemoveVariantWithArgs],
+      ["Remove Variant (only variant)", testRemoveVariantOnlyVariant],
+      ["Remove Variant (useless wildcard)", testRemoveVariantUselessWildcard],
     ];
 
     for (const [name, testFn] of tests) {

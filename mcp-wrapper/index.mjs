@@ -929,23 +929,36 @@ server.tool(
 
     const otherVariants = result.otherVariants?.join(", ") || "none";
     const blockingUsages = result.blockingUsages || [];
+    const patternUsages = result.patternUsages || [];
+    const blockingCount = result.blockingCount || 0;
+    const patternCount = result.patternCount || 0;
 
     let text = `Variant: ${result.variantName} (${result.variantIndex + 1}/${result.totalVariants} in type ${result.typeName})\n` +
-               `Other variants: [${otherVariants}]\n` +
-               `Usages: ${result.usagesCount}\n` +
-               `Can remove: ${result.canRemove ? "Yes" : "No"}`;
+               `Other variants: [${otherVariants}]\n`;
+
+    if (blockingCount > 0) {
+      text += `Blocking usages (constructors): ${blockingCount}\n`;
+    }
+    if (patternCount > 0) {
+      text += `Pattern usages (auto-removable): ${patternCount}\n`;
+    }
+    if (blockingCount === 0 && patternCount === 0) {
+      text += `Usages: 0\n`;
+    }
+
+    text += `Can remove: ${result.canRemove ? "Yes" : "No"}`;
 
     if (!result.canRemove && result.totalVariants <= 1) {
       text += " (only variant)";
-    } else if (!result.canRemove && blockingUsages.length > 0) {
-      text += " (has usages)";
+    } else if (!result.canRemove && blockingCount > 0) {
+      text += " (has blocking constructor usages)";
     }
 
     text += `\nLine: ${result.range.start.line + 1}:${result.range.start.character}`;
 
     // Add blocking usages with call chain context
     if (blockingUsages.length > 0) {
-      text += `\n\nBlocking usages:\n`;
+      text += `\n\nBlocking usages (must replace manually):\n`;
       text += blockingUsages.slice(0, 10).map((u, idx) => {
         const func = u.function_name || "(top-level)";
         let uText = `  ${idx + 1}. ${u.module_name}.${func}:${u.line + 1}\n`;
@@ -964,6 +977,19 @@ server.tool(
 
       if (blockingUsages.length > 10) {
         text += `\n  ... and ${blockingUsages.length - 10} more usages`;
+      }
+    }
+
+    // Show pattern usages that will be auto-removed
+    if (patternUsages.length > 0 && result.canRemove) {
+      text += `\n\nPattern branches to auto-remove:\n`;
+      text += patternUsages.slice(0, 10).map((u, idx) => {
+        const func = u.function_name || "(top-level)";
+        return `  ${idx + 1}. ${u.module_name}.${func}:${u.line + 1} → "${u.context}"`;
+      }).join("\n");
+
+      if (patternUsages.length > 10) {
+        text += `\n  ... and ${patternUsages.length - 10} more branches`;
       }
     }
 
@@ -1043,10 +1069,13 @@ server.tool(
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
+      // Use the LSP message if it has pattern branch info, otherwise use generic message
+      const msg = result.message || `Removed variant '${result.variantName}' from type ${result.typeName}`;
+
       return {
         content: [{
           type: "text",
-          text: `Successfully removed variant '${result.variantName}' from type ${result.typeName}\n` +
+          text: `Successfully: ${msg}\n` +
                 `Applied ${totalEdits} edit(s) in ${fileCount} file(s)`,
         }],
       };
