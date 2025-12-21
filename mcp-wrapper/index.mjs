@@ -41,6 +41,12 @@ class ElmLspClient {
     this.workspaceRoot = workspaceRoot;
 
     return new Promise((resolve, reject) => {
+      // Check if binary exists
+      if (!existsSync(RUST_LSP_PATH)) {
+        reject(new Error(`Rust LSP binary not found at ${RUST_LSP_PATH}. Run 'cargo build --release' in the plugin directory.`));
+        return;
+      }
+
       this.process = spawn(RUST_LSP_PATH, [], {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, RUST_LOG: "warn" },
@@ -62,6 +68,11 @@ class ElmLspClient {
       this.process.on("close", (code) => {
         this.process = null;
         this.initialized = false;
+        // Reject all pending requests
+        for (const [id, { reject }] of this.pendingRequests) {
+          reject(new Error(`LSP process exited with code ${code}`));
+        }
+        this.pendingRequests.clear();
       });
 
       // Initialize the LSP
@@ -116,6 +127,9 @@ class ElmLspClient {
   }
 
   sendMessage(message) {
+    if (!this.process || !this.process.stdin) {
+      throw new Error("LSP process not running. Try reconnecting the MCP server.");
+    }
     const content = JSON.stringify(message);
     const header = `Content-Length: ${content.length}\r\n\r\n`;
     this.process.stdin.write(header + content);
