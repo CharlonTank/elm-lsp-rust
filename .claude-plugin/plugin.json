@@ -1,11 +1,24 @@
 {
   "name": "elm-lsp-rust",
   "description": "Fast Elm Language Server (Rust) - completion, hover, go-to-definition, find references, workspace symbols, rename, code actions, move function, file rename/move, and smart variant removal",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": {
     "name": "Charles-Andre Assus",
     "email": "charlonpub@gmail.com"
   },
   "repository": "https://github.com/CharlonTank/elm-lsp-rust",
-  "license": "MIT"
+  "license": "MIT",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
 }
