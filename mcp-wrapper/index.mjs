@@ -170,6 +170,22 @@ class ElmLspClient {
     await new Promise((r) => setTimeout(r, 100));
   }
 
+  async notifyFileChanged(uri, content) {
+    // Increment version for tracking changes
+    this.documentVersions = this.documentVersions || {};
+    this.documentVersions[uri] = (this.documentVersions[uri] || 1) + 1;
+
+    await this.sendNotification("textDocument/didChange", {
+      textDocument: {
+        uri,
+        version: this.documentVersions[uri],
+      },
+      contentChanges: [{ text: content }],
+    });
+    // Give time to re-index
+    await new Promise((r) => setTimeout(r, 50));
+  }
+
   async getCompletion(uri, line, character) {
     return this.sendRequest("textDocument/completion", {
       textDocument: { uri },
@@ -299,8 +315,10 @@ function findWorkspaceRoot(filePath) {
 }
 
 // Apply workspace edits returned by rename
-async function applyWorkspaceEdit(changes) {
+async function applyWorkspaceEdit(changes, client = null) {
   const applied = [];
+  const changedFiles = [];
+
   for (const [fileUri, edits] of Object.entries(changes)) {
     const filePath = fileUri.replace("file://", "");
     if (!existsSync(filePath)) continue;
@@ -337,7 +355,16 @@ async function applyWorkspaceEdit(changes) {
     const newContent = lines.join("\n");
     writeFileSync(filePath, newContent, "utf-8");
     applied.push({ path: filePath, edits: edits.length });
+    changedFiles.push({ uri: fileUri, content: newContent });
   }
+
+  // Notify LSP server about file changes so it can update its index
+  if (client) {
+    for (const { uri, content } of changedFiles) {
+      await client.notifyFileChanged(uri, content);
+    }
+  }
+
   return applied;
 }
 
@@ -679,7 +706,7 @@ server.tool(
     }
 
     if (action.edit?.changes) {
-      const applied = await applyWorkspaceEdit(action.edit.changes);
+      const applied = await applyWorkspaceEdit(action.edit.changes, client);
       const summary = applied.map((a) => `${a.path}: ${a.edits} edits`).join("\n");
       return { content: [{ type: "text", text: `Applied "${action_title}":\n${summary}` }] };
     }
@@ -769,7 +796,7 @@ server.tool(
 
     // Apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes);
+      const applied = await applyWorkspaceEdit(result.changes, client);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -833,7 +860,7 @@ server.tool(
 
     // Apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes);
+      const applied = await applyWorkspaceEdit(result.changes, client);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -897,7 +924,7 @@ server.tool(
 
     // Apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes);
+      const applied = await applyWorkspaceEdit(result.changes, client);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -963,7 +990,7 @@ server.tool(
     }
 
     // Apply the changes
-    const applied = await applyWorkspaceEdit(result.changes);
+    const applied = await applyWorkspaceEdit(result.changes, client);
     const fileCount = applied.length;
     const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -1358,7 +1385,7 @@ server.tool(
 
     // Success - apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes);
+      const applied = await applyWorkspaceEdit(result.changes, client);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -1418,7 +1445,7 @@ server.tool(
 
     // Apply the text edits (module declarations and imports)
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes);
+      const applied = await applyWorkspaceEdit(result.changes, client);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -1498,7 +1525,7 @@ server.tool(
 
     // Apply the text edits (module declarations and imports)
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes);
+      const applied = await applyWorkspaceEdit(result.changes, client);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
