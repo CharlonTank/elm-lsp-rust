@@ -716,42 +716,6 @@ server.tool(
 );
 
 server.tool(
-  "elm_prepare_rename",
-  "Check if a symbol at a position can be renamed",
-  {
-    file_path: z.string().describe("Path to the Elm file"),
-    line: z.number().describe("Line number (0-indexed)"),
-    character: z.number().describe("Character position (0-indexed)"),
-  },
-  async ({ file_path, line, character }) => {
-    const absPath = resolveFilePath(file_path);
-    const workspaceRoot = findWorkspaceRoot(absPath);
-    if (!workspaceRoot) {
-      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
-    }
-
-    const client = await ensureClient(workspaceRoot);
-    const uri = `file://${absPath}`;
-    const content = readFileSync(absPath, "utf-8");
-    await client.openDocument(uri, content);
-
-    const result = await client.prepareRename(uri, line, character);
-    if (!result) {
-      return { content: [{ type: "text", text: "Cannot rename at this position" }] };
-    }
-
-    const range = result.range || result;
-    const placeholder = result.placeholder || "";
-    return {
-      content: [{
-        type: "text",
-        text: `Can rename "${placeholder}" at line ${range.start.line + 1}, characters ${range.start.character}-${range.end.character}`,
-      }],
-    };
-  }
-);
-
-server.tool(
   "elm_rename_variant",
   "Rename a custom type variant (constructor) across the entire project. Fails if position is not on a variant.",
   {

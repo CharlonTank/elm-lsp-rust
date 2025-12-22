@@ -155,21 +155,6 @@ def main():
         else:
             print("   No hover result")
 
-        # Test rename preparation
-        print("\n4. Testing prepare rename...")
-        msg = encode_lsp({
-            "jsonrpc": "2.0", "id": 5, "method": "textDocument/prepareRename",
-            "params": {"textDocument": {"uri": uri}, "position": {"line": 20, "character": 0}}
-        })
-        proc.stdin.write(msg)
-        proc.stdin.flush()
-
-        resp = wait_for_response(response_queue, 5, timeout=5)
-        if resp and resp.get("result"):
-            print(f"   Can rename: {resp['result']}")
-        else:
-            print("   Cannot rename at this position")
-
     finally:
         stop_event.set()
         proc.terminate()

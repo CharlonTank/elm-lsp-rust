@@ -90,7 +90,7 @@ function generateCoverageFile(fixtureResults, meetdownResults, fixtureCoverage, 
   const allTools = [
     "elm_completion", "elm_hover", "elm_definition", "elm_references",
     "elm_symbols", "elm_format", "elm_diagnostics", "elm_code_actions",
-    "elm_apply_code_action", "elm_prepare_rename",
+    "elm_apply_code_action",
     "elm_rename_function", "elm_rename_type", "elm_rename_variant", "elm_rename_field",
     "elm_move_function", "elm_prepare_remove_variant", "elm_remove_variant",
     "elm_rename_file", "elm_move_file"

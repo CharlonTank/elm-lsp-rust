@@ -212,27 +212,6 @@ async function testSymbols() {
   logTest("symbols: list all symbols in Types.elm", true);
 }
 
-async function testPrepareRename() {
-  const typesFile = join(FIXTURE_DIR, "src/Types.elm");
-
-  // Test prepare rename on 'defaultUser' function (line 11 in editor, 0-indexed: 10)
-  const result = await callTool("elm_prepare_rename", {
-    file_path: typesFile,
-    line: 10, // 0-indexed (line 11 in editor: "defaultUser : User")
-    character: 0,
-  });
-
-  // prepare_rename should identify the symbol or indicate it can be renamed
-  if (result.includes("defaultUser") || result.includes("Can rename") || result.includes("line")) {
-    logTest("prepare_rename: check if defaultUser can be renamed", true);
-  } else if (result.includes("Cannot rename")) {
-    // Some positions might not be renameable - this is still a valid response
-    logTest("prepare_rename: position check works (not renameable)", true);
-  } else {
-    throw new Error(`Unexpected result: ${result}`);
-  }
-}
-
 async function testRename() {
   backupFixture();
 
@@ -943,7 +922,6 @@ async function runTests() {
       ["Definition", testDefinition],
       ["References", testReferences],
       ["Symbols", testSymbols],
-      ["Prepare Rename", testPrepareRename],
       ["Rename Function", testRename],
       ["Rename Type Alias", testRenameTypeAlias],
       ["Rename Field", testRenameField],

@@ -91,18 +91,7 @@ async function main() {
       console.log("   ...");
     }
 
-    console.log("\n5. elm_prepare_rename - Check if can rename 'landingNavFeatures'...");
-    const prepRename = await client.callTool({
-      name: "elm_prepare_rename",
-      arguments: {
-        file_path: testFile,
-        line: targetLine,
-        character: targetChar,
-      },
-    });
-    console.log("   " + (prepRename.content?.[0]?.text || "No result"));
-
-    console.log("\n6. elm_completion - Get completions at position...");
+    console.log("\n5. elm_completion - Get completions at position...");
     // Find a line with "DomId." to test completions
     let completionLine = 0;
     let completionChar = 0;
@@ -125,7 +114,7 @@ async function main() {
     const compText = completion.content?.[0]?.text || "No result";
     console.log("   " + compText.split("\n").slice(0, 5).join("\n   "));
 
-    console.log("\n7. elm_symbols - First 10 symbols...");
+    console.log("\n6. elm_symbols - First 10 symbols...");
     const symbols = await client.callTool({
       name: "elm_symbols",
       arguments: {
@@ -135,7 +124,7 @@ async function main() {
     });
     console.log("   " + (symbols.content?.[0]?.text?.replace(/\n/g, "\n   ") || "No result"));
 
-    console.log("\n8. elm_code_actions - Get available actions...");
+    console.log("\n7. elm_code_actions - Get available actions...");
     const actions = await client.callTool({
       name: "elm_code_actions",
       arguments: {

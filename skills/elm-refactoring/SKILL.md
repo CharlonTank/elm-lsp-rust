@@ -16,7 +16,7 @@ Activate automatically when the user works with Elm code and needs to:
 - **Maintain types**: Remove unused variants from custom types
 - **Check code**: Get diagnostics, code actions
 
-## Available MCP Tools (16 total)
+## Available MCP Tools (15 total)
 
 All tools use the `mcp__plugin_elm-lsp-rust_elr__` prefix.
 
@@ -104,14 +104,6 @@ file_path: "/path/to/File.elm"
 ---
 
 ### Renaming
-
-#### elm_prepare_rename
-Check if a symbol can be renamed.
-```
-file_path: "/path/to/File.elm"
-line: 28
-character: 0
-```
 
 #### elm_rename_variant
 Rename a variant across all files in the project.
