@@ -240,7 +240,7 @@ async function testRename() {
     const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
 
     // Rename 'helper' to 'formatHelper' (line 16 in editor, 0-indexed: 15)
-    const result = await callTool("elm_rename", {
+    const result = await callTool("elm_rename_function", {
       file_path: utilsFile,
       line: 15, // 0-indexed (line 16 in editor: "helper : String -> String")
       character: 0,
@@ -274,7 +274,7 @@ async function testRenameTypeAlias() {
 
     // Rename 'Guest' to 'Visitor' (line 19 in editor, 0-indexed: 18)
     // "type alias Guest ="
-    const result = await callTool("elm_rename", {
+    const result = await callTool("elm_rename_type", {
       file_path: typesFile,
       line: 18, // 0-indexed (line 19 in editor: "type alias Guest =")
       character: 11, // position of "Guest"
@@ -307,7 +307,7 @@ async function testRenameField() {
 
     // Rename 'name' field in Person type alias (line 5, 0-indexed: 4)
     // "    { name : String"
-    const result = await callTool("elm_rename", {
+    const result = await callTool("elm_rename_field", {
       file_path: fieldRenameFile,
       line: 4, // 0-indexed (line 5 in editor: "    { name : String")
       character: 6, // position of "name"

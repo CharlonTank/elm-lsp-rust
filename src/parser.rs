@@ -31,12 +31,14 @@ impl ElmParser {
         let root = tree.root_node();
 
         // First pass: collect type annotations (they're siblings to value_declaration)
-        let mut type_annotations: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // Store (signature_text, name_range) where name_range is the range of the function name in the annotation
+        let mut type_annotations: std::collections::HashMap<String, (String, Range)> =
+            std::collections::HashMap::new();
         let mut cursor = root.walk();
         for child in root.children(&mut cursor) {
             if child.kind() == "type_annotation" {
-                if let Some((name, sig)) = self.parse_type_annotation(child, source) {
-                    type_annotations.insert(name, sig);
+                if let Some((name, sig, name_range)) = self.parse_type_annotation(child, source) {
+                    type_annotations.insert(name, (sig, name_range));
                 }
             }
         }
@@ -47,13 +49,18 @@ impl ElmParser {
         symbols
     }
 
-    fn parse_type_annotation(&self, node: tree_sitter::Node, source: &str) -> Option<(String, String)> {
+    fn parse_type_annotation(
+        &self,
+        node: tree_sitter::Node,
+        source: &str,
+    ) -> Option<(String, String, Range)> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "lower_case_identifier" {
                 let name = self.node_text(child, source).to_string();
                 let sig = self.node_text(node, source).to_string();
-                return Some((name, sig));
+                let name_range = self.node_to_range(child);
+                return Some((name, sig, name_range));
             }
         }
         None
@@ -64,7 +71,7 @@ impl ElmParser {
         node: tree_sitter::Node,
         source: &str,
         symbols: &mut Vec<ElmSymbol>,
-        type_annotations: &std::collections::HashMap<String, String>,
+        type_annotations: &std::collections::HashMap<String, (String, Range)>,
     ) {
         match node.kind() {
             "value_declaration" => {
@@ -100,7 +107,7 @@ impl ElmParser {
         &self,
         node: tree_sitter::Node,
         source: &str,
-        type_annotations: &std::collections::HashMap<String, String>,
+        type_annotations: &std::collections::HashMap<String, (String, Range)>,
     ) -> Option<ElmSymbol> {
         let mut name = None;
         let mut name_range = None;
@@ -120,11 +127,15 @@ impl ElmParser {
         let full_range = self.node_to_range(node);
 
         // Look up the type annotation from the pre-collected map
-        let signature = type_annotations.get(&name).cloned();
+        let (signature, type_annotation_range) = match type_annotations.get(&name) {
+            Some((sig, range)) => (Some(sig.clone()), Some(*range)),
+            None => (None, None),
+        };
 
         let mut symbol = ElmSymbol::new(name, SymbolKind::FUNCTION, full_range);
         symbol.signature = signature;
         symbol.definition_range = name_range;
+        symbol.type_annotation_range = type_annotation_range;
 
         Some(symbol)
     }

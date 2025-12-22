@@ -17,7 +17,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 | elm_code_actions | 1 | 1 | ✅ Good |
 | elm_apply_code_action | 0 | 0 | ❌ None |
 | elm_prepare_rename | 1 | 2 | ✅ Good |
-| elm_rename | 3 | 3 | ✅ Excellent |
+| elm_rename | 0 | 3 | ✅ Good |
 | elm_move_function | 1 | 1 | ✅ Good |
 | elm_prepare_remove_variant | 3 | 22 | ✅ Excellent |
 | elm_remove_variant | 5 | 2 | ✅ Excellent |
@@ -55,10 +55,10 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Remove Variant (pattern auto-remove)** → elm_remove_variant
 - **Remove Variant (useless wildcard)** → elm_remove_variant
 - **Remove Variant (variant with args)** → elm_remove_variant
-- **Rename Field** → elm_rename
+- **Rename Field** → elm_rename_field
 - **Rename File** → elm_rename_file
-- **Rename Function** → elm_rename
-- **Rename Type Alias** → elm_rename
+- **Rename Function** → elm_rename_function
+- **Rename Type Alias** → elm_rename_type
 - **Symbols** → elm_symbols
 
 ### Meetdown Tests (103 tests)

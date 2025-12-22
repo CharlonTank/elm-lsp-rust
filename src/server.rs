@@ -17,6 +17,9 @@ const CMD_PREPARE_REMOVE_VARIANT: &str = "elm.prepareRemoveVariant";
 const CMD_REMOVE_VARIANT: &str = "elm.removeVariant";
 const CMD_RENAME_FILE: &str = "elm.renameFile";
 const CMD_MOVE_FILE: &str = "elm.moveFile";
+const CMD_RENAME_VARIANT: &str = "elm.renameVariant";
+const CMD_RENAME_TYPE: &str = "elm.renameType";
+const CMD_RENAME_FUNCTION: &str = "elm.renameFunction";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -144,6 +147,92 @@ impl ElmLanguageServer {
             }
         }
         None
+    }
+
+    /// Get the type (custom type or type alias) at a position
+    /// Returns (symbol_name, definition_range) if found
+    fn get_type_at_position(&self, uri: &Url, position: Position) -> Option<(String, Range)> {
+        if let Some(doc) = self.documents.get(uri) {
+            for symbol in &doc.symbols {
+                // ENUM = custom type, STRUCT = type alias
+                if symbol.kind == SymbolKind::ENUM || symbol.kind == SymbolKind::STRUCT {
+                    // Check if position is on the type name (definition_range)
+                    if let Some(def_range) = symbol.definition_range {
+                        if position.line == def_range.start.line
+                            && position.character >= def_range.start.character
+                            && position.character <= def_range.end.character
+                        {
+                            return Some((symbol.name.clone(), def_range));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the function at a position
+    /// Returns (symbol_name, definition_range) if found
+    fn get_function_at_position(&self, uri: &Url, position: Position) -> Option<(String, Range)> {
+        if let Some(doc) = self.documents.get(uri) {
+            for symbol in &doc.symbols {
+                if symbol.kind == SymbolKind::FUNCTION {
+                    // Check if position is on the function name (definition_range)
+                    if let Some(def_range) = symbol.definition_range {
+                        if position.line == def_range.start.line
+                            && position.character >= def_range.start.character
+                            && position.character <= def_range.end.character
+                        {
+                            return Some((symbol.name.clone(), def_range));
+                        }
+                    }
+
+                    // Also check if position is on the type annotation name
+                    if let Some(annot_range) = symbol.type_annotation_range {
+                        if position.line == annot_range.start.line
+                            && position.character >= annot_range.start.character
+                            && position.character <= annot_range.end.character
+                        {
+                            // Return the definition_range for the actual rename operation
+                            if let Some(def_range) = symbol.definition_range {
+                                return Some((symbol.name.clone(), def_range));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Classify what kind of symbol is at a position
+    /// Returns: "variant", "type", "function", "field", or "unknown"
+    fn get_symbol_kind_at_position(&self, uri: &Url, position: Position, text: &str) -> &'static str {
+        // Check for variant first (most specific)
+        if self.get_variant_at_position(uri, position).is_some() {
+            return "variant";
+        }
+
+        // Check for field
+        if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                if workspace.get_field_at_position(uri, position, text).is_some() {
+                    return "field";
+                }
+            }
+        }
+
+        // Check for type
+        if self.get_type_at_position(uri, position).is_some() {
+            return "type";
+        }
+
+        // Check for function
+        if self.get_function_at_position(uri, position).is_some() {
+            return "function";
+        }
+
+        "unknown"
     }
 }
 
@@ -1199,6 +1288,328 @@ impl LanguageServer for ElmLanguageServer {
                             "error": e.to_string()
                         })))
                     }
+                }
+            }
+            CMD_RENAME_VARIANT => {
+                // Expected arguments: [uri, line, character, newName]
+                if params.arguments.len() != 4 {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "Expected 4 arguments: uri, line, character, newName"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let character: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let new_name: String = serde_json::from_value(params.arguments[3].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let position = Position { line, character };
+
+                // First, verify this is a variant
+                if let Some((type_name, variant, _idx, _total, _all_variants)) = self.get_variant_at_position(&uri, position) {
+                    // This IS a variant - proceed with rename
+                    let old_name = variant.name.clone();
+
+                    // Use the standard rename logic
+                    let rename_params = RenameParams {
+                        text_document_position: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position,
+                        },
+                        new_name: new_name.clone(),
+                        work_done_progress_params: WorkDoneProgressParams::default(),
+                    };
+
+                    match self.rename(rename_params).await {
+                        Ok(Some(edit)) => {
+                            // Convert WorkspaceEdit to JSON
+                            if let Some(changes) = edit.changes {
+                                let mut changes_json = serde_json::Map::new();
+                                for (uri, edits) in changes {
+                                    let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                        serde_json::json!({
+                                            "range": {
+                                                "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                                "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                            },
+                                            "newText": edit.new_text
+                                        })
+                                    }).collect();
+                                    changes_json.insert(uri.to_string(), serde_json::json!(edits_json));
+                                }
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "oldName": old_name,
+                                    "newName": new_name,
+                                    "typeName": type_name,
+                                    "symbolKind": "variant",
+                                    "changes": serde_json::Value::Object(changes_json)
+                                })))
+                            } else {
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "oldName": old_name,
+                                    "newName": new_name,
+                                    "typeName": type_name,
+                                    "symbolKind": "variant",
+                                    "message": "No changes needed"
+                                })))
+                            }
+                        }
+                        Ok(None) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "error": "Rename not possible at this position"
+                            })))
+                        }
+                        Err(e) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "error": e.to_string()
+                            })))
+                        }
+                    }
+                } else {
+                    // Not a variant - detect what it actually is and return error
+                    let actual_kind = if let Some(doc) = self.documents.get(&uri) {
+                        self.get_symbol_kind_at_position(&uri, position, &doc.text)
+                    } else {
+                        "unknown"
+                    };
+
+                    Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Position is not on a variant. Found '{}' instead. Use elm_rename_{} for this symbol.",
+                            actual_kind,
+                            if actual_kind == "unknown" { "..." } else { actual_kind }
+                        ),
+                        "actualKind": actual_kind
+                    })))
+                }
+            }
+            CMD_RENAME_TYPE => {
+                // Expected arguments: [uri, line, character, newName]
+                if params.arguments.len() != 4 {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "Expected 4 arguments: uri, line, character, newName"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let character: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let new_name: String = serde_json::from_value(params.arguments[3].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let position = Position { line, character };
+
+                // First, verify this is a type (custom type or type alias)
+                if let Some((type_name, _def_range)) = self.get_type_at_position(&uri, position) {
+                    // Check for protected Lamdera types
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            if workspace.is_protected_lamdera_type(&type_name) {
+                                return Ok(Some(serde_json::json!({
+                                    "success": false,
+                                    "error": format!("Cannot rename {} in a Lamdera project - this type is required by Lamdera", type_name)
+                                })));
+                            }
+                        }
+                    }
+
+                    let old_name = type_name.clone();
+
+                    // Use the standard rename logic
+                    let rename_params = RenameParams {
+                        text_document_position: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position,
+                        },
+                        new_name: new_name.clone(),
+                        work_done_progress_params: WorkDoneProgressParams::default(),
+                    };
+
+                    match self.rename(rename_params).await {
+                        Ok(Some(edit)) => {
+                            if let Some(changes) = edit.changes {
+                                let mut changes_json = serde_json::Map::new();
+                                for (uri, edits) in changes {
+                                    let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                        serde_json::json!({
+                                            "range": {
+                                                "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                                "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                            },
+                                            "newText": edit.new_text
+                                        })
+                                    }).collect();
+                                    changes_json.insert(uri.to_string(), serde_json::json!(edits_json));
+                                }
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "oldName": old_name,
+                                    "newName": new_name,
+                                    "symbolKind": "type",
+                                    "changes": serde_json::Value::Object(changes_json)
+                                })))
+                            } else {
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "oldName": old_name,
+                                    "newName": new_name,
+                                    "symbolKind": "type",
+                                    "message": "No changes needed"
+                                })))
+                            }
+                        }
+                        Ok(None) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "error": "Rename not possible at this position"
+                            })))
+                        }
+                        Err(e) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "error": e.to_string()
+                            })))
+                        }
+                    }
+                } else {
+                    // Not a type - detect what it actually is and return error
+                    let actual_kind = if let Some(doc) = self.documents.get(&uri) {
+                        self.get_symbol_kind_at_position(&uri, position, &doc.text)
+                    } else {
+                        "unknown"
+                    };
+
+                    Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Position is not on a type. Found '{}' instead. Use elm_rename_{} for this symbol.",
+                            actual_kind,
+                            if actual_kind == "unknown" { "..." } else { actual_kind }
+                        ),
+                        "actualKind": actual_kind
+                    })))
+                }
+            }
+            CMD_RENAME_FUNCTION => {
+                // Expected arguments: [uri, line, character, newName]
+                if params.arguments.len() != 4 {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "Expected 4 arguments: uri, line, character, newName"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let character: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let new_name: String = serde_json::from_value(params.arguments[3].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let position = Position { line, character };
+
+                // First, verify this is a function
+                if let Some((func_name, _def_range)) = self.get_function_at_position(&uri, position) {
+                    let old_name = func_name.clone();
+
+                    // Use the standard rename logic
+                    let rename_params = RenameParams {
+                        text_document_position: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position,
+                        },
+                        new_name: new_name.clone(),
+                        work_done_progress_params: WorkDoneProgressParams::default(),
+                    };
+
+                    match self.rename(rename_params).await {
+                        Ok(Some(edit)) => {
+                            if let Some(changes) = edit.changes {
+                                let mut changes_json = serde_json::Map::new();
+                                for (uri, edits) in changes {
+                                    let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                        serde_json::json!({
+                                            "range": {
+                                                "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                                "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                            },
+                                            "newText": edit.new_text
+                                        })
+                                    }).collect();
+                                    changes_json.insert(uri.to_string(), serde_json::json!(edits_json));
+                                }
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "oldName": old_name,
+                                    "newName": new_name,
+                                    "symbolKind": "function",
+                                    "changes": serde_json::Value::Object(changes_json)
+                                })))
+                            } else {
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "oldName": old_name,
+                                    "newName": new_name,
+                                    "symbolKind": "function",
+                                    "message": "No changes needed"
+                                })))
+                            }
+                        }
+                        Ok(None) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "error": "Rename not possible at this position"
+                            })))
+                        }
+                        Err(e) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "error": e.to_string()
+                            })))
+                        }
+                    }
+                } else {
+                    // Not a function - detect what it actually is and return error
+                    let actual_kind = if let Some(doc) = self.documents.get(&uri) {
+                        self.get_symbol_kind_at_position(&uri, position, &doc.text)
+                    } else {
+                        "unknown"
+                    };
+
+                    Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Position is not on a function. Found '{}' instead. Use elm_rename_{} for this symbol.",
+                            actual_kind,
+                            if actual_kind == "unknown" { "..." } else { actual_kind }
+                        ),
+                        "actualKind": actual_kind
+                    })))
                 }
             }
             _ => {

@@ -725,13 +725,13 @@ server.tool(
 );
 
 server.tool(
-  "elm_rename",
-  "Rename a symbol across the entire project and apply changes",
+  "elm_rename_variant",
+  "Rename a custom type variant (constructor) across the entire project. Fails if position is not on a variant.",
   {
-    file_path: z.string().describe("Path to the Elm file"),
-    line: z.number().describe("Line number (0-indexed)"),
-    character: z.number().describe("Character position (0-indexed)"),
-    newName: z.string().describe("The new name for the symbol"),
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    line: z.number().describe("Line number of the variant name (0-indexed)"),
+    character: z.number().describe("Character position within the variant name (0-indexed)"),
+    newName: z.string().describe("The new name for the variant"),
   },
   async ({ file_path, line, character, newName }) => {
     const absPath = resolveFilePath(file_path);
@@ -745,9 +745,166 @@ server.tool(
     const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
+    const result = await client.executeCommand("elm.renameVariant", [uri, line, character, newName]);
+
+    if (!result) {
+      return { content: [{ type: "text", text: "No variant found at this position" }] };
+    }
+
+    if (!result.success) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }] };
+    }
+
+    // Apply the changes
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      const summary = applied.slice(0, 20).map((a) => `  ${a.path}: ${a.edits} edits`).join("\n");
+
+      return {
+        content: [{
+          type: "text",
+          text: `Renamed variant "${result.oldName}" to "${result.newName}" in type ${result.typeName}\n` +
+                `Applied ${totalEdits} edit(s) in ${fileCount} file(s):\n${summary}`,
+        }],
+      };
+    }
+
+    return { content: [{ type: "text", text: result.message || "Variant renamed successfully" }] };
+  }
+);
+
+server.tool(
+  "elm_rename_type",
+  "Rename a type (custom type or type alias) across the entire project. Fails if position is not on a type definition.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    line: z.number().describe("Line number of the type name (0-indexed)"),
+    character: z.number().describe("Character position within the type name (0-indexed)"),
+    newName: z.string().describe("The new name for the type"),
+  },
+  async ({ file_path, line, character, newName }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.renameType", [uri, line, character, newName]);
+
+    if (!result) {
+      return { content: [{ type: "text", text: "No type found at this position" }] };
+    }
+
+    if (!result.success) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }] };
+    }
+
+    // Apply the changes
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      const summary = applied.slice(0, 20).map((a) => `  ${a.path}: ${a.edits} edits`).join("\n");
+
+      return {
+        content: [{
+          type: "text",
+          text: `Renamed type "${result.oldName}" to "${result.newName}"\n` +
+                `Applied ${totalEdits} edit(s) in ${fileCount} file(s):\n${summary}`,
+        }],
+      };
+    }
+
+    return { content: [{ type: "text", text: result.message || "Type renamed successfully" }] };
+  }
+);
+
+server.tool(
+  "elm_rename_function",
+  "Rename a function across the entire project. Fails if position is not on a function definition.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the function"),
+    line: z.number().describe("Line number of the function name (0-indexed)"),
+    character: z.number().describe("Character position within the function name (0-indexed)"),
+    newName: z.string().describe("The new name for the function"),
+  },
+  async ({ file_path, line, character, newName }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.renameFunction", [uri, line, character, newName]);
+
+    if (!result) {
+      return { content: [{ type: "text", text: "No function found at this position" }] };
+    }
+
+    if (!result.success) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }] };
+    }
+
+    // Apply the changes
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      const summary = applied.slice(0, 20).map((a) => `  ${a.path}: ${a.edits} edits`).join("\n");
+
+      return {
+        content: [{
+          type: "text",
+          text: `Renamed function "${result.oldName}" to "${result.newName}"\n` +
+                `Applied ${totalEdits} edit(s) in ${fileCount} file(s):\n${summary}`,
+        }],
+      };
+    }
+
+    return { content: [{ type: "text", text: result.message || "Function renamed successfully" }] };
+  }
+);
+
+server.tool(
+  "elm_rename_field",
+  "Rename a record field across the entire project (type-aware). Fails if position is not on a field.",
+  {
+    file_path: z.string().describe("Path to the Elm file"),
+    line: z.number().describe("Line number of the field (0-indexed)"),
+    character: z.number().describe("Character position within the field name (0-indexed)"),
+    newName: z.string().describe("The new name for the field"),
+  },
+  async ({ file_path, line, character, newName }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    // Use the standard rename - it detects fields automatically
     const result = await client.rename(uri, line, character, newName);
     if (!result || !result.changes) {
-      return { content: [{ type: "text", text: "No changes needed or rename not possible" }] };
+      return { content: [{ type: "text", text: "No field found at this position or rename not possible" }] };
     }
 
     // Apply the changes
@@ -760,7 +917,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `Renamed to "${newName}" in ${fileCount} files (${totalEdits} total edits):\n${summary}${applied.length > 20 ? `\n  ... and ${applied.length - 20} more files` : ""}`,
+        text: `Renamed field to "${newName}" in ${fileCount} files (${totalEdits} total edits):\n${summary}`,
       }],
     };
   }
