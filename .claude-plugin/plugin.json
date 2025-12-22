@@ -1,7 +1,7 @@
 {
   "name": "elm-lsp-rust",
   "description": "Fast Elm Language Server (Rust) - completion, hover, go-to-definition, find references, workspace symbols, rename, code actions, move function, file rename/move, and smart variant removal",
-  "version": "0.3.14",
+  "version": "0.3.15",
   "author": {
     "name": "Charles-Andre Assus",
     "email": "charlonpub@gmail.com"

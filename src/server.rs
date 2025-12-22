@@ -343,6 +343,81 @@ impl ElmLanguageServer {
 
         Ok(None)
     }
+
+    /// Rename a variant using its definition range directly
+    /// Variants are not indexed as top-level symbols, so we need this specialized function
+    fn rename_variant_by_range(
+        &self,
+        uri: &Url,
+        variant_name: &str,
+        variant_definition_range: Range,
+        new_name: &str,
+    ) -> Result<Option<WorkspaceEdit>> {
+        tracing::info!("Renaming variant {} to {} (range: {:?})", variant_name, new_name, variant_definition_range);
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+
+        // Track ranges we've already added to avoid duplicates
+        let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> = std::collections::HashSet::new();
+
+        // Add the definition edit using the provided range
+        let def_key = (
+            uri.to_string(),
+            variant_definition_range.start.line,
+            variant_definition_range.start.character,
+            variant_definition_range.end.line,
+            variant_definition_range.end.character,
+        );
+        seen_ranges.insert(def_key);
+        changes
+            .entry(uri.clone())
+            .or_insert_with(Vec::new)
+            .push(TextEdit {
+                range: variant_definition_range,
+                new_text: new_name.to_string(),
+            });
+
+        // Get all references from workspace
+        if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                let refs = workspace.find_references(variant_name, None);
+                for r in refs {
+                    // Skip Evergreen files
+                    if r.uri.path().contains("/Evergreen/") {
+                        continue;
+                    }
+                    // Skip if we already have an edit for this exact range
+                    let key = (
+                        r.uri.to_string(),
+                        r.range.start.line,
+                        r.range.start.character,
+                        r.range.end.line,
+                        r.range.end.character,
+                    );
+                    if seen_ranges.contains(&key) {
+                        continue;
+                    }
+                    seen_ranges.insert(key);
+                    changes
+                        .entry(r.uri)
+                        .or_insert_with(Vec::new)
+                        .push(TextEdit {
+                            range: r.range,
+                            new_text: new_name.to_string(),
+                        });
+                }
+            }
+        }
+
+        if !changes.is_empty() {
+            tracing::info!("Variant rename affects {} files", changes.len());
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }));
+        }
+
+        Ok(None)
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -1327,11 +1402,12 @@ impl LanguageServer for ElmLanguageServer {
 
                 // First, verify this is a variant
                 if let Some((type_name, variant, _idx, _total, _all_variants)) = self.get_variant_at_position(&uri, position) {
-                    // This IS a variant - proceed with rename using the variant name directly
+                    // This IS a variant - proceed with rename using the variant's definition range
                     let old_name = variant.name.clone();
+                    let variant_range = variant.range;
 
-                    // Use rename_symbol_by_name with the variant name (not position-based lookup)
-                    match self.rename_symbol_by_name(&uri, &old_name, &new_name) {
+                    // Use rename_variant_by_range with the variant's definition range directly
+                    match self.rename_variant_by_range(&uri, &old_name, variant_range, &new_name) {
                         Ok(Some(edit)) => {
                             // Convert WorkspaceEdit to JSON
                             if let Some(changes) = edit.changes {
