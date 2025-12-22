@@ -306,7 +306,7 @@ type FrontendMsg
     | UrlClicked UrlRequest
     | UrlChanged Url
     | GotTime Time.Posix
-    | PressedLogin
+    | ClickedLogin
     | PressedLogout
     | TypedEmail String
     | PressedSubmitLogin

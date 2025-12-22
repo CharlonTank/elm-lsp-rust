@@ -218,8 +218,8 @@ class LSPClient {
     return result;
   }
 
-  async rename(path, line, char, newName) {
-    trackTool("elm_rename");
+  async rename(path, line, char, newName, toolName = null) {
+    if (toolName) trackTool(toolName);
     return this.send("textDocument/rename", {
       textDocument: { uri: `file://${path}` },
       position: { line, character: char },
@@ -302,6 +302,49 @@ class LSPClient {
       textDocument: { uri: `file://${path}` },
       position: { line, character: char }
     });
+  }
+
+  async renameVariant(path, line, char, newName) {
+    trackTool("elm_rename_variant");
+    const result = await this.send("workspace/executeCommand", {
+      command: "elm.renameVariant",
+      arguments: [`file://${path}`, line, char, newName]
+    });
+
+    // Apply the workspace edits if successful
+    if (result?.success && result?.changes) {
+      for (const [uri, edits] of Object.entries(result.changes)) {
+        const filePath = uri.replace("file://", "");
+        if (!existsSync(filePath)) continue;
+
+        let content = readFileSync(filePath, "utf-8");
+        const lines = content.split("\n");
+
+        // Sort edits by position (reverse order to apply from end first)
+        const sortedEdits = [...edits].sort((a, b) => {
+          if (b.range.start.line !== a.range.start.line) {
+            return b.range.start.line - a.range.start.line;
+          }
+          return b.range.start.character - a.range.start.character;
+        });
+
+        for (const edit of sortedEdits) {
+          const startLine = edit.range.start.line;
+          const startChar = edit.range.start.character;
+          const endLine = edit.range.end.line;
+          const endChar = edit.range.end.character;
+
+          if (startLine === endLine) {
+            const line = lines[startLine] || "";
+            lines[startLine] = line.slice(0, startChar) + edit.newText + line.slice(endChar);
+          }
+        }
+
+        writeFileSync(filePath, lines.join("\n"));
+      }
+    }
+
+    return result;
   }
 
   async moveFunction(srcPath, targetPath, funcName) {
@@ -1166,7 +1209,7 @@ async function main() {
     logTest("Original has function body", originalHasFunctionBody);
 
     // Rename newEvent to createEvent (line 69, 0-indexed = function definition)
-    const renameResult = await client.rename(eventFile, 69, 0, "createEvent");
+    const renameResult = await client.rename(eventFile, 69, 0, "createEvent", "elm_rename_function");
     logTest("Rename returned result", renameResult !== null);
 
     if (renameResult?.changes) {
@@ -1248,7 +1291,7 @@ async function main() {
     logTest("Found references in multiple files", refsBeforeCount > 5);
 
     // Now test rename (same position: line 7, column 11)
-    const renameResult = await client.rename(frontendUserFile, 7, 11, "AppUser");
+    const renameResult = await client.rename(frontendUserFile, 7, 11, "AppUser", "elm_rename_type");
 
     if (renameResult?.changes) {
       const filesChanged = Object.keys(renameResult.changes).length;
@@ -1287,7 +1330,7 @@ async function main() {
     console.log(`     → Model occurrences in GroupPage.elm: ${modelCount}`);
 
     // Rename Model to PageModel (line 81, 0-indexed = 80, "type alias Model =" column 11)
-    const renameResult = await client.rename(groupPageFile, 80, 11, "PageModel");
+    const renameResult = await client.rename(groupPageFile, 80, 11, "PageModel", "elm_rename_type");
 
     if (renameResult?.changes) {
       const groupPageUri = `file://${groupPageFile}`;
@@ -1735,6 +1778,108 @@ async function main() {
     } catch (e) {
       console.log(`     → Move function: ${e.message}`);
       logTest("Move handled gracefully", true);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 51: Rename variant round-trip (asymmetric rename bug) =====
+  startTest(51, "Rename variant round-trip (detect asymmetric rename bug)");
+  {
+    backupMeetdown();
+    try {
+      const typesFile = join(MEETDOWN, "src/Types.elm");
+      const frontendFile = join(MEETDOWN, "src/Frontend.elm");
+      await client.openFile(typesFile);
+      await client.openFile(frontendFile);
+
+      // Find LoginStatusPending in Types.elm (line 115, 0-indexed = 114)
+      const originalTypesContent = readFileSync(typesFile, "utf-8");
+      const originalFrontendContent = readFileSync(frontendFile, "utf-8");
+
+      // Count occurrences of LoginStatusPending in Frontend.elm BEFORE any rename
+      const beforeCount = (originalFrontendContent.match(/LoginStatusPending/g) || []).length;
+      console.log(`     → LoginStatusPending occurrences in Frontend.elm (before): ${beforeCount}`);
+
+      // Find the line number of LoginStatusPending definition
+      const typesLines = originalTypesContent.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < typesLines.length; i++) {
+        if (typesLines[i].includes("= LoginStatusPending") || typesLines[i].includes("| LoginStatusPending")) {
+          defLine = i;
+          break;
+        }
+      }
+      if (defLine === -1) {
+        throw new Error("Could not find LoginStatusPending definition in Types.elm");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      // STEP 1: Rename LoginStatusPending → PendingLoginStatus
+      console.log(`     → STEP 1: Renaming LoginStatusPending → PendingLoginStatus`);
+      const result1 = await client.renameVariant(typesFile, defLine, 6, "PendingLoginStatus");
+
+      if (!result1?.success) {
+        throw new Error(`First rename failed: ${result1?.message || "unknown error"}`);
+      }
+      console.log(`     → First rename: ${result1.editsApplied} edits`);
+
+      // Verify first rename worked in Frontend.elm
+      const afterStep1 = readFileSync(frontendFile, "utf-8");
+      const step1NewCount = (afterStep1.match(/PendingLoginStatus/g) || []).length;
+      const step1OldCount = (afterStep1.match(/LoginStatusPending/g) || []).length;
+      console.log(`     → After step 1: ${step1NewCount} PendingLoginStatus, ${step1OldCount} LoginStatusPending remaining`);
+
+      logTest("Step 1: All usages renamed", step1OldCount === 0 && step1NewCount === beforeCount);
+
+      // STEP 2: Rename back PendingLoginStatus → LoginStatusPending
+      console.log(`     → STEP 2: Renaming PendingLoginStatus → LoginStatusPending`);
+
+      // Re-open files to get fresh state
+      await client.openFile(typesFile);
+      await client.openFile(frontendFile);
+
+      // Find the new line (should be same position)
+      const afterStep1Types = readFileSync(typesFile, "utf-8");
+      const step1TypesLines = afterStep1Types.split("\n");
+      let newDefLine = -1;
+      for (let i = 0; i < step1TypesLines.length; i++) {
+        if (step1TypesLines[i].includes("= PendingLoginStatus") || step1TypesLines[i].includes("| PendingLoginStatus")) {
+          newDefLine = i;
+          break;
+        }
+      }
+      if (newDefLine === -1) {
+        throw new Error("Could not find PendingLoginStatus definition after first rename");
+      }
+
+      const result2 = await client.renameVariant(typesFile, newDefLine, 6, "LoginStatusPending");
+
+      if (!result2?.success) {
+        throw new Error(`Second rename failed: ${result2?.message || "unknown error"}`);
+      }
+      console.log(`     → Second rename: ${result2.editsApplied} edits`);
+
+      // Verify second rename worked in Frontend.elm
+      const afterStep2 = readFileSync(frontendFile, "utf-8");
+      const step2NewCount = (afterStep2.match(/LoginStatusPending/g) || []).length;
+      const step2OldCount = (afterStep2.match(/PendingLoginStatus/g) || []).length;
+      console.log(`     → After step 2: ${step2NewCount} LoginStatusPending, ${step2OldCount} PendingLoginStatus remaining`);
+
+      // THE BUG: Second rename only modifies definition but not usages
+      // We should have ALL occurrences back to LoginStatusPending
+      const roundTripSuccess = step2OldCount === 0 && step2NewCount === beforeCount;
+      logTest("Step 2: All usages renamed back (round-trip)", roundTripSuccess);
+
+      if (!roundTripSuccess) {
+        console.log(`     ${RED}BUG DETECTED: Asymmetric rename!${RESET}`);
+        console.log(`     ${RED}Expected: ${beforeCount} LoginStatusPending, 0 PendingLoginStatus${RESET}`);
+        console.log(`     ${RED}Got: ${step2NewCount} LoginStatusPending, ${step2OldCount} PendingLoginStatus${RESET}`);
+      }
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
     } finally {
       restoreMeetdown();
     }

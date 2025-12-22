@@ -578,9 +578,27 @@ impl<'a> InferenceScope<'a> {
         // First child is the function
         let func_type = self.infer(children[0]);
 
-        // Rest are arguments
+        // Extract parameter types from function type (if available) for propagation
+        let param_types: Vec<Option<&Type>> = match &func_type {
+            Type::Function(f) => f.params.iter().map(Some).collect(),
+            _ => vec![],
+        };
+
+        // Infer argument types, propagating expected type to record expressions
         let arg_types: Vec<Type> = children[1..].iter()
-            .map(|arg| self.infer(*arg))
+            .enumerate()
+            .map(|(i, arg)| {
+                // Check if this argument is a record expression and we have an expected type
+                if arg.kind() == "record_expr" {
+                    if let Some(Some(expected_type)) = param_types.get(i) {
+                        // If expected type is a Union (type alias for record), propagate it
+                        if let Type::Union(union_type) = expected_type {
+                            self.propagate_alias_to_record_recursive(*arg, union_type);
+                        }
+                    }
+                }
+                self.infer(*arg)
+            })
             .collect();
 
         // Apply arguments to function type

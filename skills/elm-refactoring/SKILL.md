@@ -106,20 +106,51 @@ file_path: "/path/to/File.elm"
 ### Renaming
 
 #### elm_prepare_rename
-Check if a symbol can be renamed (call before elm_rename).
+Check if a symbol can be renamed.
 ```
 file_path: "/path/to/File.elm"
 line: 28
 character: 0
 ```
 
-#### elm_rename
-Rename a symbol across all files in the project.
+#### elm_rename_variant
+Rename a variant across all files in the project.
 ```
 file_path: "/path/to/File.elm"
 line: 28
 character: 0
+old_name: "OldVariantName"   # REQUIRED: safety check
+newName: "NewVariantName"
+```
+
+#### elm_rename_type
+Rename a type across all files in the project.
+```
+file_path: "/path/to/File.elm"
+line: 28
+character: 0
+old_name: "OldTypeName"   # REQUIRED: safety check
+newName: "NewTypeName"
+```
+
+#### elm_rename_function
+Rename a function across all files in the project.
+```
+file_path: "/path/to/File.elm"
+line: 28
+character: 0
+old_name: "oldFunctionName"   # REQUIRED: safety check
 newName: "newFunctionName"
+```
+
+#### elm_rename_field
+Rename a record field across all files in the project.
+```
+file_path: "/path/to/File.elm"
+line: 28
+character: 0
+old_name: "oldFieldName"   # REQUIRED: safety check
+newName: "newFieldName"
 ```
 
 ---
@@ -132,6 +163,7 @@ Move a function from one module to another.
 file_path: "/path/to/Source.elm"
 line: 28           # line where function is defined
 character: 0
+function_name: "myFunction"   # REQUIRED: safety check
 target_module: "/path/to/Target.elm"
 ```
 
@@ -159,6 +191,7 @@ Analyze a variant before removal - shows blocking usages vs auto-removable patte
 file_path: "/path/to/Types.elm"
 line: 15           # line of the variant (e.g., "| MyVariant")
 character: 4       # position within variant name
+variant_name: "MyVariant"   # optional: safety check
 ```
 
 Returns:
@@ -173,6 +206,7 @@ Remove a variant and auto-remove its pattern match branches.
 file_path: "/path/to/Types.elm"
 line: 15
 character: 4
+variant_name: "MyVariant"   # REQUIRED: safety check
 ```
 
 **Workflow:**

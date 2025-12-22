@@ -54,7 +54,8 @@ The pre-commit hook automatically runs tests.
 ## MCP Tools Available
 
 - `elm_hover`, `elm_definition`, `elm_references`, `elm_symbols`
-- `elm_rename`, `elm_format`, `elm_diagnostics`
+- `elm_rename_variant`, `elm_rename_type`, `elm_rename_function`, `elm_rename_field`
+- `elm_format`, `elm_diagnostics`
 - `elm_code_actions`, `elm_apply_code_action`
 - `elm_move_function`, `elm_rename_file`, `elm_move_file`
 - `elm_prepare_remove_variant`, `elm_remove_variant`

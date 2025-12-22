@@ -162,22 +162,30 @@ impl TypeChecker {
             "field" => {
                 // Record expression - try to find the record type
                 let record_expr = parent.parent()?;
-                tracing::debug!("field: record_expr kind={}", record_expr.kind());
                 if record_expr.kind() == "record_expr" {
-                    // Check if there's a base record
+                    // Check if there's a base record (record update syntax)
                     if let Some(base) = record_expr.children(&mut record_expr.walk())
                         .find(|c| c.kind() == "record_base_identifier") {
-                        tracing::debug!("field: found base record, inferring type");
                         let base_type = self.infer_type_of_node(uri, base, source);
-                        tracing::debug!("field: base type = {:?}", base_type);
-                        let base_type = base_type?;
-                        return self.field_definition_from_type(&base_type, field_name, uri);
+                        if let Some(base_type) = base_type {
+                            return self.field_definition_from_type(&base_type, field_name, uri);
+                        }
                     }
-                    // Otherwise, try to infer from context (e.g., function return type)
+
+                    // Try to get cached type from inference
                     let record_type = self.get_type(uri, record_expr.id());
-                    tracing::debug!("field: record_expr type = {:?}", record_type);
-                    let record_type = record_type?;
-                    return self.field_definition_from_type(&record_type, field_name, uri);
+                    if let Some(record_type) = record_type {
+                        // Only return if we found a definition - otherwise fall through to structural matching
+                        if let Some(def) = self.field_definition_from_type(&record_type, field_name, uri) {
+                            return Some(def);
+                        }
+                    }
+
+                    // Fallback: structural matching - collect fields from record_expr and match against type aliases
+                    let record_fields = self.collect_record_expr_fields(record_expr, source);
+                    if !record_fields.is_empty() {
+                        return self.find_type_alias_by_fields(&record_fields, field_name, uri);
+                    }
                 }
                 None
             }
@@ -426,6 +434,129 @@ impl TypeChecker {
         }
 
         usages
+    }
+
+    /// Collect field names from a record expression
+    fn collect_record_expr_fields(&self, record_expr: Node, source: &str) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut cursor = record_expr.walk();
+        for child in record_expr.children(&mut cursor) {
+            if child.kind() == "field" {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                        fields.push(name.to_string());
+                    }
+                }
+            }
+        }
+        fields
+    }
+
+    /// Find a type alias that contains all the given fields
+    /// Returns the field definition if found
+    fn find_type_alias_by_fields(
+        &self,
+        record_fields: &[String],
+        target_field: &str,
+        _current_uri: &str,
+    ) -> Option<FieldDefinition> {
+        // Search all indexed files for type aliases
+        for (uri, tree) in &self.tree_cache {
+            let source = match self.source_cache.get(uri) {
+                Some(s) => s,
+                None => continue,  // Skip files without cached source
+            };
+            let root = tree.root_node();
+
+            // Find all type alias declarations
+            let mut cursor = root.walk();
+            for child in root.children(&mut cursor) {
+                if child.kind() == "type_alias_declaration" {
+                    if let Some(def) = self.check_type_alias_matches(
+                        child, record_fields, target_field, uri, source
+                    ) {
+                        return Some(def);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if a type alias contains all the given fields
+    fn check_type_alias_matches(
+        &self,
+        type_alias: Node,
+        record_fields: &[String],
+        target_field: &str,
+        uri: &str,
+        source: &str,
+    ) -> Option<FieldDefinition> {
+        // Get alias name
+        let alias_name = type_alias.child_by_field_name("name")
+            .and_then(|n| n.utf8_text(source.as_bytes()).ok())?;
+
+        // Find the record_type within the type alias
+        let type_expr = type_alias.child_by_field_name("typeExpression")?;
+        let record_type = self.find_record_type_node(type_expr)?;
+
+        // Collect fields from the type alias
+        let mut type_fields = std::collections::HashSet::new();
+        let mut target_field_node: Option<Node> = None;
+
+        let mut cursor = record_type.walk();
+        for child in record_type.children(&mut cursor) {
+            if child.kind() == "field_type" {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                        type_fields.insert(name.to_string());
+                        if name == target_field {
+                            target_field_node = Some(name_node);
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!("check_type_alias_matches: {} has fields {:?}", alias_name, type_fields);
+
+        // Check if all record fields exist in this type alias
+        let all_fields_match = record_fields.iter().all(|f| type_fields.contains(f));
+        tracing::info!("check_type_alias_matches: all_fields_match={}, target_field_node={}",
+            all_fields_match, target_field_node.is_some());
+
+        if all_fields_match {
+            if let Some(field_node) = target_field_node {
+                tracing::info!(
+                    "check_type_alias_matches: MATCHED {} with type alias {}",
+                    target_field, alias_name
+                );
+                return Some(FieldDefinition {
+                    name: target_field.to_string(),
+                    node_id: field_node.id(),
+                    type_alias_name: Some(alias_name.to_string()),
+                    type_alias_node_id: Some(type_alias.id()),
+                    module_name: self.get_module_name(uri, source),
+                    uri: uri.to_string(),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Find a record_type node within a type expression
+    fn find_record_type_node<'a>(&self, node: Node<'a>) -> Option<Node<'a>> {
+        if node.kind() == "record_type" {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = self.find_record_type_node(child) {
+                return Some(found);
+            }
+        }
+        None
     }
 }
 

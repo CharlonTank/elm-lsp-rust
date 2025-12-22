@@ -731,9 +731,10 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file containing the type definition"),
     line: z.number().describe("Line number of the variant name (0-indexed)"),
     character: z.number().describe("Character position within the variant name (0-indexed)"),
+    old_name: z.string().describe("Expected current variant name (must match what's at the position)"),
     newName: z.string().describe("The new name for the variant"),
   },
-  async ({ file_path, line, character, newName }) => {
+  async ({ file_path, line, character, old_name, newName }) => {
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
@@ -748,7 +749,18 @@ server.tool(
     const result = await client.executeCommand("elm.renameVariant", [uri, line, character, newName]);
 
     if (!result) {
-      return { content: [{ type: "text", text: "No variant found at this position" }] };
+      return { content: [{ type: "text", text: `No variant found at line ${line + 1}. Expected: ${old_name}` }] };
+    }
+
+    // Safety check: verify the variant at this position matches expected name
+    if (result.oldName !== old_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected variant '${old_name}' but found '${result.oldName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${old_name}'.`,
+        }],
+      };
     }
 
     if (!result.success) {
@@ -783,9 +795,10 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file containing the type definition"),
     line: z.number().describe("Line number of the type name (0-indexed)"),
     character: z.number().describe("Character position within the type name (0-indexed)"),
+    old_name: z.string().describe("Expected current type name (must match what's at the position)"),
     newName: z.string().describe("The new name for the type"),
   },
-  async ({ file_path, line, character, newName }) => {
+  async ({ file_path, line, character, old_name, newName }) => {
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
@@ -800,7 +813,18 @@ server.tool(
     const result = await client.executeCommand("elm.renameType", [uri, line, character, newName]);
 
     if (!result) {
-      return { content: [{ type: "text", text: "No type found at this position" }] };
+      return { content: [{ type: "text", text: `No type found at line ${line + 1}. Expected: ${old_name}` }] };
+    }
+
+    // Safety check: verify the type at this position matches expected name
+    if (result.oldName !== old_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected type '${old_name}' but found '${result.oldName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${old_name}'.`,
+        }],
+      };
     }
 
     if (!result.success) {
@@ -835,9 +859,10 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file containing the function"),
     line: z.number().describe("Line number of the function name (0-indexed)"),
     character: z.number().describe("Character position within the function name (0-indexed)"),
+    old_name: z.string().describe("Expected current function name (must match what's at the position)"),
     newName: z.string().describe("The new name for the function"),
   },
-  async ({ file_path, line, character, newName }) => {
+  async ({ file_path, line, character, old_name, newName }) => {
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
@@ -852,7 +877,18 @@ server.tool(
     const result = await client.executeCommand("elm.renameFunction", [uri, line, character, newName]);
 
     if (!result) {
-      return { content: [{ type: "text", text: "No function found at this position" }] };
+      return { content: [{ type: "text", text: `No function found at line ${line + 1}. Expected: ${old_name}` }] };
+    }
+
+    // Safety check: verify the function at this position matches expected name
+    if (result.oldName !== old_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected function '${old_name}' but found '${result.oldName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${old_name}'.`,
+        }],
+      };
     }
 
     if (!result.success) {
@@ -887,9 +923,10 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file"),
     line: z.number().describe("Line number of the field (0-indexed)"),
     character: z.number().describe("Character position within the field name (0-indexed)"),
+    old_name: z.string().describe("Expected current field name (must match what's at the position)"),
     newName: z.string().describe("The new name for the field"),
   },
-  async ({ file_path, line, character, newName }) => {
+  async ({ file_path, line, character, old_name, newName }) => {
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
@@ -900,6 +937,24 @@ server.tool(
     const uri = `file://${absPath}`;
     const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
+
+    // First check what's at the position using prepareRename
+    const prepareResult = await client.prepareRename(uri, line, character);
+    if (!prepareResult) {
+      return { content: [{ type: "text", text: `No field found at line ${line + 1}. Expected: ${old_name}` }] };
+    }
+
+    // Safety check: verify the field at this position matches expected name
+    const actualName = prepareResult.placeholder || "";
+    if (actualName !== old_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected field '${old_name}' but found '${actualName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${old_name}'.`,
+        }],
+      };
+    }
 
     // Use the standard rename - it detects fields automatically
     const result = await client.rename(uri, line, character, newName);
@@ -917,7 +972,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `Renamed field to "${newName}" in ${fileCount} files (${totalEdits} total edits):\n${summary}`,
+        text: `Renamed field "${old_name}" to "${newName}" in ${fileCount} files (${totalEdits} total edits):\n${summary}`,
       }],
     };
   }
@@ -930,9 +985,10 @@ server.tool(
     file_path: z.string().describe("Path to the source file containing the function"),
     line: z.number().describe("Line number of the function name (0-indexed)"),
     character: z.number().describe("Character position of the function name (0-indexed)"),
+    function_name: z.string().describe("Expected function name (must match what's at the position)"),
     target_module: z.string().describe('Path to the target module file (e.g., "src/Utils/Helpers.elm")'),
   },
-  async ({ file_path, line, character, target_module }) => {
+  async ({ file_path, line, character, function_name, target_module }) => {
     const absPath = resolveFilePath(file_path);
     const absTargetModule = resolveFilePath(target_module);
     const workspaceRoot = findWorkspaceRoot(absPath);
@@ -962,7 +1018,18 @@ server.tool(
     });
 
     if (!func) {
-      return { content: [{ type: "text", text: `No function found at line ${line + 1}` }] };
+      return { content: [{ type: "text", text: `No function found at line ${line + 1}. Expected: ${function_name}` }] };
+    }
+
+    // Safety check: verify the function at this position matches expected name
+    if (func.name !== function_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected function '${function_name}' but found '${func.name}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${function_name}'.`,
+        }],
+      };
     }
 
     const functionName = func.name;
@@ -1109,8 +1176,9 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file containing the type definition"),
     line: z.number().describe("Line number of the variant name (0-indexed)"),
     character: z.number().describe("Character position within the variant name (0-indexed)"),
+    variant_name: z.string().optional().describe("Expected variant name (if provided, validates it matches what's at the position)"),
   },
-  async ({ file_path, line, character }) => {
+  async ({ file_path, line, character, variant_name }) => {
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
@@ -1125,7 +1193,18 @@ server.tool(
     const result = await client.executeCommand("elm.prepareRemoveVariant", [uri, line, character]);
 
     if (!result || !result.success) {
-      return { content: [{ type: "text", text: result?.error || "No variant found at this position" }] };
+      return { content: [{ type: "text", text: result?.error || `No variant found at line ${line + 1}` }] };
+    }
+
+    // Safety check: if variant_name provided, verify it matches
+    if (variant_name && result.variantName !== variant_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected variant '${variant_name}' but found '${result.variantName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${variant_name}'.`,
+        }],
+      };
     }
 
     const otherVariants = result.otherVariants?.join(", ") || "none";
@@ -1210,8 +1289,9 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file containing the type definition"),
     line: z.number().describe("Line number of the variant name (0-indexed)"),
     character: z.number().describe("Character position within the variant name (0-indexed)"),
+    variant_name: z.string().describe("Expected variant name (must match what's at the position)"),
   },
-  async ({ file_path, line, character }) => {
+  async ({ file_path, line, character, variant_name }) => {
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
@@ -1226,7 +1306,18 @@ server.tool(
     const result = await client.executeCommand("elm.removeVariant", [uri, line, character]);
 
     if (!result) {
-      return { content: [{ type: "text", text: "No variant found at this position" }] };
+      return { content: [{ type: "text", text: `No variant found at line ${line + 1}. Expected: ${variant_name}` }] };
+    }
+
+    // Safety check: verify the variant at this position matches expected name
+    if (result.variantName !== variant_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected variant '${variant_name}' but found '${result.variantName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${variant_name}'.`,
+        }],
+      };
     }
 
     if (!result.success) {

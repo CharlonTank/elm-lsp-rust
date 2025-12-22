@@ -293,6 +293,13 @@ impl Workspace {
         // Invalidate type checker cache for this file
         self.type_checker.invalidate_file(uri.as_str());
 
+        // Remove old references from this file
+        for refs in self.references.values_mut() {
+            refs.retain(|r| r.uri != *uri);
+        }
+        // Remove empty entries
+        self.references.retain(|_, refs| !refs.is_empty());
+
         // Re-index the file
         if let Some(tree) = self.parser.parse(content) {
             let symbols = self.parser.extract_symbols(&tree, content);
@@ -303,6 +310,9 @@ impl Workspace {
 
             // Re-index for type checking
             self.type_checker.index_file(uri.as_str(), content, tree.clone());
+
+            // Re-index references for this file
+            self.find_references_in_tree(&tree, content, uri, &module_name, &imports);
 
             for symbol in &symbols {
                 let global_symbol = GlobalSymbol {
@@ -1364,7 +1374,7 @@ impl Workspace {
                     variant_name.to_string()
                 };
 
-                let replacement = format!("Debug.todo \"VARIANT REMOVAL DONE: {}\"", original_code);
+                let replacement = format!("(Debug.todo \"VARIANT REMOVAL DONE: {}\")", original_code);
 
                 changes
                     .entry(usage_uri)

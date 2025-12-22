@@ -95,7 +95,10 @@ type Color = Red | Green | Blue | Unused
 | `elm_definition` | Go to definition |
 | `elm_references` | Find all references |
 | `elm_symbols` | List file symbols |
-| `elm_rename` | Rename symbol |
+| `elm_rename_variant` | Rename a variant |
+| `elm_rename_type` | Rename a type |
+| `elm_rename_function` | Rename a function |
+| `elm_rename_field` | Rename a record field |
 | `elm_diagnostics` | Get compiler errors |
 | `elm_format` | Format file |
 | `elm_code_actions` | Get available actions |

@@ -408,7 +408,7 @@ updateLoaded msg ({ loadedUserConfig } as model) =
         GotTime time ->
             ( { model | time = time }, Command.none )
 
-        PressedLogin ->
+        ClickedLogin ->
             case model.loginStatus of
                 LoginStatusPending ->
                     ( model, Command.none )
@@ -1757,7 +1757,7 @@ header ({ theme, texts } as userConfig) maybeLoggedIn model =
                             [ Ui.headerButton
                                 isMobile_
                                 signUpOrLoginButtonId
-                                { onPress = PressedLogin, label = texts.login }
+                                { onPress = ClickedLogin, label = texts.login }
                             , languageButton
                                 theme
                                 isMobile_

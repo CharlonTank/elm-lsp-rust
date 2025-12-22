@@ -17,10 +17,9 @@ This document maps all MCP tools (features) to their corresponding tests.
 | elm_code_actions | 1 | 1 | ✅ Good |
 | elm_apply_code_action | 1 | 0 | ⚠️ Basic |
 | elm_prepare_rename | 1 | 2 | ✅ Good |
-| elm_rename | 0 | 3 | ✅ Good |
-| elm_rename_function | 1 | 0 | ⚠️ Basic |
-| elm_rename_type | 1 | 0 | ⚠️ Basic |
-| elm_rename_variant | 1 | 0 | ⚠️ Basic |
+| elm_rename_function | 1 | 1 | ✅ Good |
+| elm_rename_type | 1 | 2 | ✅ Good |
+| elm_rename_variant | 1 | 1 | ✅ Good |
 | elm_rename_field | 1 | 0 | ⚠️ Basic |
 | elm_move_function | 1 | 1 | ✅ Good |
 | elm_prepare_remove_variant | 3 | 22 | ✅ Excellent |
@@ -36,7 +35,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 ---
 
-## All Tests (129 total)
+## All Tests (131 total)
 
 ### Fixture Tests (26 tests)
 
@@ -67,7 +66,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Rename Variant** → elm_rename_variant
 - **Symbols** → elm_symbols
 
-### Meetdown Tests (103 tests)
+### Meetdown Tests (105 tests)
 
 - **Test 1** → elm_prepare_remove_variant
 - **Test 2** → elm_prepare_remove_variant
@@ -99,9 +98,9 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Test 29** → elm_move_file
 - **Test 30** → elm_rename_file
 - **Test 31** → elm_move_file
-- **Test 32** → elm_rename
-- **Test 33** → elm_references, elm_rename
-- **Test 34** → elm_rename
+- **Test 32** → elm_rename_function
+- **Test 33** → elm_references, elm_rename_type
+- **Test 34** → elm_rename_type
 - **Test 35** → elm_hover
 - **Test 36** → elm_hover
 - **Test 37** → elm_definition
@@ -118,6 +117,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Test 48** → elm_prepare_rename
 - **Test 49** → elm_prepare_rename
 - **Test 50** → elm_move_function
+- **Test 51** → elm_rename_variant
 
 ---
 
@@ -127,7 +127,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 # Run fixture tests (26 tests)
 node tests/run_tests.mjs
 
-# Run meetdown real-world tests (103 tests)
+# Run meetdown real-world tests (105 tests)
 node tests/test_meetdown_comprehensive.mjs
 
 # Run all tests
@@ -136,4 +136,4 @@ node tests/run_all_tests.mjs
 
 ---
 
-*Last updated: 2025-12-22 - All 129 tests passing ✅*
+*Last updated: 2025-12-22 - All 131 tests passing ✅*

@@ -244,6 +244,7 @@ async function testRename() {
       file_path: utilsFile,
       line: 15, // 0-indexed (line 16 in editor: "helper : String -> String")
       character: 0,
+      old_name: "helper",
       newName: "formatHelper",
     });
 
@@ -278,6 +279,7 @@ async function testRenameTypeAlias() {
       file_path: typesFile,
       line: 18, // 0-indexed (line 19 in editor: "type alias Guest =")
       character: 11, // position of "Guest"
+      old_name: "Guest",
       newName: "Visitor",
     });
 
@@ -311,6 +313,7 @@ async function testRenameField() {
       file_path: fieldRenameFile,
       line: 4, // 0-indexed (line 5 in editor: "    { name : String")
       character: 6, // position of "name"
+      old_name: "name",
       newName: "userName",
     });
 
@@ -352,6 +355,7 @@ async function testRenameVariant() {
       file_path: testFile,
       line: 18, // 0-indexed (line 19 in editor: "    | Unused")
       character: 6, // position of "Unused" (after "    | ")
+      old_name: "Unused",
       newName: "Obsolete",
     });
 
@@ -485,6 +489,7 @@ async function testMoveFunction() {
       file_path: utilsFile,
       line: 5, // 0-indexed (line 6 in editor: "formatName : String -> String")
       character: 0,
+      function_name: "formatName",
       target_module: typesFile,
     });
 
@@ -561,6 +566,7 @@ async function testRemoveVariant() {
       file_path: testFile,
       line: 18, // 0-indexed (line 19: "    | Unused")
       character: 6, // position of "Unused"
+      variant_name: "Unused",
     });
 
     if (result.includes("Removed") || result.includes("removed") || result.includes("success") || result.includes("Successfully")) {
@@ -600,6 +606,7 @@ async function testRemoveVariantWithDebugTodo() {
       file_path: testFile,
       line: 17, // 0-indexed (line 18: "    | Blue")
       character: 6, // position of "Blue"
+      variant_name: "Blue",
     });
 
     if (result.includes("Removed") && result.includes("Debug.todo")) {
@@ -640,6 +647,7 @@ async function testRemoveVariantPatternAutoRemove() {
       file_path: testFile,
       line: 15, // 0-indexed (line 16: "    = Red")
       character: 6, // position of "Red"
+      variant_name: "Red",
     });
 
     if (result.includes("Successfully") || result.includes("Removed")) {
@@ -687,6 +695,7 @@ async function testRemoveVariantWithArgs() {
       file_path: testFile,
       line: 27, // 0-indexed (line 28: "    = TextMsg String")
       character: 6, // position of "TextMsg"
+      variant_name: "TextMsg",
     });
 
     if (result.includes("Successfully") || result.includes("Removed")) {
@@ -757,6 +766,7 @@ async function testRemoveVariantUselessWildcard() {
       file_path: testFile,
       line: 96, // 0-indexed (line 97: "    | Off")
       character: 6, // position of "Off"
+      variant_name: "Off",
     });
 
     if (result.includes("Successfully") || result.includes("Removed")) {
