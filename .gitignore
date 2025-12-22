@@ -8,3 +8,4 @@ tests/fixture-backup/
 *.backup
 *.backup2
 .DS_Store
+tests/cleemo-lamdera-test/

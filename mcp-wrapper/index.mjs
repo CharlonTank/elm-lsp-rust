@@ -8,7 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { z } from "zod";
 
@@ -279,9 +279,16 @@ function restartClient() {
   }
 }
 
+// Resolve relative paths to absolute paths
+function resolveFilePath(filePath) {
+  return resolve(filePath);
+}
+
 // Find workspace root from a file path
 function findWorkspaceRoot(filePath) {
-  let dir = dirname(filePath);
+  // Ensure we have an absolute path
+  const absPath = resolveFilePath(filePath);
+  let dir = dirname(absPath);
   while (dir !== "/") {
     if (existsSync(join(dir, "elm.json"))) {
       return dir;
@@ -351,14 +358,15 @@ server.tool(
     character: z.number().describe("Character position (0-indexed)"),
   },
   async ({ file_path, line, character }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.getCompletion(uri, line, character);
@@ -390,14 +398,15 @@ server.tool(
     character: z.number().describe("Character position (0-indexed)"),
   },
   async ({ file_path, line, character }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.getHover(uri, line, character);
@@ -419,14 +428,15 @@ server.tool(
     character: z.number().describe("Character position (0-indexed)"),
   },
   async ({ file_path, line, character }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.getDefinition(uri, line, character);
@@ -453,14 +463,15 @@ server.tool(
     character: z.number().describe("Character position (0-indexed)"),
   },
   async ({ file_path, line, character }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.getReferences(uri, line, character);
@@ -489,14 +500,15 @@ server.tool(
     limit: z.number().optional().describe("Maximum number of symbols to return (default: 50)"),
   },
   async ({ file_path, offset = 0, limit = 50 }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.getSymbols(uri);
@@ -568,14 +580,15 @@ server.tool(
     file_path: z.string().describe("Path to the Elm file"),
   },
   async ({ file_path }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     try {
       const client = await ensureClient(workspaceRoot);
-      const uri = `file://${file_path}`;
+      const uri = `file://${absPath}`;
       const result = await client.getDiagnostics(uri);
 
       if (result && result.diagnostics && result.diagnostics.length > 0) {
@@ -605,14 +618,15 @@ server.tool(
     end_char: z.number().describe("End character (0-indexed)"),
   },
   async ({ file_path, start_line, start_char, end_line, end_char }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.getCodeActions(uri, start_line, start_char, end_line, end_char);
@@ -642,14 +656,15 @@ server.tool(
     action_title: z.string().describe("Title of the code action to apply"),
   },
   async ({ file_path, start_line, start_char, end_line, end_char, action_title }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.getCodeActions(uri, start_line, start_char, end_line, end_char);
@@ -682,14 +697,15 @@ server.tool(
     character: z.number().describe("Character position (0-indexed)"),
   },
   async ({ file_path, line, character }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.prepareRename(uri, line, character);
@@ -718,14 +734,15 @@ server.tool(
     newName: z.string().describe("The new name for the symbol"),
   },
   async ({ file_path, line, character, newName }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.rename(uri, line, character, newName);
@@ -759,18 +776,20 @@ server.tool(
     target_module: z.string().describe('Path to the target module file (e.g., "src/Utils/Helpers.elm")'),
   },
   async ({ file_path, line, character, target_module }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const absTargetModule = resolveFilePath(target_module);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
-    if (!existsSync(target_module)) {
+    if (!existsSync(absTargetModule)) {
       return { content: [{ type: "text", text: `Target module does not exist: ${target_module}` }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const sourceContent = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const sourceContent = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, sourceContent);
 
     // Get the function name at the position using document symbols
@@ -795,7 +814,7 @@ server.tool(
     // Implement move function logic directly
     try {
       const sourceLines = sourceContent.split("\n");
-      const targetContent = readFileSync(target_module, "utf-8");
+      const targetContent = readFileSync(absTargetModule, "utf-8");
       const targetLines = targetContent.split("\n");
 
       // 1. Find the function bounds (type signature + body)
@@ -902,8 +921,8 @@ server.tool(
       newSourceLines.splice(importInsertLine, 0, importStatement);
 
       // 6. Write updated files
-      writeFileSync(file_path, newSourceLines.join("\n"));
-      writeFileSync(target_module, newTargetLines.join("\n"));
+      writeFileSync(absPath, newSourceLines.join("\n"));
+      writeFileSync(absTargetModule, newTargetLines.join("\n"));
 
       // 7. Find and update references in other files
       const refs = await client.getReferences(uri, funcLine, 0);
@@ -935,14 +954,15 @@ server.tool(
     character: z.number().describe("Character position within the variant name (0-indexed)"),
   },
   async ({ file_path, line, character }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.executeCommand("elm.prepareRemoveVariant", [uri, line, character]);
@@ -1035,14 +1055,15 @@ server.tool(
     character: z.number().describe("Character position within the variant name (0-indexed)"),
   },
   async ({ file_path, line, character }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.executeCommand("elm.removeVariant", [uri, line, character]);
@@ -1122,7 +1143,8 @@ server.tool(
     new_name: z.string().describe('New filename (just the name, e.g., "NewName.elm")'),
   },
   async ({ file_path, new_name }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
@@ -1132,8 +1154,8 @@ server.tool(
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.executeCommand("elm.renameFile", [uri, new_name]);
@@ -1192,7 +1214,8 @@ server.tool(
     target_path: z.string().describe('Target path (e.g., "src/Utils/Helper.elm")'),
   },
   async ({ file_path, target_path }) => {
-    const workspaceRoot = findWorkspaceRoot(file_path);
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
@@ -1202,8 +1225,8 @@ server.tool(
     }
 
     const client = await ensureClient(workspaceRoot);
-    const uri = `file://${file_path}`;
-    const content = readFileSync(file_path, "utf-8");
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
     const result = await client.executeCommand("elm.moveFile", [uri, target_path]);
