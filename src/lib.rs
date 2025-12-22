@@ -1,5 +1,10 @@
+pub mod binder;
 pub mod diagnostics;
+pub mod disjoint_set;
 pub mod document;
+pub mod inference;
 pub mod parser;
 pub mod server;
+pub mod type_checker;
+pub mod types;
 pub mod workspace;

@@ -528,6 +528,18 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document.uri;
         let position = params.position;
 
+        // First check if this is a field rename
+        if let Some(doc) = self.documents.get(uri) {
+            if let Ok(ws) = self.workspace.read() {
+                if let Some(workspace) = ws.as_ref() {
+                    if let Some(field_info) = workspace.get_field_at_position(uri, position, &doc.text) {
+                        return Ok(Some(PrepareRenameResponse::Range(field_info.range)));
+                    }
+                }
+            }
+        }
+
+        // Fall back to symbol rename
         if let Some(doc) = self.documents.get(uri) {
             if let Some(symbol) = doc.get_symbol_at_position(position) {
                 return Ok(Some(PrepareRenameResponse::Range(symbol.range)));
@@ -542,7 +554,46 @@ impl LanguageServer for ElmLanguageServer {
         let position = params.text_document_position.position;
         let new_name = params.new_name;
 
-        // Get symbol name
+        // First check if this is a field rename
+        if let Some(doc) = self.documents.get(uri) {
+            if let Ok(ws) = self.workspace.read() {
+                if let Some(workspace) = ws.as_ref() {
+                    if let Some(field_info) = workspace.get_field_at_position(uri, position, &doc.text) {
+                        tracing::info!(
+                            "Renaming field {} in type alias {:?} to {}",
+                            field_info.name,
+                            field_info.definition.type_alias_name,
+                            new_name
+                        );
+
+                        // Find all field references using type inference
+                        let refs = workspace.find_field_references(&field_info.name, &field_info.definition);
+
+                        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+
+                        for r in refs {
+                            changes
+                                .entry(r.uri)
+                                .or_insert_with(Vec::new)
+                                .push(TextEdit {
+                                    range: r.range,
+                                    new_text: new_name.clone(),
+                                });
+                        }
+
+                        if !changes.is_empty() {
+                            tracing::info!("Field rename affects {} files", changes.len());
+                            return Ok(Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fall back to symbol rename
         let symbol_name = if let Some(doc) = self.documents.get(uri) {
             doc.get_symbol_at_position(position).map(|s| s.name.clone())
         } else {
@@ -586,34 +637,38 @@ impl LanguageServer for ElmLanguageServer {
                                 range: symbol.definition_range,
                                 new_text: new_name.clone(),
                             });
-                    }
 
-                    // Add all references (skip Evergreen migration files and duplicates)
-                    let refs = workspace.find_references(&name, None);
-                    for r in refs {
-                        // Skip Evergreen files - they are migration snapshots
-                        if r.uri.path().contains("/Evergreen/") {
-                            continue;
-                        }
-                        // Skip if we already have an edit for this exact range
-                        let key = (
-                            r.uri.to_string(),
-                            r.range.start.line,
-                            r.range.start.character,
-                            r.range.end.line,
-                            r.range.end.character,
+                        // Use module-aware references to only rename in files that import this symbol
+                        let refs = workspace.find_module_aware_references(
+                            &name,
+                            &symbol.module_name,
+                            &symbol.definition_uri,
                         );
-                        if seen_ranges.contains(&key) {
-                            continue;
+                        for r in refs {
+                            // Skip Evergreen files - they are migration snapshots
+                            if r.uri.path().contains("/Evergreen/") {
+                                continue;
+                            }
+                            // Skip if we already have an edit for this exact range
+                            let key = (
+                                r.uri.to_string(),
+                                r.range.start.line,
+                                r.range.start.character,
+                                r.range.end.line,
+                                r.range.end.character,
+                            );
+                            if seen_ranges.contains(&key) {
+                                continue;
+                            }
+                            seen_ranges.insert(key);
+                            changes
+                                .entry(r.uri)
+                                .or_insert_with(Vec::new)
+                                .push(TextEdit {
+                                    range: r.range,
+                                    new_text: new_name.clone(),
+                                });
                         }
-                        seen_ranges.insert(key);
-                        changes
-                            .entry(r.uri)
-                            .or_insert_with(Vec::new)
-                            .push(TextEdit {
-                                range: r.range,
-                                new_text: new_name.clone(),
-                            });
                     }
                 }
             }

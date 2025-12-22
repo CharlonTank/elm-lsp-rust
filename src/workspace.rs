@@ -5,6 +5,7 @@ use walkdir::WalkDir;
 
 use crate::document::ElmSymbol;
 use crate::parser::ElmParser;
+use crate::type_checker::{TypeChecker, FieldDefinition};
 
 /// Represents an Elm module with its symbols and metadata
 #[derive(Debug, Clone)]
@@ -56,6 +57,7 @@ pub struct Workspace {
     pub symbols: HashMap<String, Vec<GlobalSymbol>>,
     pub references: HashMap<String, Vec<SymbolReference>>,
     pub parser: ElmParser,
+    pub type_checker: TypeChecker,
 }
 
 impl Workspace {
@@ -67,6 +69,7 @@ impl Workspace {
             symbols: HashMap::new(),
             references: HashMap::new(),
             parser: ElmParser::new(),
+            type_checker: TypeChecker::new(),
         }
     }
 
@@ -161,6 +164,9 @@ impl Workspace {
             let imports = self.extract_imports(&tree, &content);
             let exposing = self.extract_exposing(&tree, &content);
 
+            // Index for type checking
+            self.type_checker.index_file(uri.as_str(), &content, tree.clone());
+
             // Add symbols to global index
             for symbol in &symbols {
                 let qualified_name = format!("{}.{}", module_name, symbol.name);
@@ -220,6 +226,9 @@ impl Workspace {
             }
         }
 
+        // Invalidate type checker cache for this file
+        self.type_checker.invalidate_file(uri.as_str());
+
         // Re-index the file
         if let Some(tree) = self.parser.parse(content) {
             let symbols = self.parser.extract_symbols(&tree, content);
@@ -227,6 +236,9 @@ impl Workspace {
                 .unwrap_or_else(|| self.path_to_module_name(&path));
             let imports = self.extract_imports(&tree, content);
             let exposing = self.extract_exposing(&tree, content);
+
+            // Re-index for type checking
+            self.type_checker.index_file(uri.as_str(), content, tree.clone());
 
             for symbol in &symbols {
                 let global_symbol = GlobalSymbol {
@@ -622,6 +634,111 @@ impl Workspace {
         results.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
 
         results
+    }
+
+    /// Find module-aware references to a symbol
+    /// Only returns references from files that actually import the symbol from the defining module
+    pub fn find_module_aware_references(
+        &self,
+        symbol_name: &str,
+        defining_module: &str,
+        defining_uri: &Url,
+    ) -> Vec<SymbolReference> {
+        let mut results = Vec::new();
+
+        // Extract just the symbol name if qualified
+        let base_name = if symbol_name.contains('.') {
+            symbol_name.rsplit('.').next().unwrap_or(symbol_name)
+        } else {
+            symbol_name
+        };
+
+        tracing::debug!(
+            "find_module_aware_references: symbol={}, defining_module={}, defining_uri={}",
+            base_name, defining_module, defining_uri.as_str()
+        );
+
+        // 1. Get refs stored under the qualified key "DefiningModule.symbol"
+        let qualified_key = format!("{}.{}", defining_module, base_name);
+        if let Some(refs) = self.references.get(&qualified_key) {
+            for r in refs {
+                tracing::debug!(
+                    "  Including qualified ref (key={}): {} {:?}",
+                    qualified_key, r.uri.as_str(), r.range
+                );
+                results.push(r.clone());
+            }
+        }
+
+        // 2. Get refs stored under the unqualified key "symbol"
+        //    Filter: only include if from defining file OR file imports symbol from defining module
+        if let Some(refs) = self.references.get(base_name) {
+            for r in refs {
+                // Always include refs from the defining file
+                if &r.uri == defining_uri {
+                    tracing::debug!(
+                        "  Including unqualified ref from definition file: {:?}",
+                        r.range
+                    );
+                    results.push(r.clone());
+                    continue;
+                }
+
+                // For other files, check if they expose the symbol from the defining module
+                let file_module = self.get_module_at_uri(&r.uri);
+                if let Some(module) = file_module {
+                    // Skip if this file defines the same-named symbol (different module)
+                    if module.module_name != defining_module {
+                        // This ref might be from a local definition or different import
+                        // Only include if the file imports this symbol from the defining module
+                        let symbol_is_exposed = module.imports.iter().any(|imp| {
+                            if imp.module_name != defining_module && imp.alias.as_deref() != Some(defining_module) {
+                                return false;
+                            }
+                            match &imp.exposing {
+                                ExposingInfo::All => true,
+                                ExposingInfo::Explicit(names) => {
+                                    names.iter().any(|n| {
+                                        n == base_name ||
+                                        n.starts_with(&format!("{}(", base_name)) ||
+                                        n == &format!("{}(..)", base_name)
+                                    })
+                                }
+                            }
+                        });
+
+                        if symbol_is_exposed {
+                            tracing::debug!(
+                                "  Including exposed unqualified ref from {}: {:?}",
+                                r.uri.as_str(), r.range
+                            );
+                            results.push(r.clone());
+                        } else {
+                            tracing::debug!(
+                                "  Excluding unqualified ref from {} (not exposed from {}): {:?}",
+                                r.uri.as_str(), defining_module, r.range
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deduplicate
+        results.sort_by(|a, b| {
+            (&a.uri, a.range.start.line, a.range.start.character)
+                .cmp(&(&b.uri, b.range.start.line, b.range.start.character))
+        });
+        results.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
+
+        results
+    }
+
+    /// Get module info for a URI
+    fn get_module_at_uri(&self, uri: &Url) -> Option<&ElmModule> {
+        self.modules.values().find(|m| {
+            Url::from_file_path(&m.path).ok().as_ref() == Some(uri)
+        })
     }
 
     /// Find definition of a symbol
@@ -2291,6 +2408,273 @@ impl Workspace {
 
         Ok(files_updated)
     }
+
+    /// Get field info at a given position in a file
+    pub fn get_field_at_position(
+        &self,
+        uri: &Url,
+        position: Position,
+        content: &str,
+    ) -> Option<FieldInfo> {
+        tracing::debug!("get_field_at_position: uri={}, pos={:?}", uri.as_str(), position);
+
+        // Use the cached tree from the type checker to ensure node IDs match
+        let tree = match self.type_checker.get_tree(uri.as_str()) {
+            Some(t) => t,
+            None => {
+                tracing::debug!("get_field_at_position: no tree cached for {}", uri.as_str());
+                return None;
+            }
+        };
+        let root = tree.root_node();
+
+        // Find the node at the position
+        let point = tree_sitter::Point::new(position.line as usize, position.character as usize);
+        let node = match Self::find_node_at_point(root, point) {
+            Some(n) => {
+                tracing::debug!("get_field_at_position: found node kind={}", n.kind());
+                n
+            }
+            None => {
+                tracing::debug!("get_field_at_position: no node at point");
+                return None;
+            }
+        };
+
+        // Check if this is a field reference
+        let field_def = self.type_checker.find_field_definition(uri.as_str(), node, content)?;
+
+        // Calculate the range for just the field name
+        let range = Range {
+            start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
+            end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+        };
+
+        Some(FieldInfo {
+            name: field_def.name.clone(),
+            range,
+            definition: field_def,
+        })
+    }
+
+    /// Find all references to a record field using type inference
+    pub fn find_field_references(
+        &self,
+        field_name: &str,
+        definition: &FieldDefinition,
+    ) -> Vec<SymbolReference> {
+        let mut references = Vec::new();
+
+        // Include the definition itself - use cached tree for correct node IDs
+        if let Some(tree) = self.type_checker.get_tree(&definition.uri) {
+            if let Some(node) = Self::find_node_by_id(tree.root_node(), definition.node_id) {
+                let range = Range {
+                    start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
+                    end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+                };
+                if let Ok(def_uri) = Url::parse(&definition.uri) {
+                    references.push(SymbolReference {
+                        uri: def_uri,
+                        range,
+                        is_definition: true,
+                    });
+                }
+            }
+        }
+
+        // Search through all indexed files for field usages
+        for module in self.modules.values() {
+            // Skip Evergreen files
+            if module.path.to_string_lossy().contains("/Evergreen/") {
+                continue;
+            }
+
+            let file_uri = match Url::from_file_path(&module.path) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            // Use cached tree and source for correct node IDs
+            let tree = match self.type_checker.get_tree(file_uri.as_str()) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let content = match self.type_checker.get_source(file_uri.as_str()) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Find all field usages in this file
+            let usages = self.find_field_usages_in_tree(tree, content, field_name);
+            tracing::debug!("find_field_references: found {} usages in {}", usages.len(), file_uri.as_str());
+
+            for (node_id, range) in usages {
+                tracing::debug!("find_field_references: checking usage at line {}", range.start.line);
+                // Skip the definition itself (already added)
+                if file_uri.as_str() == definition.uri && node_id == definition.node_id {
+                    continue;
+                }
+
+                // Find the node to check if it resolves to the same definition
+                if let Some(node) = Self::find_node_by_id(tree.root_node(), node_id) {
+                    // Use type checker to resolve this field reference
+                    if let Some(ref_def) = self.type_checker.find_field_definition(
+                        file_uri.as_str(),
+                        node,
+                        &content,
+                    ) {
+                        tracing::debug!(
+                            "find_field_references: line {} resolved to {:?} (looking for {:?})",
+                            range.start.line, ref_def.type_alias_name, definition.type_alias_name
+                        );
+                        // Check if it resolves to the same type alias
+                        if ref_def.type_alias_name == definition.type_alias_name
+                            && ref_def.module_name == definition.module_name
+                        {
+                            references.push(SymbolReference {
+                                uri: file_uri.clone(),
+                                range,
+                                is_definition: false,
+                            });
+                        }
+                    } else {
+                        tracing::debug!("find_field_references: line {} - no definition resolved", range.start.line);
+                    }
+                }
+            }
+        }
+
+        // Deduplicate
+        references.sort_by(|a, b| {
+            (&a.uri, a.range.start.line, a.range.start.character)
+                .cmp(&(&b.uri, b.range.start.line, b.range.start.character))
+        });
+        references.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
+
+        references
+    }
+
+    /// Find all field usages in a tree that match the given field name
+    fn find_field_usages_in_tree(
+        &self,
+        tree: &tree_sitter::Tree,
+        source: &str,
+        field_name: &str,
+    ) -> Vec<(usize, Range)> {
+        let mut usages = Vec::new();
+        self.walk_for_field_usages(tree.root_node(), source, field_name, &mut usages);
+        usages
+    }
+
+    fn walk_for_field_usages(
+        &self,
+        node: tree_sitter::Node,
+        source: &str,
+        field_name: &str,
+        usages: &mut Vec<(usize, Range)>,
+    ) {
+        let node_kind = node.kind();
+        let parent_kind = node.parent().map(|p| p.kind());
+
+        // Check if this is a field reference matching our name
+        let is_field = match (node_kind, parent_kind) {
+            // Field in type definition: { name : String }
+            ("lower_case_identifier", Some("field_type")) => true,
+            // Field access: user.name
+            ("lower_case_identifier", Some("field_access_expr")) => true,
+            // Field accessor: .name
+            ("lower_case_identifier", Some("field_accessor_function_expr")) => true,
+            // Field in record expression: { name = value }
+            ("lower_case_identifier", Some("field")) => {
+                // Check if this is the field name (first child, not the value)
+                if let Some(parent) = node.parent() {
+                    // The field name is the first lower_case_identifier child
+                    parent.child(0)
+                        .map(|n| n.id() == node.id() && n.kind() == "lower_case_identifier")
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+            // Field in record pattern: { name }
+            ("lower_pattern", Some("record_pattern")) => true,
+            _ => false,
+        };
+
+        if is_field {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if text == field_name {
+                    let range = Range {
+                        start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
+                        end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+                    };
+                    usages.push((node.id(), range));
+                }
+            }
+        }
+
+        // Recurse into children
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.walk_for_field_usages(child, source, field_name, usages);
+        }
+    }
+
+    /// Find a node at a specific point in the tree
+    fn find_node_at_point(node: tree_sitter::Node, point: tree_sitter::Point) -> Option<tree_sitter::Node> {
+        if !Self::point_in_range(point, node.start_position(), node.end_position()) {
+            return None;
+        }
+
+        // Try to find a more specific child node
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = Self::find_node_at_point(child, point) {
+                return Some(found);
+            }
+        }
+
+        // If no child contains the point, return this node
+        Some(node)
+    }
+
+    fn point_in_range(point: tree_sitter::Point, start: tree_sitter::Point, end: tree_sitter::Point) -> bool {
+        if point.row < start.row || point.row > end.row {
+            return false;
+        }
+        if point.row == start.row && point.column < start.column {
+            return false;
+        }
+        if point.row == end.row && point.column > end.column {
+            return false;
+        }
+        true
+    }
+
+    /// Find a node by its ID
+    fn find_node_by_id(node: tree_sitter::Node, target_id: usize) -> Option<tree_sitter::Node> {
+        if node.id() == target_id {
+            return Some(node);
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = Self::find_node_by_id(child, target_id) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+}
+
+/// Information about a field at a position
+#[derive(Debug, Clone)]
+pub struct FieldInfo {
+    pub name: String,
+    pub range: Range,
+    pub definition: FieldDefinition,
 }
 
 /// Result of a move function operation
