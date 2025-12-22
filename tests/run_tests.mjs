@@ -340,6 +340,39 @@ async function testRenameField() {
   }
 }
 
+async function testRenameVariant() {
+  backupFixture();
+
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+
+    // Rename 'Unused' variant to 'Obsolete' (line 19 in editor, 0-indexed: 18)
+    // "    | Unused"
+    const result = await callTool("elm_rename_variant", {
+      file_path: testFile,
+      line: 18, // 0-indexed (line 19 in editor: "    | Unused")
+      character: 6, // position of "Unused" (after "    | ")
+      newName: "Obsolete",
+    });
+
+    assertContains(result, "Obsolete", "Rename result should mention new name");
+    assertContains(result, "Unused", "Rename result should mention old name");
+
+    // Verify the file was actually changed
+    const content = readFileSync(testFile, "utf-8");
+    assertContains(content, "| Obsolete", "TestRemoveVariant.elm should contain Obsolete variant");
+
+    // Ensure old variant name is gone from the type definition
+    if (content.includes("| Unused")) {
+      throw new Error("Old variant name 'Unused' should be renamed to 'Obsolete'");
+    }
+
+    logTest("rename: variant Unused -> Obsolete", true);
+  } finally {
+    restoreFixture();
+  }
+}
+
 async function testDiagnostics() {
   const typesFile = join(FIXTURE_DIR, "src/Types.elm");
 
@@ -416,6 +449,27 @@ async function testCodeActions() {
 
   // Just verify it doesn't crash and returns something
   logTest("code_actions: get actions for Main.elm", true);
+}
+
+async function testApplyCodeAction() {
+  const mainFile = join(FIXTURE_DIR, "src/Main.elm");
+
+  // Try to apply a non-existent action - should fail gracefully
+  const result = await callTool("elm_apply_code_action", {
+    file_path: mainFile,
+    start_line: 0,
+    start_char: 0,
+    end_line: 0,
+    end_char: 10,
+    action_title: "NonExistentAction",
+  });
+
+  // Should indicate the action was not found or no actions available, not crash
+  if (result.includes("not found") || result.includes("No code actions")) {
+    logTest("apply_code_action: graceful handling of unknown action", true);
+  } else {
+    throw new Error(`Expected 'not found' or 'No code actions', got: ${result}`);
+  }
 }
 
 async function testMoveFunction() {
@@ -883,10 +937,12 @@ async function runTests() {
       ["Rename Function", testRename],
       ["Rename Type Alias", testRenameTypeAlias],
       ["Rename Field", testRenameField],
+      ["Rename Variant", testRenameVariant],
       ["Diagnostics (no errors)", testDiagnostics],
       ["Diagnostics (with error)", testDiagnosticsWithError],
       ["Completion", testCompletion],
       ["Code Actions", testCodeActions],
+      ["Apply Code Action", testApplyCodeAction],
       ["Move Function", testMoveFunction],
       ["Format", testFormat],
       ["Prepare Remove Variant", testPrepareRemoveVariant],

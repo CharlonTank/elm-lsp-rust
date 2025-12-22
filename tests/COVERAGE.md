@@ -15,9 +15,13 @@ This document maps all MCP tools (features) to their corresponding tests.
 | elm_format | 1 | 2 | ✅ Good |
 | elm_diagnostics | 2 | 2 | ✅ Excellent |
 | elm_code_actions | 1 | 1 | ✅ Good |
-| elm_apply_code_action | 0 | 0 | ❌ None |
+| elm_apply_code_action | 1 | 0 | ⚠️ Basic |
 | elm_prepare_rename | 1 | 2 | ✅ Good |
 | elm_rename | 0 | 3 | ✅ Good |
+| elm_rename_function | 1 | 0 | ⚠️ Basic |
+| elm_rename_type | 1 | 0 | ⚠️ Basic |
+| elm_rename_variant | 1 | 0 | ⚠️ Basic |
+| elm_rename_field | 1 | 0 | ⚠️ Basic |
 | elm_move_function | 1 | 1 | ✅ Good |
 | elm_prepare_remove_variant | 3 | 22 | ✅ Excellent |
 | elm_remove_variant | 5 | 2 | ✅ Excellent |
@@ -32,10 +36,11 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 ---
 
-## All Tests (127 total)
+## All Tests (129 total)
 
-### Fixture Tests (24 tests)
+### Fixture Tests (26 tests)
 
+- **Apply Code Action** → elm_apply_code_action
 - **Code Actions** → elm_code_actions
 - **Completion** → elm_completion
 - **Definition** → elm_definition
@@ -59,6 +64,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Rename File** → elm_rename_file
 - **Rename Function** → elm_rename_function
 - **Rename Type Alias** → elm_rename_type
+- **Rename Variant** → elm_rename_variant
 - **Symbols** → elm_symbols
 
 ### Meetdown Tests (103 tests)
@@ -118,7 +124,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 ## Test Execution
 
 ```bash
-# Run fixture tests (24 tests)
+# Run fixture tests (26 tests)
 node tests/run_tests.mjs
 
 # Run meetdown real-world tests (103 tests)
@@ -130,4 +136,4 @@ node tests/run_all_tests.mjs
 
 ---
 
-*Last updated: 2025-12-22 - All 127 tests passing ✅*
+*Last updated: 2025-12-22 - All 129 tests passing ✅*
