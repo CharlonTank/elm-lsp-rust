@@ -35,6 +35,10 @@ let passed = 0;
 let failed = 0;
 const results = [];
 
+// Coverage tracking
+let currentTestName = "";
+const toolCoverage = {}; // { testName: Set<toolName> }
+
 // Colors for output
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -124,6 +128,14 @@ function restoreFixture() {
 }
 
 async function callTool(name, args) {
+  // Track tool usage for coverage
+  if (currentTestName) {
+    if (!toolCoverage[currentTestName]) {
+      toolCoverage[currentTestName] = new Set();
+    }
+    toolCoverage[currentTestName].add(name);
+  }
+
   const result = await client.callTool({ name, arguments: args });
   return result.content?.[0]?.text || "";
 }
@@ -890,12 +902,14 @@ async function runTests() {
     ];
 
     for (const [name, testFn] of tests) {
+      currentTestName = name;
       try {
         await testFn();
       } catch (error) {
         logTest(name, false, error.message);
       }
     }
+    currentTestName = "";
 
   } catch (error) {
     log(`${RED}Connection error: ${error.message}${RESET}`);
@@ -911,6 +925,15 @@ async function runTests() {
   log(`  ${GREEN}Passed: ${passed}${RESET}`);
   log(`  ${failed > 0 ? RED : GREEN}Failed: ${failed}${RESET}`);
   log(`  Total:  ${passed + failed}\n`);
+
+  // Output coverage data as JSON for the master test runner
+  const coverageData = {};
+  for (const [testName, tools] of Object.entries(toolCoverage)) {
+    coverageData[testName] = Array.from(tools);
+  }
+  log(`\n__COVERAGE_JSON_START__`);
+  log(JSON.stringify({ suite: "fixture", passed, failed, coverage: coverageData }));
+  log(`__COVERAGE_JSON_END__`);
 
   if (failed > 0) {
     log(`${RED}Some tests failed!${RESET}\n`);

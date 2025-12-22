@@ -1224,12 +1224,21 @@ server.tool(
       return { content: [{ type: "text", text: "Target path must end with .elm" }] };
     }
 
+    // Convert absolute target path to relative (from workspace root)
+    let relativeTargetPath = target_path;
+    if (target_path.startsWith("/")) {
+      const absTarget = resolveFilePath(target_path);
+      if (absTarget.startsWith(workspaceRoot)) {
+        relativeTargetPath = absTarget.slice(workspaceRoot.length + 1); // +1 for the /
+      }
+    }
+
     const client = await ensureClient(workspaceRoot);
     const uri = `file://${absPath}`;
     const content = readFileSync(absPath, "utf-8");
     await client.openDocument(uri, content);
 
-    const result = await client.executeCommand("elm.moveFile", [uri, target_path]);
+    const result = await client.executeCommand("elm.moveFile", [uri, relativeTargetPath]);
 
     if (!result) {
       return { content: [{ type: "text", text: "Failed to move file" }] };

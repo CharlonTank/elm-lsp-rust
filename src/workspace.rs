@@ -49,6 +49,12 @@ pub struct GlobalSymbol {
     pub signature: Option<String>,
 }
 
+/// Protected files in Lamdera projects that should not be renamed/moved
+const LAMDERA_PROTECTED_FILES: &[&str] = &["Env.elm", "Types.elm", "Frontend.elm", "Backend.elm"];
+
+/// Protected type names in Lamdera projects that should not be renamed
+const LAMDERA_PROTECTED_TYPES: &[&str] = &["FrontendMsg", "BackendMsg", "ToBackend", "ToFrontend", "FrontendModel", "BackendModel"];
+
 /// The workspace index - tracks all symbols across all files
 pub struct Workspace {
     pub root_path: PathBuf,
@@ -58,6 +64,7 @@ pub struct Workspace {
     pub references: HashMap<String, Vec<SymbolReference>>,
     pub parser: ElmParser,
     pub type_checker: TypeChecker,
+    pub is_lamdera_project: bool,
 }
 
 impl Workspace {
@@ -70,7 +77,13 @@ impl Workspace {
             references: HashMap::new(),
             parser: ElmParser::new(),
             type_checker: TypeChecker::new(),
+            is_lamdera_project: false,
         }
+    }
+
+    /// Check if a symbol name is a protected Lamdera type that cannot be renamed
+    pub fn is_protected_lamdera_type(&self, name: &str) -> bool {
+        self.is_lamdera_project && LAMDERA_PROTECTED_TYPES.contains(&name)
     }
 
     /// Initialize workspace by reading elm.json and indexing all files
@@ -97,6 +110,12 @@ impl Workspace {
     fn parse_elm_json(&mut self, content: &str) -> anyhow::Result<()> {
         let json: serde_json::Value = serde_json::from_str(content)?;
 
+        // Detect Lamdera project by checking for lamdera/* dependencies
+        self.is_lamdera_project = self.detect_lamdera_project(&json);
+        if self.is_lamdera_project {
+            tracing::info!("Detected Lamdera project");
+        }
+
         // Handle both application and package elm.json formats
         if let Some(source_dirs) = json.get("source-directories") {
             if let Some(dirs) = source_dirs.as_array() {
@@ -122,9 +141,37 @@ impl Workspace {
         Ok(())
     }
 
+    /// Detect if this is a Lamdera project by checking for lamdera dependencies
+    fn detect_lamdera_project(&self, elm_json: &serde_json::Value) -> bool {
+        // Check direct dependencies for lamdera/* packages
+        if let Some(deps) = elm_json.get("dependencies") {
+            if let Some(direct) = deps.get("direct") {
+                if let Some(obj) = direct.as_object() {
+                    for key in obj.keys() {
+                        if key.starts_with("lamdera/") {
+                            return true;
+                        }
+                    }
+                }
+            }
+            // Also check indirect dependencies
+            if let Some(indirect) = deps.get("indirect") {
+                if let Some(obj) = indirect.as_object() {
+                    for key in obj.keys() {
+                        if key.starts_with("lamdera/") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Index all .elm files in the workspace
     pub fn index_all_files(&mut self) -> anyhow::Result<()> {
         let mut files_to_index = Vec::new();
+        let is_lamdera = self.is_lamdera_project;
 
         for source_dir in &self.source_dirs {
             for entry in WalkDir::new(source_dir)
@@ -132,6 +179,12 @@ impl Workspace {
                 .filter_map(|e| e.ok())
             {
                 let path = entry.path();
+
+                // Skip Evergreen directory in Lamdera projects
+                if is_lamdera && self.is_evergreen_path(path) {
+                    continue;
+                }
+
                 if path.extension().map_or(false, |ext| ext == "elm") {
                     files_to_index.push(path.to_path_buf());
                 }
@@ -150,6 +203,17 @@ impl Workspace {
         self.build_reference_index();
 
         Ok(())
+    }
+
+    /// Check if a path is in the Evergreen directory
+    fn is_evergreen_path(&self, path: &Path) -> bool {
+        path.components().any(|c| {
+            if let std::path::Component::Normal(name) = c {
+                name == "Evergreen"
+            } else {
+                false
+            }
+        })
     }
 
     /// Index a single file
@@ -806,6 +870,14 @@ impl Workspace {
         function_name: &str,
         target_path: &Path,
     ) -> anyhow::Result<MoveResult> {
+        // Block moving protected Lamdera types
+        if self.is_lamdera_project && LAMDERA_PROTECTED_TYPES.contains(&function_name) {
+            return Err(anyhow::anyhow!(
+                "Cannot move {} in a Lamdera project - this type is required by Lamdera",
+                function_name
+            ));
+        }
+
         let source_path = source_uri.to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid source URI"))?;
 
@@ -2113,6 +2185,18 @@ impl Workspace {
         let old_path = uri.to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid file URI"))?;
 
+        // Block renaming protected Lamdera files
+        if self.is_lamdera_project {
+            if let Some(file_name) = old_path.file_name().and_then(|n| n.to_str()) {
+                if LAMDERA_PROTECTED_FILES.contains(&file_name) {
+                    return Err(anyhow::anyhow!(
+                        "Cannot rename {} in a Lamdera project - this file is required by Lamdera",
+                        file_name
+                    ));
+                }
+            }
+        }
+
         // Validate new name
         if !new_name.ends_with(".elm") {
             return Err(anyhow::anyhow!("New name must end with .elm"));
@@ -2180,6 +2264,18 @@ impl Workspace {
     pub fn move_file(&self, uri: &Url, target_path: &str) -> anyhow::Result<FileOperationResult> {
         let old_path = uri.to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid file URI"))?;
+
+        // Block moving protected Lamdera files
+        if self.is_lamdera_project {
+            if let Some(file_name) = old_path.file_name().and_then(|n| n.to_str()) {
+                if LAMDERA_PROTECTED_FILES.contains(&file_name) {
+                    return Err(anyhow::anyhow!(
+                        "Cannot move {} in a Lamdera project - this file is required by Lamdera",
+                        file_name
+                    ));
+                }
+            }
+        }
 
         // Validate target path
         if !target_path.ends_with(".elm") {
@@ -2284,14 +2380,31 @@ impl Workspace {
     fn path_string_to_module_name(&self, path_str: &str) -> String {
         let path = Path::new(path_str);
 
+        tracing::debug!("path_string_to_module_name: path_str={}, root_path={}", path_str, self.root_path.display());
+
+        // If absolute path, make it relative to workspace root
+        let relative_path = if path.is_absolute() {
+            // Try to strip workspace root
+            if let Ok(rel) = path.strip_prefix(&self.root_path) {
+                tracing::debug!("  Stripped prefix, relative={}", rel.display());
+                rel.to_path_buf()
+            } else {
+                tracing::debug!("  Could not strip prefix");
+                // Fallback: just use the path as-is
+                path.to_path_buf()
+            }
+        } else {
+            path.to_path_buf()
+        };
+
         // Remove .elm extension
-        let stem = path.file_stem()
+        let stem = relative_path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
         // Get parent path components, skipping "src" if present
         let mut parts: Vec<&str> = Vec::new();
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = relative_path.parent() {
             for component in parent.components() {
                 if let std::path::Component::Normal(s) = component {
                     let s_str = s.to_str().unwrap_or("");

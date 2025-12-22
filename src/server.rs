@@ -542,6 +542,15 @@ impl LanguageServer for ElmLanguageServer {
         // Fall back to symbol rename
         if let Some(doc) = self.documents.get(uri) {
             if let Some(symbol) = doc.get_symbol_at_position(position) {
+                // Check if this is a protected Lamdera type
+                if let Ok(ws) = self.workspace.read() {
+                    if let Some(workspace) = ws.as_ref() {
+                        if workspace.is_protected_lamdera_type(&symbol.name) {
+                            // Cannot rename protected Lamdera types
+                            return Ok(None);
+                        }
+                    }
+                }
                 return Ok(Some(PrepareRenameResponse::Range(symbol.range)));
             }
         }
@@ -603,6 +612,16 @@ impl LanguageServer for ElmLanguageServer {
         let symbol_name = symbol_name.or_else(|| self.get_word_at_position(uri, position));
 
         if let Some(name) = symbol_name {
+            // Check if this is a protected Lamdera type
+            if let Ok(ws) = self.workspace.read() {
+                if let Some(workspace) = ws.as_ref() {
+                    if workspace.is_protected_lamdera_type(&name) {
+                        tracing::info!("Blocked rename of protected Lamdera type: {}", name);
+                        return Ok(None);
+                    }
+                }
+            }
+
             tracing::info!("Renaming {} to {}", name, new_name);
             let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
 
