@@ -119,6 +119,30 @@ impl TypeChecker {
             ("lower_pattern", Some("record_pattern")) => {
                 Some(node.utf8_text(source.as_bytes()).ok()?.to_string())
             }
+            // Fallback: walk up the tree to find if this is inside a field_type
+            ("lower_case_identifier", _) => {
+                // Check if any ancestor is a field_type
+                let mut current = node.parent();
+                while let Some(ancestor) = current {
+                    if ancestor.kind() == "field_type" {
+                        // Found it - this is a field in a type definition
+                        // But we need to verify we're the field name, not a type reference
+                        if let Some(first_child) = ancestor.child(0) {
+                            // The field name should be the first child of field_type
+                            if first_child.kind() == "lower_case_identifier" {
+                                // Check if node is this first child or a descendant of it
+                                if Self::is_same_or_ancestor(first_child, node) {
+                                    return Some(node.utf8_text(source.as_bytes()).ok()?.to_string())
+                                        .and_then(|name| self.resolve_field_to_definition(uri, &name, node, source));
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    current = ancestor.parent();
+                }
+                None
+            }
             _ => None,
         }?;
 
@@ -215,6 +239,21 @@ impl TypeChecker {
             current = n.parent();
         }
         None
+    }
+
+    /// Check if `ancestor` is the same node as `node` or an ancestor of it
+    fn is_same_or_ancestor(ancestor: Node, node: Node) -> bool {
+        if ancestor.id() == node.id() {
+            return true;
+        }
+        let mut current = node.parent();
+        while let Some(n) = current {
+            if n.id() == ancestor.id() {
+                return true;
+            }
+            current = n.parent();
+        }
+        false
     }
 
     /// Get the name of a type alias

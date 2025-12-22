@@ -1374,7 +1374,13 @@ impl Workspace {
                     variant_name.to_string()
                 };
 
-                let replacement = format!("(Debug.todo \"VARIANT REMOVAL DONE: {}\")", original_code);
+                // Check if the original code already contains Debug.todo to avoid double-wrapping
+                let replacement = if original_code.contains("Debug.todo") {
+                    // Already has Debug.todo - just update the message inside the existing Debug.todo
+                    format!("(Debug.todo \"VARIANT REMOVAL DONE: {} removed\")", variant_name)
+                } else {
+                    format!("(Debug.todo \"VARIANT REMOVAL DONE: {}\")", original_code)
+                };
 
                 changes
                     .entry(usage_uri)

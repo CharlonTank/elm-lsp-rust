@@ -737,12 +737,22 @@ impl LanguageServer for ElmLanguageServer {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        use std::collections::HashSet;
+
         let uri = &params.text_document_position.text_document.uri;
         let mut items = Vec::new();
+        let mut seen_labels: HashSet<String> = HashSet::new();
 
-        // Local symbols
+        // Limit to prevent timeout on large workspaces
+        const MAX_COMPLETION_ITEMS: usize = 1000;
+
+        // Local symbols (prioritized)
         if let Some(doc) = self.documents.get(uri) {
             for s in doc.symbols.iter() {
+                if items.len() >= MAX_COMPLETION_ITEMS {
+                    break;
+                }
+                seen_labels.insert(s.name.clone());
                 items.push(CompletionItem {
                     label: s.name.clone(),
                     kind: Some(match s.kind {
@@ -762,10 +772,14 @@ impl LanguageServer for ElmLanguageServer {
         // Workspace symbols
         if let Ok(ws) = self.workspace.read() {
             if let Some(workspace) = ws.as_ref() {
-                for symbols in workspace.symbols.values() {
+                'outer: for symbols in workspace.symbols.values() {
                     for sym in symbols {
-                        // Don't duplicate local symbols
-                        if !items.iter().any(|i| i.label == sym.name) {
+                        if items.len() >= MAX_COMPLETION_ITEMS {
+                            break 'outer;
+                        }
+                        // Use HashSet for O(1) duplicate check instead of O(n)
+                        if !seen_labels.contains(&sym.name) {
+                            seen_labels.insert(sym.name.clone());
                             items.push(CompletionItem {
                                 label: sym.name.clone(),
                                 kind: Some(match sym.kind {
@@ -806,7 +820,10 @@ impl LanguageServer for ElmLanguageServer {
             if let Ok(ws) = self.workspace.read() {
                 if let Some(workspace) = ws.as_ref() {
                     if let Some(field_info) = workspace.get_field_at_position(uri, position, &doc.text) {
-                        return Ok(Some(PrepareRenameResponse::Range(field_info.range)));
+                        return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                            range: field_info.range,
+                            placeholder: field_info.name.clone(),
+                        }));
                     }
                 }
             }
@@ -824,7 +841,10 @@ impl LanguageServer for ElmLanguageServer {
                         }
                     }
                 }
-                return Ok(Some(PrepareRenameResponse::Range(symbol.range)));
+                return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                    range: symbol.range,
+                    placeholder: symbol.name.clone(),
+                }));
             }
         }
 
