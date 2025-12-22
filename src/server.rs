@@ -234,6 +234,115 @@ impl ElmLanguageServer {
 
         "unknown"
     }
+
+    /// Rename a symbol by its name directly (without using position lookup)
+    fn rename_symbol_by_name(
+        &self,
+        uri: &Url,
+        name: &str,
+        new_name: &str,
+    ) -> Result<Option<WorkspaceEdit>> {
+        tracing::info!("Renaming {} to {}", name, new_name);
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+
+        // Get cross-file references from workspace
+        if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                // Add definition location - prefer definition in the current file, skip Evergreen
+                let definition = workspace.get_symbols(name)
+                    .into_iter()
+                    .find(|s| &s.definition_uri == uri && !s.definition_uri.path().contains("/Evergreen/"))
+                    .or_else(|| {
+                        workspace.find_definition(name)
+                            .filter(|s| !s.definition_uri.path().contains("/Evergreen/"))
+                    });
+
+                // Track ranges we've already added to avoid duplicates
+                let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> = std::collections::HashSet::new();
+
+                if let Some(symbol) = definition {
+                    let key = (
+                        symbol.definition_uri.to_string(),
+                        symbol.definition_range.start.line,
+                        symbol.definition_range.start.character,
+                        symbol.definition_range.end.line,
+                        symbol.definition_range.end.character,
+                    );
+                    seen_ranges.insert(key);
+                    changes
+                        .entry(symbol.definition_uri.clone())
+                        .or_insert_with(Vec::new)
+                        .push(TextEdit {
+                            range: symbol.definition_range,
+                            new_text: new_name.to_string(),
+                        });
+
+                    // Use module-aware references to only rename in files that import this symbol
+                    let refs = workspace.find_module_aware_references(
+                        name,
+                        &symbol.module_name,
+                        &symbol.definition_uri,
+                    );
+                    for r in refs {
+                        // Skip Evergreen files - they are migration snapshots
+                        if r.uri.path().contains("/Evergreen/") {
+                            continue;
+                        }
+                        // Skip if we already have an edit for this exact range
+                        let key = (
+                            r.uri.to_string(),
+                            r.range.start.line,
+                            r.range.start.character,
+                            r.range.end.line,
+                            r.range.end.character,
+                        );
+                        if seen_ranges.contains(&key) {
+                            continue;
+                        }
+                        seen_ranges.insert(key);
+                        changes
+                            .entry(r.uri)
+                            .or_insert_with(Vec::new)
+                            .push(TextEdit {
+                                range: r.range,
+                                new_text: new_name.to_string(),
+                            });
+                    }
+                }
+            }
+        }
+
+        // Fallback to local rename if no workspace refs
+        if changes.is_empty() {
+            if let Some(doc) = self.documents.get(uri) {
+                if let Some(symbol) = doc.symbols.iter().find(|s| s.name == name) {
+                    // Use definition_range (just the name) instead of range (full body)
+                    let def_range = symbol.definition_range.unwrap_or(symbol.range);
+                    let mut edits = vec![TextEdit {
+                        range: def_range,
+                        new_text: new_name.to_string(),
+                    }];
+                    for range in &symbol.references {
+                        edits.push(TextEdit {
+                            range: *range,
+                            new_text: new_name.to_string(),
+                        });
+                    }
+                    changes.insert(uri.clone(), edits);
+                }
+            }
+        }
+
+        if !changes.is_empty() {
+            tracing::info!("Rename affects {} files", changes.len());
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }));
+        }
+
+        Ok(None)
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -711,104 +820,7 @@ impl LanguageServer for ElmLanguageServer {
                 }
             }
 
-            tracing::info!("Renaming {} to {}", name, new_name);
-            let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
-
-            // Get cross-file references from workspace
-            if let Ok(ws) = self.workspace.read() {
-                if let Some(workspace) = ws.as_ref() {
-                    // Add definition location - prefer definition in the current file, skip Evergreen
-                    let definition = workspace.get_symbols(&name)
-                        .into_iter()
-                        .find(|s| &s.definition_uri == uri && !s.definition_uri.path().contains("/Evergreen/"))
-                        .or_else(|| {
-                            workspace.find_definition(&name)
-                                .filter(|s| !s.definition_uri.path().contains("/Evergreen/"))
-                        });
-
-                    // Track ranges we've already added to avoid duplicates
-                    let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> = std::collections::HashSet::new();
-
-                    if let Some(symbol) = definition {
-                        let key = (
-                            symbol.definition_uri.to_string(),
-                            symbol.definition_range.start.line,
-                            symbol.definition_range.start.character,
-                            symbol.definition_range.end.line,
-                            symbol.definition_range.end.character,
-                        );
-                        seen_ranges.insert(key);
-                        changes
-                            .entry(symbol.definition_uri.clone())
-                            .or_insert_with(Vec::new)
-                            .push(TextEdit {
-                                range: symbol.definition_range,
-                                new_text: new_name.clone(),
-                            });
-
-                        // Use module-aware references to only rename in files that import this symbol
-                        let refs = workspace.find_module_aware_references(
-                            &name,
-                            &symbol.module_name,
-                            &symbol.definition_uri,
-                        );
-                        for r in refs {
-                            // Skip Evergreen files - they are migration snapshots
-                            if r.uri.path().contains("/Evergreen/") {
-                                continue;
-                            }
-                            // Skip if we already have an edit for this exact range
-                            let key = (
-                                r.uri.to_string(),
-                                r.range.start.line,
-                                r.range.start.character,
-                                r.range.end.line,
-                                r.range.end.character,
-                            );
-                            if seen_ranges.contains(&key) {
-                                continue;
-                            }
-                            seen_ranges.insert(key);
-                            changes
-                                .entry(r.uri)
-                                .or_insert_with(Vec::new)
-                                .push(TextEdit {
-                                    range: r.range,
-                                    new_text: new_name.clone(),
-                                });
-                        }
-                    }
-                }
-            }
-
-            // Fallback to local rename if no workspace refs
-            if changes.is_empty() {
-                if let Some(doc) = self.documents.get(uri) {
-                    if let Some(symbol) = doc.symbols.iter().find(|s| s.name == name) {
-                        // Use definition_range (just the name) instead of range (full body)
-                        let def_range = symbol.definition_range.unwrap_or(symbol.range);
-                        let mut edits = vec![TextEdit {
-                            range: def_range,
-                            new_text: new_name.clone(),
-                        }];
-                        for range in &symbol.references {
-                            edits.push(TextEdit {
-                                range: *range,
-                                new_text: new_name.clone(),
-                            });
-                        }
-                        changes.insert(uri.clone(), edits);
-                    }
-                }
-            }
-
-            if !changes.is_empty() {
-                tracing::info!("Rename affects {} files", changes.len());
-                return Ok(Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }));
-            }
+            return self.rename_symbol_by_name(uri, &name, &new_name);
         }
 
         Ok(None)
@@ -1315,20 +1327,11 @@ impl LanguageServer for ElmLanguageServer {
 
                 // First, verify this is a variant
                 if let Some((type_name, variant, _idx, _total, _all_variants)) = self.get_variant_at_position(&uri, position) {
-                    // This IS a variant - proceed with rename
+                    // This IS a variant - proceed with rename using the variant name directly
                     let old_name = variant.name.clone();
 
-                    // Use the standard rename logic
-                    let rename_params = RenameParams {
-                        text_document_position: TextDocumentPositionParams {
-                            text_document: TextDocumentIdentifier { uri: uri.clone() },
-                            position,
-                        },
-                        new_name: new_name.clone(),
-                        work_done_progress_params: WorkDoneProgressParams::default(),
-                    };
-
-                    match self.rename(rename_params).await {
+                    // Use rename_symbol_by_name with the variant name (not position-based lookup)
+                    match self.rename_symbol_by_name(&uri, &old_name, &new_name) {
                         Ok(Some(edit)) => {
                             // Convert WorkspaceEdit to JSON
                             if let Some(changes) = edit.changes {
@@ -1367,7 +1370,7 @@ impl LanguageServer for ElmLanguageServer {
                         Ok(None) => {
                             Ok(Some(serde_json::json!({
                                 "success": false,
-                                "error": "Rename not possible at this position"
+                                "error": "Rename not possible for this variant"
                             })))
                         }
                         Err(e) => {
@@ -1435,17 +1438,8 @@ impl LanguageServer for ElmLanguageServer {
 
                     let old_name = type_name.clone();
 
-                    // Use the standard rename logic
-                    let rename_params = RenameParams {
-                        text_document_position: TextDocumentPositionParams {
-                            text_document: TextDocumentIdentifier { uri: uri.clone() },
-                            position,
-                        },
-                        new_name: new_name.clone(),
-                        work_done_progress_params: WorkDoneProgressParams::default(),
-                    };
-
-                    match self.rename(rename_params).await {
+                    // Use rename_symbol_by_name with the type name directly
+                    match self.rename_symbol_by_name(&uri, &old_name, &new_name) {
                         Ok(Some(edit)) => {
                             if let Some(changes) = edit.changes {
                                 let mut changes_json = serde_json::Map::new();
@@ -1481,7 +1475,7 @@ impl LanguageServer for ElmLanguageServer {
                         Ok(None) => {
                             Ok(Some(serde_json::json!({
                                 "success": false,
-                                "error": "Rename not possible at this position"
+                                "error": "Rename not possible for this type"
                             })))
                         }
                         Err(e) => {
@@ -1537,17 +1531,8 @@ impl LanguageServer for ElmLanguageServer {
                 if let Some((func_name, _def_range)) = self.get_function_at_position(&uri, position) {
                     let old_name = func_name.clone();
 
-                    // Use the standard rename logic
-                    let rename_params = RenameParams {
-                        text_document_position: TextDocumentPositionParams {
-                            text_document: TextDocumentIdentifier { uri: uri.clone() },
-                            position,
-                        },
-                        new_name: new_name.clone(),
-                        work_done_progress_params: WorkDoneProgressParams::default(),
-                    };
-
-                    match self.rename(rename_params).await {
+                    // Use rename_symbol_by_name with the function name directly
+                    match self.rename_symbol_by_name(&uri, &old_name, &new_name) {
                         Ok(Some(edit)) => {
                             if let Some(changes) = edit.changes {
                                 let mut changes_json = serde_json::Map::new();
@@ -1583,7 +1568,7 @@ impl LanguageServer for ElmLanguageServer {
                         Ok(None) => {
                             Ok(Some(serde_json::json!({
                                 "success": false,
-                                "error": "Rename not possible at this position"
+                                "error": "Rename not possible for this function"
                             })))
                         }
                         Err(e) => {
