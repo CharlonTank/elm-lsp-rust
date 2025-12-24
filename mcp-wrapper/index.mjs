@@ -9,7 +9,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join, resolve } from "path";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "fs";
 import { z } from "zod";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -199,13 +199,6 @@ class ElmLspClient {
     });
   }
 
-  async getHover(uri, line, character) {
-    return this.sendRequest("textDocument/hover", {
-      textDocument: { uri },
-      position: { line, character },
-    });
-  }
-
   async getDefinition(uri, line, character) {
     return this.sendRequest("textDocument/definition", {
       textDocument: { uri },
@@ -376,76 +369,6 @@ const server = new McpServer(
 );
 
 // Register tools using the new API
-server.tool(
-  "elm_completion",
-  "Get code completions at a position in an Elm file",
-  {
-    file_path: z.string().describe("Path to the Elm file"),
-    line: z.number().describe("Line number (0-indexed)"),
-    character: z.number().describe("Character position (0-indexed)"),
-  },
-  async ({ file_path, line, character }) => {
-    const absPath = resolveFilePath(file_path);
-    const workspaceRoot = findWorkspaceRoot(absPath);
-    if (!workspaceRoot) {
-      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
-    }
-
-    const client = await ensureClient(workspaceRoot);
-    const uri = `file://${absPath}`;
-    const content = readFileSync(absPath, "utf-8");
-    await client.openDocument(uri, content);
-
-    const result = await client.getCompletion(uri, line, character);
-    if (!result || (Array.isArray(result) && result.length === 0)) {
-      return { content: [{ type: "text", text: "No completions available" }] };
-    }
-
-    const items = Array.isArray(result) ? result : result.items || [];
-    const completions = items.slice(0, 20).map((item) => {
-      const detail = item.detail ? ` : ${item.detail}` : "";
-      return `${item.label}${detail}`;
-    });
-
-    return {
-      content: [{
-        type: "text",
-        text: `Found ${items.length} completions:\n${completions.join("\n")}${items.length > 20 ? `\n... and ${items.length - 20} more` : ""}`,
-      }],
-    };
-  }
-);
-
-server.tool(
-  "elm_hover",
-  "Get type information for a symbol at a position in an Elm file",
-  {
-    file_path: z.string().describe("Path to the Elm file"),
-    line: z.number().describe("Line number (0-indexed)"),
-    character: z.number().describe("Character position (0-indexed)"),
-  },
-  async ({ file_path, line, character }) => {
-    const absPath = resolveFilePath(file_path);
-    const workspaceRoot = findWorkspaceRoot(absPath);
-    if (!workspaceRoot) {
-      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
-    }
-
-    const client = await ensureClient(workspaceRoot);
-    const uri = `file://${absPath}`;
-    const content = readFileSync(absPath, "utf-8");
-    await client.openDocument(uri, content);
-
-    const result = await client.getHover(uri, line, character);
-    if (!result) {
-      return { content: [{ type: "text", text: "No hover information available" }] };
-    }
-
-    const hoverContent = result.contents?.value || JSON.stringify(result.contents);
-    return { content: [{ type: "text", text: hoverContent }] };
-  }
-);
-
 server.tool(
   "elm_definition",
   "Go to the definition of a symbol",
@@ -1028,6 +951,7 @@ server.tool(
 
     // Implement move function logic directly
     try {
+      const changedFiles = [];
       const sourceLines = sourceContent.split("\n");
       const targetContent = readFileSync(absTargetModule, "utf-8");
       const targetLines = targetContent.split("\n");
@@ -1115,6 +1039,23 @@ server.tool(
         newSourceLines.splice(funcStart, 1);
       }
 
+      // Remove function from source file's exposing list
+      for (let i = 0; i < newSourceLines.length; i++) {
+        if (newSourceLines[i].includes("module ") && newSourceLines[i].includes(" exposing ")) {
+          if (!newSourceLines[i].includes("exposing (..)")) {
+            // Parse the exposing list
+            const match = newSourceLines[i].match(/exposing\s*\(([^)]+)\)/);
+            if (match) {
+              const items = match[1].split(",").map((s) => s.trim()).filter((s) => s !== functionName);
+              if (items.length > 0) {
+                newSourceLines[i] = newSourceLines[i].replace(/exposing\s*\([^)]+\)/, `exposing (${items.join(", ")})`);
+              }
+            }
+          }
+          break;
+        }
+      }
+
       // Add import for moved function in source file
       let importInsertLine = 0;
       for (let i = 0; i < newSourceLines.length; i++) {
@@ -1137,11 +1078,96 @@ server.tool(
 
       // 6. Write updated files
       writeFileSync(absPath, newSourceLines.join("\n"));
+      changedFiles.push(absPath);
       writeFileSync(absTargetModule, newTargetLines.join("\n"));
+      changedFiles.push(absTargetModule);
 
-      // 7. Find and update references in other files
-      const refs = await client.getReferences(uri, funcLine, 0);
-      const refCount = refs?.length || 0;
+      // 7. Find and update references in other files that import from source module
+      const elmFiles = [];
+      const findElmFiles = (dir) => {
+        if (!existsSync(dir)) return;
+        for (const f of readdirSync(dir)) {
+          const fullPath = join(dir, f);
+          const stat = statSync(fullPath);
+          if (stat.isDirectory() && !f.startsWith(".") && f !== "elm-stuff" && f !== "node_modules") {
+            findElmFiles(fullPath);
+          } else if (f.endsWith(".elm") && fullPath !== absPath && fullPath !== absTargetModule) {
+            elmFiles.push(fullPath);
+          }
+        }
+      };
+      findElmFiles(workspaceRoot);
+
+      let filesUpdated = 0;
+      for (const elmFile of elmFiles) {
+        const content = readFileSync(elmFile, "utf-8");
+        // Check if this file imports functionName from sourceModule
+        const importRegex = new RegExp(`import\\s+${sourceModuleName}\\s+exposing\\s*\\(([^)]+)\\)`);
+        const match = content.match(importRegex);
+        if (match && match[1].split(",").map((s) => s.trim()).includes(functionName)) {
+          // This file imports the function from source - update it
+          let newContent = content;
+
+          // Remove functionName from the source import
+          const oldItems = match[1].split(",").map((s) => s.trim());
+          const newItems = oldItems.filter((s) => s !== functionName);
+          if (newItems.length > 0) {
+            newContent = newContent.replace(
+              importRegex,
+              `import ${sourceModuleName} exposing (${newItems.join(", ")})`
+            );
+          } else {
+            // Remove the entire import line if no items left
+            newContent = newContent.replace(new RegExp(`import\\s+${sourceModuleName}\\s+exposing\\s*\\([^)]+\\)\\n?`), "");
+          }
+
+          // Add or update import from target module
+          const targetImportRegex = new RegExp(`import\\s+${targetModuleName}\\s+exposing\\s*\\(([^)]+)\\)`);
+          const targetMatch = newContent.match(targetImportRegex);
+          if (targetMatch) {
+            // Target import exists, add functionName to it
+            const targetItems = targetMatch[1].split(",").map((s) => s.trim());
+            if (!targetItems.includes(functionName)) {
+              targetItems.push(functionName);
+              newContent = newContent.replace(
+                targetImportRegex,
+                `import ${targetModuleName} exposing (${targetItems.join(", ")})`
+              );
+            }
+          } else {
+            // Need to add new import for target module
+            const lines = newContent.split("\n");
+            let insertIdx = 0;
+            for (let i = 0; i < lines.length; i++) {
+              if (lines[i].trim().startsWith("import ")) {
+                insertIdx = i;
+                break;
+              }
+            }
+            if (insertIdx === 0) {
+              for (let i = 0; i < lines.length; i++) {
+                if (lines[i].includes("module ")) {
+                  insertIdx = i + 2;
+                  break;
+                }
+              }
+            }
+            lines.splice(insertIdx, 0, `import ${targetModuleName} exposing (${functionName})`);
+            newContent = lines.join("\n");
+          }
+
+          writeFileSync(elmFile, newContent);
+          changedFiles.push(elmFile);
+          filesUpdated++;
+        }
+      }
+
+      // Notify LSP about all changed files so it updates its index
+      for (const filePath of changedFiles) {
+        const uri = `file://${filePath}`;
+        const content = readFileSync(filePath, "utf-8");
+        await client.notifyFileChanged(uri, content);
+      }
 
       return {
         content: [{
@@ -1149,9 +1175,9 @@ server.tool(
           text: `Successfully moved "${functionName}" from ${sourceModuleName} to ${targetModuleName}.\n` +
                 `- Removed function from source file\n` +
                 `- Added function to target file\n` +
-                `- Added import in source file\n` +
+                `- Updated source module's exposing list\n` +
                 `- Updated target module's exposing list\n` +
-                `Found ${refCount} references (files using this function may need import updates).`,
+                `- Updated imports in ${filesUpdated} other file(s).`,
         }],
       };
     } catch (error) {
@@ -1427,8 +1453,8 @@ server.tool(
         };
       }
 
-      // Restart LSP to clear cached file state
-      restartClient();
+      // Notify LSP about the file rename so it updates its index
+      await client.executeCommand("elm.notifyFileRenamed", [result.oldPath, result.newPath]);
 
       return {
         content: [{
@@ -1510,8 +1536,8 @@ server.tool(
         };
       }
 
-      // Restart LSP to clear cached file state
-      restartClient();
+      // Notify LSP about the file move so it updates its index
+      await client.executeCommand("elm.notifyFileRenamed", [result.oldPath, result.newPath]);
 
       return {
         content: [{
@@ -1525,6 +1551,33 @@ server.tool(
     }
 
     return { content: [{ type: "text", text: "No changes needed" }] };
+  }
+);
+
+server.tool(
+  "elm_notify_file_changed",
+  "Notify the LSP that a file was renamed/moved (updates internal index without restarting)",
+  {
+    old_path: z.string().describe("Original file path"),
+    new_path: z.string().describe("New file path"),
+  },
+  async ({ old_path, new_path }) => {
+    const absOldPath = resolveFilePath(old_path);
+    const absNewPath = resolveFilePath(new_path);
+    const workspaceRoot = findWorkspaceRoot(absNewPath) || findWorkspaceRoot(absOldPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    await client.executeCommand("elm.notifyFileRenamed", [absOldPath, absNewPath]);
+
+    return {
+      content: [{
+        type: "text",
+        text: `Notified LSP about file change: ${old_path} → ${new_path}`,
+      }],
+    };
   }
 );
 

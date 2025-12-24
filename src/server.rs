@@ -20,6 +20,7 @@ const CMD_MOVE_FILE: &str = "elm.moveFile";
 const CMD_RENAME_VARIANT: &str = "elm.renameVariant";
 const CMD_RENAME_TYPE: &str = "elm.renameType";
 const CMD_RENAME_FUNCTION: &str = "elm.renameFunction";
+const CMD_NOTIFY_FILE_RENAMED: &str = "elm.notifyFileRenamed";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -41,12 +42,11 @@ impl ElmLanguageServer {
     }
 
     async fn on_change(&self, uri: Url, text: String, version: i32) {
-        tracing::info!("on_change: uri={}, text_len={}", uri, text.len());
+        tracing::info!("on_change: uri={}", uri);
         let doc = Document::new(uri.clone(), text.clone(), version);
 
         if let Some(tree) = self.parser.parse(&text) {
             let symbols = self.parser.extract_symbols(&tree, &text);
-            tracing::info!("Parsed {} symbols", symbols.len());
             let mut doc = doc;
             doc.symbols = symbols;
             self.documents.insert(uri.clone(), doc);
@@ -344,6 +344,126 @@ impl ElmLanguageServer {
         Ok(None)
     }
 
+    /// Rename a symbol at a position using type-aware reference finding
+    /// This uses classify_definition_at_position to determine the symbol type
+    /// and dispatches to the appropriate type-specific finder
+    fn rename_at_position_typed(
+        &self,
+        uri: &Url,
+        position: Position,
+        new_name: &str,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let content = if let Some(doc) = self.documents.get(uri) {
+            doc.text.clone()
+        } else {
+            return Ok(None);
+        };
+
+        let symbol = if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                workspace.classify_definition_at_position(uri, position)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let symbol = match symbol {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        tracing::info!("Renaming {:?} {} to {}", symbol.kind, symbol.name, new_name);
+
+        let refs = if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                match symbol.kind {
+                    crate::binder::BoundSymbolKind::Function => {
+                        workspace.find_function_references_typed(&symbol)
+                    }
+                    crate::binder::BoundSymbolKind::Type
+                    | crate::binder::BoundSymbolKind::TypeAlias => {
+                        workspace.find_type_references_typed(&symbol)
+                    }
+                    crate::binder::BoundSymbolKind::UnionConstructor => {
+                        workspace.find_constructor_references_typed(&symbol)
+                    }
+                    crate::binder::BoundSymbolKind::FieldType => {
+                        workspace.find_field_references_typed(&symbol, &content)
+                    }
+                    crate::binder::BoundSymbolKind::Port => {
+                        workspace.find_port_references_typed(&symbol)
+                    }
+                    _ => {
+                        workspace.find_references(&symbol.name, symbol.module_name.as_deref())
+                    }
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+            std::collections::HashMap::new();
+        let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
+
+        // Add the definition itself
+        let def_key = (
+            uri.to_string(),
+            symbol.range.start.line,
+            symbol.range.start.character,
+            symbol.range.end.line,
+            symbol.range.end.character,
+        );
+        seen_ranges.insert(def_key);
+        changes
+            .entry(uri.clone())
+            .or_insert_with(Vec::new)
+            .push(TextEdit {
+                range: symbol.range,
+                new_text: new_name.to_string(),
+            });
+
+        // Add all references
+        for r in refs {
+            if r.uri.path().contains("/Evergreen/") {
+                continue;
+            }
+            let key = (
+                r.uri.to_string(),
+                r.range.start.line,
+                r.range.start.character,
+                r.range.end.line,
+                r.range.end.character,
+            );
+            if seen_ranges.contains(&key) {
+                continue;
+            }
+            seen_ranges.insert(key);
+            changes
+                .entry(r.uri)
+                .or_insert_with(Vec::new)
+                .push(TextEdit {
+                    range: r.range,
+                    new_text: new_name.to_string(),
+                });
+        }
+
+        if !changes.is_empty() {
+            tracing::info!("Type-aware rename affects {} files", changes.len());
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }));
+        }
+
+        Ok(None)
+    }
+
     /// Rename a variant using its definition range directly
     /// Variants are not indexed as top-level symbols, so we need this specialized function
     fn rename_variant_by_range(
@@ -617,7 +737,72 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        // Get the symbol name at position
+        // Get file content for type-aware field finding
+        let content = if let Some(doc) = self.documents.get(uri) {
+            doc.text.clone()
+        } else {
+            String::new()
+        };
+
+        // Try to classify the symbol at position for type-aware finding
+        let symbol = if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                workspace.classify_definition_at_position(uri, position)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Use type-aware reference finding if we can classify the symbol
+        if let Some(ref sym) = symbol {
+            tracing::info!("Finding references for {:?} {}", sym.kind, sym.name);
+
+            let refs = if let Ok(ws) = self.workspace.read() {
+                if let Some(workspace) = ws.as_ref() {
+                    match sym.kind {
+                        crate::binder::BoundSymbolKind::Function => {
+                            workspace.find_function_references_typed(sym)
+                        }
+                        crate::binder::BoundSymbolKind::Type
+                        | crate::binder::BoundSymbolKind::TypeAlias => {
+                            workspace.find_type_references_typed(sym)
+                        }
+                        crate::binder::BoundSymbolKind::UnionConstructor => {
+                            workspace.find_constructor_references_typed(sym)
+                        }
+                        crate::binder::BoundSymbolKind::FieldType => {
+                            workspace.find_field_references_typed(sym, &content)
+                        }
+                        crate::binder::BoundSymbolKind::Port => {
+                            workspace.find_port_references_typed(sym)
+                        }
+                        _ => {
+                            workspace.find_references(&sym.name, sym.module_name.as_deref())
+                        }
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
+            if !refs.is_empty() {
+                let locations: Vec<Location> = refs
+                    .into_iter()
+                    .map(|r| Location {
+                        uri: r.uri,
+                        range: r.range,
+                    })
+                    .collect();
+                tracing::info!("Found {} references", locations.len());
+                return Ok(Some(locations));
+            }
+        }
+
+        // Fallback to text-based finding
         let symbol_name = if let Some(doc) = self.documents.get(uri) {
             doc.get_symbol_at_position(position).map(|s| s.name.clone())
         } else {
@@ -627,7 +812,7 @@ impl LanguageServer for ElmLanguageServer {
         let symbol_name = symbol_name.or_else(|| self.get_word_at_position(uri, position));
 
         if let Some(name) = symbol_name {
-            tracing::info!("Finding references for: {}", name);
+            tracing::info!("Finding references for (fallback): {}", name);
 
             // Get cross-file references from workspace
             if let Ok(ws) = self.workspace.read() {
@@ -769,8 +954,8 @@ impl LanguageServer for ElmLanguageServer {
             }
         }
 
-        // Workspace symbols
-        if let Ok(ws) = self.workspace.read() {
+        // Workspace symbols (non-blocking to avoid timeout while workspace is indexing)
+        if let Ok(ws) = self.workspace.try_read() {
             if let Some(workspace) = ws.as_ref() {
                 'outer: for symbols in workspace.symbols.values() {
                     for sym in symbols {
@@ -1691,6 +1876,53 @@ impl LanguageServer for ElmLanguageServer {
                         ),
                         "actualKind": actual_kind
                     })))
+                }
+            }
+            CMD_NOTIFY_FILE_RENAMED => {
+                // Expected arguments: [old_path, new_path]
+                // Updates workspace index after file rename/move
+                if params.arguments.len() != 2 {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "Expected 2 arguments: old_path, new_path"
+                    })));
+                }
+
+                let old_path: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let new_path: String = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                tracing::info!("Notifying file renamed: {} -> {}", old_path, new_path);
+
+                let result = {
+                    if let Ok(mut ws) = self.workspace.write() {
+                        if let Some(workspace) = ws.as_mut() {
+                            workspace.notify_file_renamed(
+                                std::path::Path::new(&old_path),
+                                std::path::Path::new(&new_path)
+                            )
+                        } else {
+                            Err(anyhow::anyhow!("Workspace not initialized"))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("Could not acquire workspace lock"))
+                    }
+                };
+
+                match result {
+                    Ok(()) => {
+                        Ok(Some(serde_json::json!({
+                            "success": true,
+                            "message": format!("Updated index: {} -> {}", old_path, new_path)
+                        })))
+                    }
+                    Err(e) => {
+                        Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": e.to_string()
+                        })))
+                    }
                 }
             }
             _ => {

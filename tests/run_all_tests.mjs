@@ -88,7 +88,7 @@ function generateCoverageFile(fixtureResults, meetdownResults, fixtureCoverage, 
   // Aggregate tool usage counts
   const toolStats = {};
   const allTools = [
-    "elm_completion", "elm_hover", "elm_definition", "elm_references",
+    "elm_definition", "elm_references",
     "elm_symbols", "elm_format", "elm_diagnostics", "elm_code_actions",
     "elm_apply_code_action",
     "elm_rename_function", "elm_rename_type", "elm_rename_variant", "elm_rename_field",

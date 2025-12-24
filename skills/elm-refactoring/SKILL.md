@@ -1,6 +1,6 @@
 ---
 name: elm-refactoring
-description: Use elm-lsp-rust MCP tools for all Elm code operations. Provides completion, hover, navigation, refactoring, diagnostics, and smart variant removal - prefer these over manual text edits.
+description: Use elm-lsp-rust MCP tools for all Elm code operations. Provides navigation, refactoring, diagnostics, and smart variant removal - prefer these over manual text edits.
 ---
 
 # Elm Language Server Tools (elm-lsp-rust)
@@ -11,34 +11,17 @@ When working in an Elm project (has `elm.json`), use these MCP tools instead of 
 
 Activate automatically when the user works with Elm code and needs to:
 - **Navigate**: Go to definition, find references, get symbols
-- **Understand**: Get type info, hover documentation, completions
 - **Refactor**: Rename symbols, move functions, rename/move files
 - **Maintain types**: Remove unused variants from custom types
 - **Check code**: Get diagnostics, code actions
 
-## Available MCP Tools (15 total)
+## Available MCP Tools (13 total)
 
 All tools use the `mcp__plugin_elm-lsp-rust_elr__` prefix.
 
 ---
 
 ### Code Intelligence
-
-#### elm_completion
-Get code completions at a position.
-```
-file_path: "/path/to/File.elm"
-line: 28        # 0-indexed
-character: 10   # 0-indexed
-```
-
-#### elm_hover
-Get type information and documentation.
-```
-file_path: "/path/to/File.elm"
-line: 28
-character: 5
-```
 
 #### elm_definition
 Go to where a symbol is defined.

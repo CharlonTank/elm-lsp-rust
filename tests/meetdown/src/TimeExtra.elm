@@ -35,6 +35,14 @@ removeTrailing0s decimalPoints value =
             "0"
 
 
+dropSuffix : String -> String -> String
+dropSuffix suffix string =
+    if String.endsWith suffix string then
+        String.dropRight (String.length suffix) string
+
+    else
+        string
+
 
 {-| Convert a POSIX time (in ms) to UTC ICS datetime string (yyyyMMddTHHmmssZ)
 -}
@@ -137,11 +145,3 @@ toUtcIcsString _ posixMs =
                    )
     in
     year ++ month ++ day ++ "T" ++ hour ++ minute ++ second ++ "Z"
-
-dropSuffix : String -> String -> String
-dropSuffix suffix string =
-    if String.endsWith suffix string then
-        String.dropRight (String.length suffix) string
-
-    else
-        string

@@ -186,11 +186,13 @@ impl TypeChecker {
             "field" => {
                 // Record expression - try to find the record type
                 let record_expr = parent.parent()?;
+                tracing::debug!("find_field_definition(field): record_expr kind = {:?}", record_expr.kind());
                 if record_expr.kind() == "record_expr" {
                     // Check if there's a base record (record update syntax)
                     if let Some(base) = record_expr.children(&mut record_expr.walk())
                         .find(|c| c.kind() == "record_base_identifier") {
                         let base_type = self.infer_type_of_node(uri, base, source);
+                        tracing::debug!("find_field_definition(field): base type = {:?}", base_type);
                         if let Some(base_type) = base_type {
                             return self.field_definition_from_type(&base_type, field_name, uri);
                         }
@@ -198,6 +200,7 @@ impl TypeChecker {
 
                     // Try to get cached type from inference
                     let record_type = self.get_type(uri, record_expr.id());
+                    tracing::debug!("find_field_definition(field): cached type = {:?}", record_type);
                     if let Some(record_type) = record_type {
                         // Only return if we found a definition - otherwise fall through to structural matching
                         if let Some(def) = self.field_definition_from_type(&record_type, field_name, uri) {
@@ -207,8 +210,11 @@ impl TypeChecker {
 
                     // Fallback: structural matching - collect fields from record_expr and match against type aliases
                     let record_fields = self.collect_record_expr_fields(record_expr, source);
+                    tracing::debug!("find_field_definition(field): collected fields = {:?}", record_fields);
                     if !record_fields.is_empty() {
-                        return self.find_type_alias_by_fields(&record_fields, field_name, uri);
+                        let result = self.find_type_alias_by_fields(&record_fields, field_name, uri);
+                        tracing::debug!("find_field_definition(field): structural match result = {:?}", result.as_ref().map(|d| &d.type_alias_name));
+                        return result;
                     }
                 }
                 None
@@ -481,9 +487,12 @@ impl TypeChecker {
         let mut cursor = record_expr.walk();
         for child in record_expr.children(&mut cursor) {
             if child.kind() == "field" {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
-                        fields.push(name.to_string());
+                // The field name is the first lower_case_identifier child
+                if let Some(first_child) = child.child(0) {
+                    if first_child.kind() == "lower_case_identifier" {
+                        if let Ok(name) = first_child.utf8_text(source.as_bytes()) {
+                            fields.push(name.to_string());
+                        }
                     }
                 }
             }
@@ -499,6 +508,8 @@ impl TypeChecker {
         target_field: &str,
         _current_uri: &str,
     ) -> Option<FieldDefinition> {
+        tracing::debug!("find_type_alias_by_fields: looking for {:?} with target field {}", record_fields, target_field);
+        tracing::debug!("find_type_alias_by_fields: searching {} cached files", self.tree_cache.len());
         // Search all indexed files for type aliases
         for (uri, tree) in &self.tree_cache {
             let source = match self.source_cache.get(uri) {
@@ -514,6 +525,7 @@ impl TypeChecker {
                     if let Some(def) = self.check_type_alias_matches(
                         child, record_fields, target_field, uri, source
                     ) {
+                        tracing::debug!("find_type_alias_by_fields: found match {:?}", def.type_alias_name);
                         return Some(def);
                     }
                 }

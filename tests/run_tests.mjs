@@ -3,12 +3,10 @@
  * Comprehensive test suite for elm-lsp-rust MCP wrapper
  *
  * Tests all LSP operations:
- * - hover (get type info)
  * - definition (go to definition)
  * - references (find all references)
  * - rename (rename symbol)
  * - symbols (list symbols in file)
- * - completion (code completion)
  * - diagnostics (get errors/warnings)
  * - format (format file)
  * - code_actions (get available actions)
@@ -20,6 +18,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync, mkdirSync } from "fs";
+import { execSync } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -127,6 +126,19 @@ function restoreFixture() {
   }
 }
 
+// Compile the fixture to verify code is valid
+function compileFixture() {
+  try {
+    execSync(`cd ${FIXTURE_DIR} && elm make src/Main.elm --output=/dev/null 2>&1`, {
+      encoding: 'utf8',
+      timeout: 60000
+    });
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.stdout || e.message };
+  }
+}
+
 async function callTool(name, args) {
   // Track tool usage for coverage
   if (currentTestName) {
@@ -143,20 +155,6 @@ async function callTool(name, args) {
 // ============================================================================
 // Test Cases
 // ============================================================================
-
-async function testHover() {
-  const typesFile = join(FIXTURE_DIR, "src/Types.elm");
-
-  // Test hover on 'User' type alias (line 4, char 11 -> 0-indexed: line 3)
-  const result = await callTool("elm_hover", {
-    file_path: typesFile,
-    line: 3, // 0-indexed (line 4 in editor)
-    character: 11, // position of "User"
-  });
-
-  assertContains(result, "User", "Hover should show User type");
-  logTest("hover: get type of User", true);
-}
 
 async function testDefinition() {
   const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
@@ -240,6 +238,12 @@ async function testRename() {
       throw new Error("Old function signature 'helper : String' should be renamed");
     }
 
+    // Verify code compiles
+    const compileResult = compileFixture();
+    if (!compileResult.success) {
+      throw new Error(`Code does not compile after rename: ${compileResult.error.substring(0, 200)}`);
+    }
+
     logTest("rename: helper -> formatHelper", true);
   } finally {
     restoreFixture();
@@ -272,6 +276,12 @@ async function testRenameTypeAlias() {
     // Ensure old name is gone
     if (content.includes("type alias Guest")) {
       throw new Error("Old type alias name 'Guest' should be renamed to 'Visitor'");
+    }
+
+    // Verify code compiles
+    const compileResult = compileFixture();
+    if (!compileResult.success) {
+      throw new Error(`Code does not compile after rename: ${compileResult.error.substring(0, 200)}`);
     }
 
     logTest("rename: type alias Guest -> Visitor", true);
@@ -307,6 +317,12 @@ async function testRenameField() {
 
       // Verify Visitor.name is NOT renamed (different type alias)
       assertContains(content, "visitor.name", "Visitor.name should NOT be renamed");
+
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after field rename: ${compileResult.error.substring(0, 200)}`);
+      }
 
       logTest("rename: field Person.name -> userName (type-aware)", true);
     } else if (result.includes("userName") || result.includes("renamed")) {
@@ -348,6 +364,12 @@ async function testRenameVariant() {
     // Ensure old variant name is gone from the type definition
     if (content.includes("| Unused")) {
       throw new Error("Old variant name 'Unused' should be renamed to 'Obsolete'");
+    }
+
+    // Verify code compiles
+    const compileResult = compileFixture();
+    if (!compileResult.success) {
+      throw new Error(`Code does not compile after variant rename: ${compileResult.error.substring(0, 200)}`);
     }
 
     logTest("rename: variant Unused -> Obsolete", true);
@@ -402,21 +424,6 @@ foo = unknownVariable
       // Ignore cleanup errors
     }
   }
-}
-
-async function testCompletion() {
-  const mainFile = join(FIXTURE_DIR, "src/Main.elm");
-
-  // Get completions at a position where we expect some
-  const result = await callTool("elm_completion", {
-    file_path: mainFile,
-    line: 5, // import Types line
-    character: 15,
-  });
-
-  // Just check we get some result
-  assertNotEmpty(result, "Should get some completions");
-  logTest("completion: get completions in Main.elm", true);
 }
 
 async function testCodeActions() {
@@ -475,6 +482,12 @@ async function testMoveFunction() {
     // Verify Types.elm now contains formatName
     const typesContent = readFileSync(typesFile, "utf-8");
     assertContains(typesContent, "formatName", "Types.elm should contain formatName after move");
+
+    // Verify code compiles
+    const compileResult = compileFixture();
+    if (!compileResult.success) {
+      throw new Error(`Code does not compile after move: ${compileResult.error.substring(0, 200)}`);
+    }
 
     logTest("move_function: formatName from Utils to Types", true);
   } finally {
@@ -553,6 +566,11 @@ async function testRemoveVariant() {
       // (the word "Unused" also appears in a comment)
       const content = readFileSync(testFile, "utf-8");
       if (!content.includes("| Unused")) {
+        // Verify code compiles
+        const compileResult = compileFixture();
+        if (!compileResult.success) {
+          throw new Error(`Code does not compile after remove: ${compileResult.error.substring(0, 200)}`);
+        }
         logTest("remove_variant: remove Unused from Color", true);
       } else {
         throw new Error("File should not contain '| Unused' variant after removal");
@@ -600,6 +618,12 @@ async function testRemoveVariantWithDebugTodo() {
         throw new Error("Blue constructor usage should be replaced with Debug.todo");
       }
 
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after Debug.todo replacement: ${compileResult.error.substring(0, 200)}`);
+      }
+
       logTest("remove_variant: replaces constructor with Debug.todo", true);
     } else {
       throw new Error(`Expected successful removal with Debug.todo replacement, got: ${result.substring(0, 200)}`);
@@ -639,6 +663,12 @@ async function testRemoveVariantPatternAutoRemove() {
       // Use regex to match actual pattern branch (not comments): line starting with whitespace + "Red ->"
       if (/^\s+Red\s*->/m.test(newContent)) {
         throw new Error("Red pattern branch should be auto-removed");
+      }
+
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after pattern removal: ${compileResult.error.substring(0, 200)}`);
       }
 
       // Check the message mentions pattern branch removal
@@ -689,6 +719,12 @@ async function testRemoveVariantWithArgs() {
       const remainingPatterns = (newContent.match(/^\s+TextMsg\s/gm) || []).length;
       if (remainingPatterns > 0) {
         throw new Error(`All TextMsg patterns should be removed, but ${remainingPatterns} remain`);
+      }
+
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after removing variant with args: ${compileResult.error.substring(0, 200)}`);
       }
 
       logTest("remove_variant: all 4 TextMsg pattern branches auto-removed", true);
@@ -763,6 +799,12 @@ async function testRemoveVariantUselessWildcard() {
         throw new Error("Useless wildcard should be removed after Off removal");
       }
 
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after useless wildcard removal: ${compileResult.error.substring(0, 200)}`);
+      }
+
       // Check message mentions wildcard
       if (result.includes("wildcard")) {
         logTest("remove_variant: useless wildcard auto-removed", true);
@@ -780,12 +822,13 @@ async function testRemoveVariantUselessWildcard() {
 
 async function testRenameFile() {
   // Test renaming Utils.elm to Helper.elm
+  const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
+  const helperFile = join(FIXTURE_DIR, "src/Helper.elm");
+  const mainFile = join(FIXTURE_DIR, "src/Main.elm");
+
   backupFixture();
 
   try {
-    const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
-    const helperFile = join(FIXTURE_DIR, "src/Helper.elm");
-    const mainFile = join(FIXTURE_DIR, "src/Main.elm");
 
     // Verify Utils.elm exists and Main.elm imports it
     const originalMainContent = readFileSync(mainFile, "utf-8");
@@ -815,23 +858,35 @@ async function testRenameFile() {
       const newMainContent = readFileSync(mainFile, "utf-8");
       assertContains(newMainContent, "import Helper", "Main.elm should import Helper after rename");
 
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after file rename: ${compileResult.error.substring(0, 200)}`);
+      }
+
       logTest("rename_file: Utils.elm → Helper.elm", true);
     } else {
       throw new Error(`Unexpected result: ${result}`);
     }
   } finally {
     restoreFixture();
+    // Notify LSP that Helper.elm was moved back to Utils.elm
+    await callTool("elm_notify_file_changed", {
+      old_path: helperFile,
+      new_path: utilsFile,
+    });
   }
 }
 
 async function testMoveFile() {
   // Test moving Utils.elm to Helpers/Utils.elm
+  const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
+  const targetFile = join(FIXTURE_DIR, "src/Helpers/Utils.elm");
+  const mainFile = join(FIXTURE_DIR, "src/Main.elm");
+
   backupFixture();
 
   try {
-    const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
-    const targetFile = join(FIXTURE_DIR, "src/Helpers/Utils.elm");
-    const mainFile = join(FIXTURE_DIR, "src/Main.elm");
 
     // Verify Utils.elm exists
     if (!existsSync(utilsFile)) {
@@ -863,12 +918,23 @@ async function testMoveFile() {
       const newMainContent = readFileSync(mainFile, "utf-8");
       assertContains(newMainContent, "import Helpers.Utils", "Main.elm should import Helpers.Utils after move");
 
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after file move: ${compileResult.error.substring(0, 200)}`);
+      }
+
       logTest("move_file: Utils.elm → Helpers/Utils.elm", true);
     } else {
       throw new Error(`Unexpected result: ${result}`);
     }
   } finally {
     restoreFixture();
+    // Notify LSP that Helpers/Utils.elm was moved back to Utils.elm
+    await callTool("elm_notify_file_changed", {
+      old_path: targetFile,
+      new_path: utilsFile,
+    });
   }
 }
 
@@ -918,7 +984,6 @@ async function runTests() {
     log(`${BOLD}Running tests...${RESET}\n`);
 
     const tests = [
-      ["Hover", testHover],
       ["Definition", testDefinition],
       ["References", testReferences],
       ["Symbols", testSymbols],
@@ -928,7 +993,6 @@ async function runTests() {
       ["Rename Variant", testRenameVariant],
       ["Diagnostics (no errors)", testDiagnostics],
       ["Diagnostics (with error)", testDiagnosticsWithError],
-      ["Completion", testCompletion],
       ["Code Actions", testCodeActions],
       ["Apply Code Action", testApplyCodeAction],
       ["Move Function", testMoveFunction],

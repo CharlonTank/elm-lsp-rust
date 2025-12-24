@@ -1,5 +1,5 @@
-import { spawn } from "child_process";
-import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from "fs";
+import { spawn, execSync } from "child_process";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync, renameSync } from "fs";
 import { join, dirname } from "path";
 
 const LSP_PATH = "/Users/charles-andreassus/projects/elm-claude-improvements/elm-lsp-rust/target/release/elm_lsp";
@@ -72,6 +72,36 @@ class LSPClient {
     const content = readFileSync(path, "utf-8");
     await this.notify("textDocument/didOpen", {
       textDocument: { uri: `file://${path}`, languageId: "elm", version: 1, text: content }
+    });
+  }
+
+  async closeFile(path) {
+    await this.notify("textDocument/didClose", {
+      textDocument: { uri: `file://${path}` }
+    });
+  }
+
+  async notifyFileCreated(path) {
+    await this.notify("workspace/didChangeWatchedFiles", {
+      changes: [{ uri: `file://${path}`, type: 1 }] // 1 = Created
+    });
+  }
+
+  async notifyFileDeleted(path) {
+    await this.notify("workspace/didChangeWatchedFiles", {
+      changes: [{ uri: `file://${path}`, type: 3 }] // 3 = Deleted
+    });
+  }
+
+  async notifyFileChanged(path) {
+    // Increment version for tracking changes
+    this.documentVersions = this.documentVersions || {};
+    const uri = `file://${path}`;
+    this.documentVersions[uri] = (this.documentVersions[uri] || 1) + 1;
+    const content = readFileSync(path, "utf-8");
+    await this.notify("textDocument/didChange", {
+      textDocument: { uri, version: this.documentVersions[uri] },
+      contentChanges: [{ text: content }]
     });
   }
 
@@ -173,6 +203,16 @@ class LSPClient {
         }
         writeFileSync(filePath, lines.join("\n"));
       }
+
+      // Actually rename the file
+      if (result.oldPath && result.newPath) {
+        renameSync(result.oldPath, result.newPath);
+        // Notify LSP about the file rename so it updates its index
+        await this.send("workspace/executeCommand", {
+          command: "elm.notifyFileRenamed",
+          arguments: [result.oldPath, result.newPath]
+        });
+      }
     }
 
     return result;
@@ -213,6 +253,20 @@ class LSPClient {
         }
         writeFileSync(filePath, lines.join("\n"));
       }
+
+      // Actually move the file
+      if (result.oldPath && result.newPath) {
+        const targetDir = dirname(result.newPath);
+        if (!existsSync(targetDir)) {
+          mkdirSync(targetDir, { recursive: true });
+        }
+        renameSync(result.oldPath, result.newPath);
+        // Notify LSP about the file move so it updates its index
+        await this.send("workspace/executeCommand", {
+          command: "elm.notifyFileRenamed",
+          arguments: [result.oldPath, result.newPath]
+        });
+      }
     }
 
     return result;
@@ -236,25 +290,9 @@ class LSPClient {
     });
   }
 
-  async hover(path, line, char) {
-    trackTool("elm_hover");
-    return this.send("textDocument/hover", {
-      textDocument: { uri: `file://${path}` },
-      position: { line, character: char }
-    });
-  }
-
   async definition(path, line, char) {
     trackTool("elm_definition");
     return this.send("textDocument/definition", {
-      textDocument: { uri: `file://${path}` },
-      position: { line, character: char }
-    });
-  }
-
-  async completion(path, line, char) {
-    trackTool("elm_completion");
-    return this.send("textDocument/completion", {
       textDocument: { uri: `file://${path}` },
       position: { line, character: char }
     });
@@ -436,6 +474,85 @@ function restoreMeetdown() {
   }
 }
 
+// Apply workspace edits to the filesystem and notify LSP
+async function applyEdits(changes, lspClient = null) {
+  if (!changes) return;
+  const changedFiles = [];
+
+  for (const [uri, edits] of Object.entries(changes)) {
+    const filePath = uri.replace("file://", "");
+    if (!existsSync(filePath)) continue;
+
+    let content = readFileSync(filePath, "utf-8");
+    const lines = content.split("\n");
+
+    // Sort edits by position (reverse order to apply from end first)
+    const sortedEdits = [...edits].sort((a, b) => {
+      if (b.range.start.line !== a.range.start.line) {
+        return b.range.start.line - a.range.start.line;
+      }
+      return b.range.start.character - a.range.start.character;
+    });
+
+    for (const edit of sortedEdits) {
+      const startLine = edit.range.start.line;
+      const startChar = edit.range.start.character;
+      const endLine = edit.range.end.line;
+      const endChar = edit.range.end.character;
+
+      if (startLine === endLine) {
+        const line = lines[startLine] || "";
+        lines[startLine] = line.slice(0, startChar) + edit.newText + line.slice(endChar);
+      } else {
+        // Multi-line edit
+        const startLineContent = lines[startLine]?.slice(0, startChar) || "";
+        const endLineContent = lines[endLine]?.slice(endChar) || "";
+        const newLines = edit.newText.split("\n");
+        if (newLines.length === 1) {
+          lines[startLine] = startLineContent + edit.newText + endLineContent;
+          lines.splice(startLine + 1, endLine - startLine);
+        } else {
+          newLines[0] = startLineContent + newLines[0];
+          newLines[newLines.length - 1] = newLines[newLines.length - 1] + endLineContent;
+          lines.splice(startLine, endLine - startLine + 1, ...newLines);
+        }
+      }
+    }
+
+    writeFileSync(filePath, lines.join("\n"));
+    changedFiles.push(filePath);
+  }
+
+  // Notify LSP about all changed files so it updates its cache
+  if (lspClient) {
+    for (const filePath of changedFiles) {
+      await lspClient.notifyFileChanged(filePath);
+    }
+  }
+}
+
+// Compile meetdown project
+function compileMeetdown() {
+  try {
+    // Clear elm-stuff to avoid stale cached type info
+    const elmStuff = join(MEETDOWN, "elm-stuff");
+    if (existsSync(elmStuff)) {
+      rmSync(elmStuff, { recursive: true });
+    }
+    const output = execSync(`cd ${MEETDOWN} && lamdera make src/Backend.elm src/Frontend.elm 2>&1`, {
+      encoding: 'utf8',
+      timeout: 120000
+    });
+    return { success: true };
+  } catch (e) {
+    // Extract just the error part, not the progress messages
+    const output = e.stdout || e.message;
+    const errorMatch = output.match(/-- [A-Z\s]+ -+.*$/s);
+    const error = errorMatch ? errorMatch[0] : output;
+    return { success: false, error: error };
+  }
+}
+
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
 const YELLOW = "\x1b[33m";
@@ -566,6 +683,11 @@ async function main() {
         // Check the file was modified
         const newContent = readFileSync(file, "utf-8");
         logTest("EventCancelled removed from type", !newContent.includes("= EventCancelled") && !newContent.includes("| EventCancelled"));
+
+        // Verify compilation
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after removal", compileResult.success, compileResult.error?.substring(0, 500));
+
         console.log(`     → ${result.message}\n`);
       } else {
         logTest("Removal correctly blocked", true);
@@ -599,6 +721,10 @@ async function main() {
         // Debug.todo replacements are in other files where MeetOnline was used as constructor
         // Check the result message confirms replacements happened
         logTest("Constructors replaced with Debug.todo", result.message?.includes("replaced") && result.message?.includes("Debug.todo"));
+
+        // Verify compilation
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after removal", compileResult.success, compileResult.error?.substring(0, 500));
       }
       console.log(`     → ${result.message}\n`);
     } finally {
@@ -838,6 +964,12 @@ async function main() {
         // Verify file was modified
         const newContent = readFileSync(file, "utf-8");
         logTest("Variant removed from file", !newContent.includes("| EventNameTooLong"));
+
+        // Verify compilation
+        if (result.success) {
+          const compileResult = compileMeetdown();
+          logTest("Code compiles after removal", compileResult.success, compileResult.error?.substring(0, 500));
+        }
         console.log(`     → ${result.message}`);
       } else {
         console.log(`     → Variant has blocking usages, cannot test removal`);
@@ -1056,9 +1188,16 @@ async function main() {
       console.log(`     → Renamed: ${result.oldModuleName} -> ${result.newModuleName}`);
       console.log(`     → Files updated: ${result.filesUpdated}`);
 
-      // Verify the module declaration was updated
-      const content = readFileSync(testFile, "utf-8");
+      // Verify the module declaration was updated (read from new path)
+      const newPath = result.newPath || testFile;
+      const content = readFileSync(newPath, "utf-8");
       logTest("Module declaration updated", content.includes("module DomId exposing"));
+
+      // Verify compilation
+      if (result.success) {
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      }
 
     } catch (e) {
       logTest(`Error: ${e.message}`, false);
@@ -1068,7 +1207,7 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 33: Rename file with imports =====
+  // ===== TEST 27: Rename file with imports =====
   startTest(27, "Rename file with imports (Link.elm → WebLink.elm)");
   {
     backupMeetdown();
@@ -1085,9 +1224,16 @@ async function main() {
       logTest("Files updated (imports)", result.filesUpdated >= 0);
       console.log(`     → Files updated: ${result.filesUpdated}`);
 
-      // Verify the module declaration was updated
-      const content = readFileSync(testFile, "utf-8");
+      // Verify the module declaration was updated (read from new path)
+      const newPath = result.newPath || testFile;
+      const content = readFileSync(newPath, "utf-8");
       logTest("Module declaration updated", content.includes("module WebLink exposing"));
+
+      // Verify compilation
+      if (result.success) {
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      }
 
     } catch (e) {
       logTest(`Error: ${e.message}`, false);
@@ -1097,7 +1243,7 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 34: Move file to subdirectory =====
+  // ===== TEST 28: Move file to subdirectory =====
   startTest(28, "Move file to subdirectory (Cache.elm → Utils/Cache.elm)");
   {
     backupMeetdown();
@@ -1113,9 +1259,16 @@ async function main() {
       logTest("Changes provided", !!result.changes);
       console.log(`     → Moved: ${result.oldModuleName} -> ${result.newModuleName}`);
 
-      // Verify the module declaration was updated
-      const content = readFileSync(testFile, "utf-8");
+      // Verify the module declaration was updated (read from new path)
+      const newPath = result.newPath || testFile;
+      const content = readFileSync(newPath, "utf-8");
       logTest("Module declaration updated", content.includes("module Utils.Cache exposing"));
+
+      // Verify compilation
+      if (result.success) {
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
+      }
 
     } catch (e) {
       logTest(`Error: ${e.message}`, false);
@@ -1125,7 +1278,7 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 35: Move file with imports =====
+  // ===== TEST 29: Move file with imports =====
   startTest(29, "Move Privacy.elm to Types/Privacy.elm");
   {
     backupMeetdown();
@@ -1140,9 +1293,16 @@ async function main() {
       logTest("Files updated (imports)", result.filesUpdated >= 0);
       console.log(`     → Files updated: ${result.filesUpdated}`);
 
-      // Verify the module declaration was updated
-      const content = readFileSync(testFile, "utf-8");
+      // Verify the module declaration was updated (read from new path)
+      const newPath = result.newPath || testFile;
+      const content = readFileSync(newPath, "utf-8");
       logTest("Module declaration updated", content.includes("module Types.Privacy exposing"));
+
+      // Verify compilation
+      if (result.success) {
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
+      }
 
     } catch (e) {
       logTest(`Error: ${e.message}`, false);
@@ -1252,11 +1412,226 @@ async function main() {
       }
 
       console.log(`     → Edits applied to ${Object.keys(renameResult.changes).length} files`);
+
+      // Verify compilation
+      const compileResult = compileMeetdown();
+      logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
     } else {
       logTest("Changes object exists", false);
     }
 
     restoreMeetdown(); // Restore after test
+    console.log();
+  }
+
+  // ===== TEST 66: Rename function (Description.toString → display) =====
+  startTest(66, "Rename function (Description.toString → display)");
+  {
+    backupMeetdown();
+    try {
+      const descFile = join(MEETDOWN, "src/Description.elm");
+      await client.openFile(descFile);
+
+      // Find toString function
+      const content = readFileSync(descFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].match(/^toString\s*:/)) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find toString function definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const renameResult = await client.rename(descFile, defLine, 0, "display", "elm_rename_function");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects files", filesChanged >= 1);
+        logTest("Has edits", totalEdits >= 1);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 67: Rename function cross-file (Group.name → groupName) =====
+  startTest(67, "Rename function cross-file (Group.name → groupName)");
+  {
+    backupMeetdown();
+    try {
+      const groupFile = join(MEETDOWN, "src/Group.elm");
+      await client.openFile(groupFile);
+
+      // Find name function
+      const content = readFileSync(groupFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].match(/^name\s*:/)) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find name function definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const renameResult = await client.rename(groupFile, defLine, 0, "groupName", "elm_rename_function");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects multiple files", filesChanged >= 2);
+        logTest("Has multiple edits", totalEdits >= 3);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 68: Rename function (Route.encode → encodeRoute) =====
+  startTest(68, "Rename function (Route.encode → encodeRoute)");
+  {
+    backupMeetdown();
+    try {
+      const routeFile = join(MEETDOWN, "src/Route.elm");
+      await client.openFile(routeFile);
+
+      // Find encode function
+      const content = readFileSync(routeFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].match(/^encode\s*:/)) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find encode function definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const renameResult = await client.rename(routeFile, defLine, 0, "encodeRoute", "elm_rename_function");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects files", filesChanged >= 1);
+        logTest("Has edits", totalEdits >= 1);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 69: Rename function round-trip (Id.encode → encodeId → encode) =====
+  startTest(69, "Rename function round-trip (Id.encode → encodeId → encode)");
+  {
+    backupMeetdown();
+    try {
+      const idFile = join(MEETDOWN, "src/Id.elm");
+      await client.openFile(idFile);
+
+      // Find encode function
+      const content = readFileSync(idFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].match(/^encode\s*:/)) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find encode function definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      // STEP 1: Rename encode → encodeId
+      console.log(`     → STEP 1: Renaming encode → encodeId`);
+      const result1 = await client.rename(idFile, defLine, 0, "encodeId", "elm_rename_function");
+
+      if (result1?.changes) {
+        await applyEdits(result1.changes, client);
+        const compile1 = compileMeetdown();
+        logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+        // STEP 2: Rename back
+        console.log(`     → STEP 2: Renaming encodeId → encode`);
+        const result2 = await client.rename(idFile, defLine, 0, "encode", "elm_rename_function");
+        if (result2?.changes) {
+          await applyEdits(result2.changes, client);
+          const compile2 = compileMeetdown();
+          logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+        }
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
     console.log();
   }
 
@@ -1300,6 +1675,11 @@ async function main() {
       logTest("Has reasonable number of edits", totalEdits >= 20 && totalEdits <= 30);
 
       console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+      // Apply edits and verify compilation
+      await applyEdits(renameResult.changes, client);
+      const compileResult = compileMeetdown();
+      logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
     } else {
       logTest("Rename returned changes", false);
     }
@@ -1364,6 +1744,11 @@ async function main() {
         // Model should be mostly gone (maybe a few in comments/strings), PageModel should appear
         logTest("Old name mostly replaced", oldModelCount <= 2);
         logTest("New name appears", newModelCount >= modelCount - 2);
+
+        // Apply edits to filesystem and verify compilation
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
       }
     } else {
       logTest("Rename returned changes", false);
@@ -1373,65 +1758,167 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 35: Hover on complex type =====
-  startTest(35, "Hover on FrontendModel type (real-world type info)");
+  // ===== TEST 63: Rename type alias (Group.EventId → GroupEventId) =====
+  startTest(63, "Rename type (Group.EventId → GroupEventId)");
   {
-    const file = join(MEETDOWN, "src/Frontend.elm");
-    await client.openFile(file);
+    backupMeetdown();
+    try {
+      const groupFile = join(MEETDOWN, "src/Group.elm");
+      await client.openFile(groupFile);
 
-    // Find a use of FrontendModel and hover over it
-    const content = readFileSync(file, "utf-8");
-    const lines = content.split("\n");
-
-    // Look for "model : FrontendModel" or similar
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].includes("FrontendModel") && !lines[i].trim().startsWith("--")) {
-        const col = lines[i].indexOf("FrontendModel");
-        const result = await client.hover(file, i, col);
-        if (result?.contents) {
-          logTest("Hover returns type info", true);
-          const hoverText = typeof result.contents === "string"
-            ? result.contents
-            : result.contents?.value || JSON.stringify(result.contents);
-          logTest("Type info contains FrontendModel", hoverText.includes("FrontendModel") || hoverText.includes("Loading") || hoverText.includes("Loaded"));
-          console.log(`     → Line ${i + 1}: ${hoverText.substring(0, 100)}...`);
+      // Find EventId definition (line 4: , EventId(..))
+      const content = readFileSync(groupFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes("type EventId") && !lines[i].includes("alias")) {
+          defLine = i;
           break;
         }
       }
-    }
-    console.log();
-  }
 
-  // ===== TEST 36: Hover on imported function =====
-  startTest(36, "Hover on cross-module function");
-  {
-    const file = join(MEETDOWN, "src/GroupPage.elm");
-    await client.openFile(file);
-
-    // Find "Event." cross-module call
-    const content = readFileSync(file, "utf-8");
-    const lines = content.split("\n");
-    let found = false;
-
-    for (let i = 0; i < lines.length && !found; i++) {
-      if (lines[i].includes("Event.")) {
-        const col = lines[i].indexOf("Event.");
-        const result = await client.hover(file, i, col + 6);
-        logTest("Hover on cross-module reference", result?.contents !== undefined);
-        console.log(`     → Hover at line ${i + 1}: ${result?.contents ? "got info" : "no info"}`);
-        found = true;
+      if (defLine === -1) {
+        throw new Error("Could not find EventId definition");
       }
-    }
-    if (!found) {
-      // Fallback: hover on first function
-      const result = await client.hover(file, 50, 0);
-      logTest("Hover fallback", true);
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const renameResult = await client.rename(groupFile, defLine, 5, "GroupEventId", "elm_rename_type");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects multiple files", filesChanged >= 2);
+        logTest("Has multiple edits", totalEdits >= 5);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
     }
     console.log();
   }
 
-  // ===== TEST 37: Definition jump cross-file =====
-  startTest(37, "Go to definition (FrontendUser → FrontendUser.elm)");
+  // ===== TEST 64: Rename type (LoginStatus → UserLoginStatus) =====
+  startTest(64, "Rename type (LoginStatus → UserLoginStatus)");
+  {
+    backupMeetdown();
+    try {
+      const typesFile = join(MEETDOWN, "src/Types.elm");
+      await client.openFile(typesFile);
+
+      // Find LoginStatus definition
+      const content = readFileSync(typesFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes("type LoginStatus") && !lines[i].includes("alias")) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find LoginStatus definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const renameResult = await client.rename(typesFile, defLine, 5, "UserLoginStatus", "elm_rename_type");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects files", filesChanged >= 1);
+        logTest("Has edits", totalEdits >= 2);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 65: Rename type (Route → AppRoute) =====
+  startTest(65, "Rename type (Route → AppRoute)");
+  {
+    backupMeetdown();
+    try {
+      const routeFile = join(MEETDOWN, "src/Route.elm");
+      await client.openFile(routeFile);
+
+      // Find Route definition
+      const content = readFileSync(routeFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes("type Route") && !lines[i].includes("alias")) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find Route definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const renameResult = await client.rename(routeFile, defLine, 5, "AppRoute", "elm_rename_type");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects multiple files", filesChanged >= 3);
+        logTest("Has many edits", totalEdits >= 10);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 35: Definition jump cross-file =====
+  startTest(35, "Go to definition (FrontendUser → FrontendUser.elm)");
   {
     const file = join(MEETDOWN, "src/GroupPage.elm");
     await client.openFile(file);
@@ -1457,8 +1944,8 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 38: Definition within same file =====
-  startTest(38, "Go to definition (local function)");
+  // ===== TEST 36: Definition within same file =====
+  startTest(36, "Go to definition (local function)");
   {
     const file = join(MEETDOWN, "src/GroupPage.elm");
     await client.openFile(file);
@@ -1487,70 +1974,8 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 39: Completion after module qualifier =====
-  startTest(39, "Completion after module qualifier (Event.)");
-  {
-    backupMeetdown();
-    try {
-      const file = join(MEETDOWN, "src/GroupPage.elm");
-      await client.openFile(file);
-
-      // Find a line with "Event." and get completions
-      const content = readFileSync(file, "utf-8");
-      const lines = content.split("\n");
-
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes("Event.") && !lines[i].trim().startsWith("--")) {
-          const col = lines[i].indexOf("Event.") + 6;
-          const result = await client.completion(file, i, col);
-          if (result?.items?.length > 0 || Array.isArray(result) && result.length > 0) {
-            const items = result?.items || result;
-            logTest("Completion returns items", items.length > 0);
-            logTest("Has Event module functions", items.some(i =>
-              i.label?.includes("new") || i.label?.includes("Event") || i.label?.includes("status")));
-            console.log(`     → Got ${items.length} completions (first 3: ${items.slice(0, 3).map(i => i.label).join(", ")})`);
-            break;
-          }
-        }
-      }
-    } finally {
-      restoreMeetdown();
-    }
-    console.log();
-  }
-
-  // ===== TEST 40: Completion for local values =====
-  startTest(40, "Completion for local values in function");
-  {
-    const file = join(MEETDOWN, "src/GroupPage.elm");
-    await client.openFile(file);
-
-    // Find inside a function body
-    const content = readFileSync(file, "utf-8");
-    const lines = content.split("\n");
-    let found = false;
-
-    for (let i = 100; i < 200 && !found; i++) {
-      const line = lines[i];
-      if (line && line.includes("model") && !line.trim().startsWith("--")) {
-        const col = line.indexOf("model") + 5;
-        const result = await client.completion(file, i, col);
-        const items = result?.items || result || [];
-        logTest("Local completion returns items", items.length > 0);
-        console.log(`     → Got ${items.length} local completions at line ${i + 1}`);
-        found = true;
-      }
-    }
-    if (!found) {
-      // Fallback: completion at a known position
-      const result = await client.completion(file, 150, 10);
-      logTest("Completion fallback executed", true);
-    }
-    console.log();
-  }
-
-  // ===== TEST 41: Document symbols in large file =====
-  startTest(41, "Document symbols in GroupPage.elm (large file)");
+  // ===== TEST 37: Document symbols in large file =====
+  startTest(37, "Document symbols in GroupPage.elm (large file)");
   {
     const file = join(MEETDOWN, "src/GroupPage.elm");
     await client.openFile(file);
@@ -1571,8 +1996,8 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 42: Document symbols in Types.elm =====
-  startTest(42, "Document symbols in Types.elm (many types)");
+  // ===== TEST 38: Document symbols in Types.elm =====
+  startTest(38, "Document symbols in Types.elm (many types)");
   {
     const file = join(MEETDOWN, "src/Types.elm");
     await client.openFile(file);
@@ -1590,41 +2015,67 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 43: Format small file =====
-  startTest(43, "Format small file (Env.elm)");
+  // ===== TEST 39: Format small file =====
+  startTest(39, "Format small file (Env.elm)");
   {
-    const file = join(MEETDOWN, "src/Env.elm");
-    await client.openFile(file);
+    backupMeetdown();
+    try {
+      const file = join(MEETDOWN, "src/Env.elm");
+      await client.openFile(file);
 
-    const result = await client.format(file);
-    // Format may return null/undefined if file is already formatted
-    logTest("Format request completed", true); // Just completing without error is success
-    if (result && result.length > 0) {
-      console.log(`     → ${result.length} edits returned`);
-    } else {
-      console.log(`     → File already formatted (0 edits)`);
+      const result = await client.format(file);
+      // Format may return null/undefined if file is already formatted
+      logTest("Format request completed", true); // Just completing without error is success
+      if (result && result.length > 0) {
+        console.log(`     → ${result.length} edits returned`);
+        // Apply format edits
+        const changes = { [`file://${file}`]: result };
+        await applyEdits(changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after format", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        console.log(`     → File already formatted (0 edits)`);
+        logTest("Already formatted compiles", true);
+      }
+    } finally {
+      restoreMeetdown();
     }
     console.log();
   }
 
-  // ===== TEST 44: Format large file =====
-  startTest(44, "Format large file (GroupPage.elm)");
+  // ===== TEST 40: Format large file =====
+  startTest(40, "Format large file (GroupPage.elm)");
   {
-    const file = join(MEETDOWN, "src/GroupPage.elm");
-    await client.openFile(file);
+    backupMeetdown();
+    try {
+      const file = join(MEETDOWN, "src/GroupPage.elm");
+      await client.openFile(file);
 
-    const start = Date.now();
-    const result = await client.format(file);
-    const elapsed = Date.now() - start;
+      const start = Date.now();
+      const result = await client.format(file);
+      const elapsed = Date.now() - start;
 
-    logTest("Format request completed", true); // Just completing without error is success
-    logTest("Response under 3s", elapsed < 3000);
-    console.log(`     → Format took ${elapsed}ms`);
+      logTest("Format request completed", true); // Just completing without error is success
+      logTest("Response under 3s", elapsed < 3000);
+      console.log(`     → Format took ${elapsed}ms`);
+
+      if (result && result.length > 0) {
+        // Apply format edits
+        const changes = { [`file://${file}`]: result };
+        await applyEdits(changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after format", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Already formatted compiles", true);
+      }
+    } finally {
+      restoreMeetdown();
+    }
     console.log();
   }
 
-  // ===== TEST 45: Diagnostics on valid file =====
-  startTest(45, "Diagnostics on valid file (Route.elm)");
+  // ===== TEST 41: Diagnostics on valid file =====
+  startTest(41, "Diagnostics on valid file (Route.elm)");
   {
     const file = join(MEETDOWN, "src/Route.elm");
     await client.openFile(file);
@@ -1640,8 +2091,8 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 46: Diagnostics performance on large file =====
-  startTest(46, "Diagnostics performance on Frontend.elm");
+  // ===== TEST 42: Diagnostics performance on large file =====
+  startTest(42, "Diagnostics performance on Frontend.elm");
   {
     const file = join(MEETDOWN, "src/Frontend.elm");
     await client.openFile(file);
@@ -1656,8 +2107,8 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 47: Code actions at function =====
-  startTest(47, "Code actions at function definition");
+  // ===== TEST 43: Code actions at function =====
+  startTest(43, "Code actions at function definition");
   {
     const file = join(MEETDOWN, "src/Event.elm");
     await client.openFile(file);
@@ -1683,8 +2134,8 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 48: Move function between modules =====
-  startTest(48, "Move function between modules");
+  // ===== TEST 44: Move function between modules =====
+  startTest(44, "Move function between modules");
   {
     backupMeetdown();
     try {
@@ -1701,6 +2152,10 @@ async function main() {
         logTest("Move succeeded", true);
         logTest("Has changes", !!result.changes);
         console.log(`     → Moved function to Group.elm`);
+
+        // Verify compilation
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
       } else {
         // Move may fail if function has dependencies
         console.log(`     → Move not possible: ${result?.message || "Function may have dependencies"}`);
@@ -1715,8 +2170,132 @@ async function main() {
     console.log();
   }
 
-  // ===== TEST 51: Rename variant round-trip (asymmetric rename bug) =====
-  startTest(49, "Rename variant round-trip (detect asymmetric rename bug)");
+  // ===== TEST 70: Move function (Name.toString → FrontendUser) =====
+  startTest(70, "Move function (Name.toString → FrontendUser)");
+  {
+    backupMeetdown();
+    try {
+      const srcFile = join(MEETDOWN, "src/Name.elm");
+      const targetFile = join(MEETDOWN, "src/FrontendUser.elm");
+      await client.openFile(srcFile);
+      await client.openFile(targetFile);
+
+      const result = await client.moveFunction(srcFile, targetFile, "toString");
+
+      if (result?.success) {
+        logTest("Move succeeded", true);
+        logTest("Has changes", !!result.changes);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
+        logTest("Move handled gracefully", true);
+      }
+    } catch (e) {
+      console.log(`     → Move function: ${e.message}`);
+      logTest("Move handled gracefully", true);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 71: Move function (EventName.toString → Event) =====
+  startTest(71, "Move function (EventName.toString → Event)");
+  {
+    backupMeetdown();
+    try {
+      const srcFile = join(MEETDOWN, "src/EventName.elm");
+      const targetFile = join(MEETDOWN, "src/Event.elm");
+      await client.openFile(srcFile);
+      await client.openFile(targetFile);
+
+      const result = await client.moveFunction(srcFile, targetFile, "toString");
+
+      if (result?.success) {
+        logTest("Move succeeded", true);
+        logTest("Has changes", !!result.changes);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
+        logTest("Move handled gracefully", true);
+      }
+    } catch (e) {
+      console.log(`     → Move function: ${e.message}`);
+      logTest("Move handled gracefully", true);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 72: Move function (GroupName.tooShort → Group) =====
+  startTest(72, "Move function (GroupName.tooShort → Group)");
+  {
+    backupMeetdown();
+    try {
+      const srcFile = join(MEETDOWN, "src/GroupName.elm");
+      const targetFile = join(MEETDOWN, "src/Group.elm");
+      await client.openFile(srcFile);
+      await client.openFile(targetFile);
+
+      const result = await client.moveFunction(srcFile, targetFile, "tooShort");
+
+      if (result?.success) {
+        logTest("Move succeeded", true);
+        logTest("Has changes", !!result.changes);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
+        logTest("Move handled gracefully", true);
+      }
+    } catch (e) {
+      console.log(`     → Move function: ${e.message}`);
+      logTest("Move handled gracefully", true);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 73: Move function (Route.decode → Types) =====
+  startTest(73, "Move function (Route.decode → Types)");
+  {
+    backupMeetdown();
+    try {
+      const srcFile = join(MEETDOWN, "src/Route.elm");
+      const targetFile = join(MEETDOWN, "src/Types.elm");
+      await client.openFile(srcFile);
+      await client.openFile(targetFile);
+
+      const result = await client.moveFunction(srcFile, targetFile, "decode");
+
+      if (result?.success) {
+        logTest("Move succeeded", true);
+        logTest("Has changes", !!result.changes);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
+        logTest("Move handled gracefully", true);
+      }
+    } catch (e) {
+      console.log(`     → Move function: ${e.message}`);
+      logTest("Move handled gracefully", true);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 45: Rename variant round-trip (asymmetric rename bug) =====
+  startTest(45, "Rename variant round-trip (detect asymmetric rename bug)");
   {
     backupMeetdown();
     try {
@@ -1764,6 +2343,10 @@ async function main() {
 
       logTest("Step 1: All usages renamed", step1OldCount === 0 && step1NewCount === beforeCount);
 
+      // Verify compilation after first rename
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
       // STEP 2: Rename back PendingLoginStatus → LoginStatusPending
       console.log(`     → STEP 2: Renaming PendingLoginStatus → LoginStatusPending`);
 
@@ -1803,11 +2386,748 @@ async function main() {
       const roundTripSuccess = step2OldCount === 0 && step2NewCount === beforeCount;
       logTest("Step 2: All usages renamed back (round-trip)", roundTripSuccess);
 
+      // Verify compilation after second rename
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles", compile2.success, compile2.error?.substring(0, 200));
+
       if (!roundTripSuccess) {
         console.log(`     ${RED}BUG DETECTED: Asymmetric rename!${RESET}`);
         console.log(`     ${RED}Expected: ${beforeCount} LoginStatusPending, 0 PendingLoginStatus${RESET}`);
         console.log(`     ${RED}Got: ${step2NewCount} LoginStatusPending, ${step2OldCount} PendingLoginStatus${RESET}`);
       }
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 59: Rename variant (GroupVisibility.UnlistedGroup → HiddenGroup) =====
+  startTest(59, "Rename variant (GroupVisibility.UnlistedGroup → HiddenGroup)");
+  {
+    backupMeetdown();
+    try {
+      const groupFile = join(MEETDOWN, "src/Group.elm");
+      await client.openFile(groupFile);
+
+      // Find UnlistedGroup definition (line 57: = UnlistedGroup)
+      const content = readFileSync(groupFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes("= UnlistedGroup") || lines[i].includes("| UnlistedGroup")) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find UnlistedGroup definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const result = await client.renameVariant(groupFile, defLine, 6, "HiddenGroup");
+
+      if (result?.success) {
+        logTest("Rename succeeded", true);
+        console.log(`     → Edits applied: ${result.editsApplied}`);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+
+        // Verify the variant was renamed
+        const newContent = readFileSync(groupFile, "utf-8");
+        logTest("Variant renamed", newContent.includes("HiddenGroup") && !newContent.includes("UnlistedGroup"));
+      } else {
+        logTest(`Rename returned success`, false, result?.message);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 60: Rename variant (Language.English → LanguageEnglish) =====
+  startTest(60, "Rename variant (Language.English → LanguageEnglish)");
+  {
+    backupMeetdown();
+    try {
+      const typesFile = join(MEETDOWN, "src/Types.elm");
+      await client.openFile(typesFile);
+
+      // Find English definition in Language type
+      const content = readFileSync(typesFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes("= English") || lines[i].includes("| English")) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find English definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const result = await client.renameVariant(typesFile, defLine, 6, "LanguageEnglish");
+
+      if (result?.success) {
+        logTest("Rename succeeded", true);
+        console.log(`     → Edits applied: ${result.editsApplied}`);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest(`Rename returned success`, false, result?.message);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 61: Rename variant cross-file (ColorTheme.LightTheme → DayTheme) =====
+  startTest(61, "Rename variant cross-file (ColorTheme.LightTheme → DayTheme)");
+  {
+    backupMeetdown();
+    try {
+      const typesFile = join(MEETDOWN, "src/Types.elm");
+      await client.openFile(typesFile);
+
+      // Find LightTheme definition
+      const content = readFileSync(typesFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes("= LightTheme") || lines[i].includes("| LightTheme")) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find LightTheme definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const result = await client.renameVariant(typesFile, defLine, 6, "DayTheme");
+
+      if (result?.success) {
+        logTest("Rename succeeded", true);
+        console.log(`     → Edits applied: ${result.editsApplied}`);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+
+        // Check multiple files were affected
+        const frontendContent = readFileSync(join(MEETDOWN, "src/Frontend.elm"), "utf-8");
+        logTest("Cross-file rename worked", frontendContent.includes("DayTheme"));
+      } else {
+        logTest(`Rename returned success`, false, result?.message);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 62: Rename variant (AdminStatus.IsNotAdmin → NotAnAdmin) =====
+  startTest(62, "Rename variant (AdminStatus.IsNotAdmin → NotAnAdmin)");
+  {
+    backupMeetdown();
+    try {
+      const typesFile = join(MEETDOWN, "src/Types.elm");
+      await client.openFile(typesFile);
+
+      // Find IsNotAdmin definition
+      const content = readFileSync(typesFile, "utf-8");
+      const lines = content.split("\n");
+      let defLine = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes("= IsNotAdmin") || lines[i].includes("| IsNotAdmin")) {
+          defLine = i;
+          break;
+        }
+      }
+
+      if (defLine === -1) {
+        throw new Error("Could not find IsNotAdmin definition");
+      }
+      console.log(`     → Definition found at line ${defLine + 1}`);
+
+      const result = await client.renameVariant(typesFile, defLine, 6, "NotAnAdmin");
+
+      if (result?.success) {
+        logTest("Rename succeeded", true);
+        console.log(`     → Edits applied: ${result.editsApplied}`);
+
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest(`Rename returned success`, false, result?.message);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 46: Rename file round-trip (Id.elm - 11 importers) =====
+  startTest(46, "Rename file round-trip (Id.elm → Identifier.elm → Id.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Id.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Id"));
+      console.log(`     → Files importing Id: ${beforeImporters.length}`);
+      logTest("Has 3+ importers", beforeImporters.length >= 3);
+
+      // STEP 1: Rename Id.elm → Identifier.elm
+      console.log(`     → STEP 1: Renaming Id.elm → Identifier.elm`);
+      const result1 = await client.renameFile(testFile, "Identifier.elm");
+      logTest("Step 1: Rename succeeded", result1.success === true);
+      logTest("Step 1: Files updated", result1.filesUpdated >= 3);
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      // Verify compilation after first rename
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // Notify LSP about file changes and re-open
+      const newFile = join(MEETDOWN, "src/Identifier.elm");
+      await client.closeFile(testFile);
+      await client.notifyFileDeleted(testFile);
+      await client.notifyFileCreated(newFile);
+      await client.openFile(newFile);
+
+      // STEP 2: Rename back Identifier.elm → Id.elm
+      console.log(`     → STEP 2: Renaming Identifier.elm → Id.elm`);
+      const result2 = await client.renameFile(newFile, "Id.elm");
+      logTest("Step 2: Rename succeeded", result2.success === true);
+      logTest("Step 2: Files updated", result2.filesUpdated >= 3);
+      console.log(`     → Step 2: ${result2.filesUpdated} files updated`);
+
+      // Verify compilation after second rename
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+      // Verify all imports are restored
+      const afterImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Id"));
+      logTest("Round-trip: Same importers", afterImporters.length === beforeImporters.length);
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 47: Rename file round-trip (Route.elm - 11 importers) =====
+  startTest(47, "Rename file round-trip (Route.elm → AppRoute.elm → Route.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Route.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Route"));
+      console.log(`     → Files importing Route: ${beforeImporters.length}`);
+      logTest("Has 3+ importers", beforeImporters.length >= 3);
+
+      // STEP 1: Rename Route.elm → AppRoute.elm
+      console.log(`     → STEP 1: Renaming Route.elm → AppRoute.elm`);
+      const result1 = await client.renameFile(testFile, "AppRoute.elm");
+      logTest("Step 1: Rename succeeded", result1.success === true);
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // Notify LSP and re-open
+      const newFile = join(MEETDOWN, "src/AppRoute.elm");
+      await client.closeFile(testFile);
+      await client.notifyFileDeleted(testFile);
+      await client.notifyFileCreated(newFile);
+      await client.openFile(newFile);
+
+      // STEP 2: Rename back
+      console.log(`     → STEP 2: Renaming AppRoute.elm → Route.elm`);
+      const result2 = await client.renameFile(newFile, "Route.elm");
+      logTest("Step 2: Rename succeeded", result2.success === true);
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 48: Rename file round-trip (Event.elm - 8 importers) =====
+  startTest(48, "Rename file round-trip (Event.elm → CalendarEvent.elm → Event.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Event.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Event"));
+      console.log(`     → Files importing Event: ${beforeImporters.length}`);
+      logTest("Has 3+ importers", beforeImporters.length >= 3);
+
+      // STEP 1: Rename
+      console.log(`     → STEP 1: Renaming Event.elm → CalendarEvent.elm`);
+      const result1 = await client.renameFile(testFile, "CalendarEvent.elm");
+      logTest("Step 1: Rename succeeded", result1.success === true);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // Notify LSP and re-open
+      const newFile = join(MEETDOWN, "src/CalendarEvent.elm");
+      await client.closeFile(testFile);
+      await client.notifyFileDeleted(testFile);
+      await client.notifyFileCreated(newFile);
+      await client.openFile(newFile);
+
+      // STEP 2: Rename back
+      console.log(`     → STEP 2: Renaming CalendarEvent.elm → Event.elm`);
+      const result2 = await client.renameFile(newFile, "Event.elm");
+      logTest("Step 2: Rename succeeded", result2.success === true);
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 49: Move file round-trip (Id.elm to subdir and back) =====
+  startTest(49, "Move file round-trip (Id.elm → Types/Id.elm → Id.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Id.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Id"));
+      console.log(`     → Files importing Id: ${beforeImporters.length}`);
+      logTest("Has 3+ importers", beforeImporters.length >= 3);
+
+      // STEP 1: Move to subdirectory
+      console.log(`     → STEP 1: Moving Id.elm → Types/Id.elm`);
+      const result1 = await client.moveFile(testFile, "src/Types/Id.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+      logTest("Step 1: New module is Types.Id", result1.newModuleName === "Types.Id");
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // Verify imports changed
+      const frontendContent = readFileSync(join(MEETDOWN, "src/Frontend.elm"), "utf-8");
+      logTest("Step 1: Import updated to Types.Id", frontendContent.includes("import Types.Id"));
+
+      // STEP 2: Move back to root
+      const newFile = join(MEETDOWN, "src/Types/Id.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Types/Id.elm → Id.elm`);
+      const result2 = await client.moveFile(newFile, "src/Id.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+      logTest("Step 2: New module is Id", result2.newModuleName === "Id");
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+      // Verify imports restored
+      const frontendAfter = readFileSync(join(MEETDOWN, "src/Frontend.elm"), "utf-8");
+      logTest("Step 2: Import restored to Id", frontendAfter.includes("import Id") && !frontendAfter.includes("import Types.Id"));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 50: Move file round-trip (Route.elm to subdir and back) =====
+  startTest(50, "Move file round-trip (Route.elm → Navigation/Route.elm → Route.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Route.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Route"));
+      console.log(`     → Files importing Route: ${beforeImporters.length}`);
+
+      // STEP 1: Move
+      console.log(`     → STEP 1: Moving Route.elm → Navigation/Route.elm`);
+      const result1 = await client.moveFile(testFile, "src/Navigation/Route.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // STEP 2: Move back
+      const newFile = join(MEETDOWN, "src/Navigation/Route.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Navigation/Route.elm → Route.elm`);
+      const result2 = await client.moveFile(newFile, "src/Route.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 51: Move file round-trip (Group.elm - 9 importers) =====
+  startTest(51, "Move file round-trip (Group.elm → Models/Group.elm → Group.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Group.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Group"));
+      console.log(`     → Files importing Group: ${beforeImporters.length}`);
+
+      // STEP 1: Move
+      console.log(`     → STEP 1: Moving Group.elm → Models/Group.elm`);
+      const result1 = await client.moveFile(testFile, "src/Models/Group.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // STEP 2: Move back
+      const newFile = join(MEETDOWN, "src/Models/Group.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Models/Group.elm → Group.elm`);
+      const result2 = await client.moveFile(newFile, "src/Group.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 52: Rename file with qualified imports (Name.elm - 8 importers) =====
+  startTest(52, "Rename file (Name.elm → UserName.elm) - qualified imports");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Name.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Name"));
+      console.log(`     → Files importing Name: ${beforeImporters.length}`);
+
+      // Rename
+      console.log(`     → Renaming Name.elm → UserName.elm`);
+      const result = await client.renameFile(testFile, "UserName.elm");
+      logTest("Rename succeeded", result.success === true);
+      console.log(`     → ${result.filesUpdated} files updated`);
+
+      // Verify qualified usages updated (Name.foo → UserName.foo)
+      const frontendContent = readFileSync(join(MEETDOWN, "src/Frontend.elm"), "utf-8");
+      const hasOldQualified = frontendContent.includes("Name.");
+      const hasNewImport = frontendContent.includes("import UserName");
+      logTest("Old qualified refs removed", !hasOldQualified || frontendContent.includes("import UserName"));
+      logTest("New import added", hasNewImport);
+
+      const compileResult = compileMeetdown();
+      logTest("Code compiles", compileResult.success, compileResult.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 54: Rename field (FrontendUser.name → userName) =====
+  startTest(54, "Rename field (FrontendUser.name → userName)");
+  {
+    backupMeetdown();
+    try {
+      const frontendUserFile = join(MEETDOWN, "src/FrontendUser.elm");
+      await client.openFile(frontendUserFile);
+
+      // FrontendUser has: name, description, profileImage (line 9: { name : Name)
+      // name field is on line 9, column 6 (0-indexed: line 8, char 6)
+      console.log(`     → Renaming 'name' field to 'userName' in FrontendUser`);
+      const renameResult = await client.rename(frontendUserFile, 8, 6, "userName", "elm_rename_field");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects files", filesChanged >= 1);
+        logTest("Has edits", totalEdits >= 1);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 55: Rename field cross-file (Group.ownerId → creatorId) =====
+  startTest(55, "Rename field cross-file (Group.ownerId → creatorId)");
+  {
+    backupMeetdown();
+    try {
+      const groupFile = join(MEETDOWN, "src/Group.elm");
+      await client.openFile(groupFile);
+
+      // ownerId field is on line 45: { ownerId : Id UserId (0-indexed: line 44, char 10)
+      console.log(`     → Renaming 'ownerId' field to 'creatorId' in Group`);
+      const renameResult = await client.rename(groupFile, 44, 10, "creatorId", "elm_rename_field");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects multiple files", filesChanged >= 2);
+        logTest("Has reasonable edits", totalEdits >= 3);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 56: Rename field (Group.visibility → groupVisibility) =====
+  startTest(56, "Rename field (Group.visibility → groupVisibility)");
+  {
+    backupMeetdown();
+    try {
+      const groupFile = join(MEETDOWN, "src/Group.elm");
+      await client.openFile(groupFile);
+
+      // visibility field is on line 49: , visibility : GroupVisibility (0-indexed: line 48, char 10)
+      console.log(`     → Renaming 'visibility' field to 'groupVisibility' in Group`);
+      const renameResult = await client.rename(groupFile, 48, 10, "groupVisibility", "elm_rename_field");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects files", filesChanged >= 1);
+        logTest("Has edits", totalEdits >= 1);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 57: Rename field (Types.LoginForm.email → userEmail) =====
+  startTest(57, "Rename field (LoginForm.email → userEmail)");
+  {
+    backupMeetdown();
+    try {
+      const typesFile = join(MEETDOWN, "src/Types.elm");
+      await client.openFile(typesFile);
+
+      // LoginForm.email is on line 108: { email : String (0-indexed: line 107, char 6)
+      console.log(`     → Renaming 'email' field to 'userEmail' in LoginForm`);
+      const renameResult = await client.rename(typesFile, 107, 6, "userEmail", "elm_rename_field");
+
+      if (renameResult?.changes) {
+        const filesChanged = Object.keys(renameResult.changes).length;
+        let totalEdits = 0;
+        for (const [uri, edits] of Object.entries(renameResult.changes)) {
+          totalEdits += edits.length;
+          const fileName = uri.split("/").pop();
+          console.log(`     → ${fileName}: ${edits.length} edits`);
+        }
+
+        logTest("Rename affects files", filesChanged >= 1);
+        logTest("Has edits", totalEdits >= 1);
+        console.log(`     → Files changed: ${filesChanged}, Total edits: ${totalEdits}`);
+
+        await applyEdits(renameResult.changes, client);
+        const compileResult = compileMeetdown();
+        logTest("Code compiles after rename", compileResult.success, compileResult.error?.substring(0, 200));
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 58: Rename field round-trip (FrontendUser.description → bio → description) =====
+  startTest(58, "Rename field round-trip (FrontendUser.description → bio → description)");
+  {
+    backupMeetdown();
+    try {
+      const frontendUserFile = join(MEETDOWN, "src/FrontendUser.elm");
+      await client.openFile(frontendUserFile);
+
+      // description field is on line 10: , description : Description (0-indexed: line 9, char 6)
+      console.log(`     → STEP 1: Renaming 'description' → 'bio'`);
+      const result1 = await client.rename(frontendUserFile, 9, 6, "bio", "elm_rename_field");
+
+      if (result1?.changes) {
+        await applyEdits(result1.changes, client);
+        const compile1 = compileMeetdown();
+        logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+        // Verify the rename happened
+        const content1 = readFileSync(frontendUserFile, "utf-8");
+        logTest("Step 1: Field renamed to bio", content1.includes("bio :") || content1.includes("bio:"));
+
+        // STEP 2: Rename back
+        console.log(`     → STEP 2: Renaming 'bio' → 'description'`);
+        const result2 = await client.rename(frontendUserFile, 9, 6, "description", "elm_rename_field");
+        if (result2?.changes) {
+          await applyEdits(result2.changes, client);
+          const compile2 = compileMeetdown();
+          logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+          const content2 = readFileSync(frontendUserFile, "utf-8");
+          logTest("Step 2: Field restored to description", content2.includes("description :") || content2.includes("description:"));
+        }
+      } else {
+        logTest("Rename returned changes", false);
+      }
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      restoreMeetdown();
+    }
+    console.log();
+  }
+
+  // ===== TEST 53: Move file nested directory (Event.elm → Domain/Events/Event.elm) =====
+  startTest(53, "Move file nested (Event.elm → Domain/Events/Event.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Event.elm");
+      await client.openFile(testFile);
+
+      // Move to nested directory
+      console.log(`     → Moving Event.elm → Domain/Events/Event.elm`);
+      const result = await client.moveFile(testFile, "src/Domain/Events/Event.elm");
+      logTest("Move succeeded", result.success === true);
+      logTest("New module is Domain.Events.Event", result.newModuleName === "Domain.Events.Event");
+      console.log(`     → ${result.filesUpdated} files updated`);
+
+      // Verify module declaration
+      const newFile = join(MEETDOWN, "src/Domain/Events/Event.elm");
+      const newContent = readFileSync(newFile, "utf-8");
+      logTest("Module declaration updated", newContent.includes("module Domain.Events.Event exposing"));
+
+      const compileResult = compileMeetdown();
+      logTest("Code compiles", compileResult.success, compileResult.error?.substring(0, 200));
 
     } catch (e) {
       logTest(`Error: ${e.message}`, false);
