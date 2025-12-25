@@ -5,6 +5,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::binder::BoundSymbolKind;
 use crate::diagnostics::DiagnosticsProvider;
 use crate::document::{Document, VariantInfo};
 use crate::parser::ElmParser;
@@ -243,6 +244,37 @@ impl ElmLanguageServer {
         new_name: &str,
     ) -> Result<Option<WorkspaceEdit>> {
         tracing::info!("Renaming {} to {}", name, new_name);
+
+        // Check for shadowing: does the new name already exist in the defining file?
+        // Read file content directly since document might not be opened
+        if let Ok(file_path) = uri.to_file_path() {
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                // Look for the new name as a word boundary match (not substring)
+                let mut search_pos = 0;
+                while let Some(pos) = content[search_pos..].find(new_name) {
+                    let abs_pos = search_pos + pos;
+                    let before_ok = abs_pos == 0 || {
+                        let c = content.as_bytes()[abs_pos - 1] as char;
+                        !c.is_alphanumeric() && c != '_'
+                    };
+                    let after_ok = abs_pos + new_name.len() >= content.len() || {
+                        let c = content.as_bytes()[abs_pos + new_name.len()] as char;
+                        !c.is_alphanumeric() && c != '_'
+                    };
+                    if before_ok && after_ok {
+                        // Found a match - this would cause shadowing
+                        let line_num = content[..abs_pos].matches('\n').count() + 1;
+                        tracing::info!(
+                            "Shadowing detected: '{}' already exists in {} at line {}",
+                            new_name, file_path.display(), line_num
+                        );
+                        return Ok(None);
+                    }
+                    search_pos = abs_pos + 1;
+                }
+            }
+        }
+
         let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
 
         // Get cross-file references from workspace
@@ -277,6 +309,36 @@ impl ElmLanguageServer {
                             new_text: new_name.to_string(),
                         });
 
+                    // For types with same-named constructors (e.g., `type EventId = EventId Int`),
+                    // also add the constructor definition to the changes
+                    if symbol.kind == SymbolKind::ENUM {
+                        if let Some(module) = workspace.get_module(&symbol.module_name) {
+                            if let Some(elm_symbol) = module.symbols.iter().find(|s| s.name == name) {
+                                for variant in &elm_symbol.variants {
+                                    if variant.name == name {
+                                        let key = (
+                                            symbol.definition_uri.to_string(),
+                                            variant.range.start.line,
+                                            variant.range.start.character,
+                                            variant.range.end.line,
+                                            variant.range.end.character,
+                                        );
+                                        if !seen_ranges.contains(&key) {
+                                            seen_ranges.insert(key);
+                                            changes
+                                                .entry(symbol.definition_uri.clone())
+                                                .or_insert_with(Vec::new)
+                                                .push(TextEdit {
+                                                    range: variant.range,
+                                                    new_text: new_name.to_string(),
+                                                });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Use module-aware references to only rename in files that import this symbol
                     let refs = workspace.find_module_aware_references(
                         name,
@@ -287,6 +349,15 @@ impl ElmLanguageServer {
                         // Skip Evergreen files - they are migration snapshots
                         if r.uri.path().contains("/Evergreen/") {
                             continue;
+                        }
+                        // Filter references by kind based on what we're renaming
+                        // For functions, exclude field accesses (a.name is not a function ref)
+                        if symbol.kind == SymbolKind::FUNCTION {
+                            if let Some(ref_kind) = &r.kind {
+                                if matches!(ref_kind, crate::binder::BoundSymbolKind::FieldType) {
+                                    continue;
+                                }
+                            }
                         }
                         // Skip if we already have an edit for this exact range
                         let key = (
@@ -382,8 +453,17 @@ impl ElmLanguageServer {
                     crate::binder::BoundSymbolKind::Function => {
                         workspace.find_function_references_typed(&symbol)
                     }
-                    crate::binder::BoundSymbolKind::Type
-                    | crate::binder::BoundSymbolKind::TypeAlias => {
+                    crate::binder::BoundSymbolKind::Type => {
+                        // For custom types, also include same-named constructor references
+                        // e.g., `type EventId = EventId Int` - renaming the type should also rename the constructor
+                        let mut refs = workspace.find_type_references_typed(&symbol);
+                        let constructor_refs = workspace.find_constructor_references_typed(&symbol);
+                        tracing::info!("Type rename: found {} type refs and {} constructor refs for {}",
+                            refs.len(), constructor_refs.len(), symbol.name);
+                        refs.extend(constructor_refs);
+                        refs
+                    }
+                    crate::binder::BoundSymbolKind::TypeAlias => {
                         workspace.find_type_references_typed(&symbol)
                     }
                     crate::binder::BoundSymbolKind::UnionConstructor => {
@@ -650,6 +730,39 @@ impl LanguageServer for ElmLanguageServer {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.remove(&params.text_document.uri);
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        tracing::info!("did_change_watched_files: {} changes", params.changes.len());
+        for change in params.changes {
+            let uri = change.uri;
+            match change.typ {
+                FileChangeType::CREATED | FileChangeType::CHANGED => {
+                    tracing::info!("File changed/created: {}", uri);
+                    // Re-read and reindex the file
+                    if let Ok(path) = uri.to_file_path() {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            // Update the document in the workspace
+                            if let Ok(mut ws) = self.workspace.write() {
+                                if let Some(workspace) = ws.as_mut() {
+                                    workspace.update_file(&uri, &content);
+                                }
+                            }
+                        }
+                    }
+                }
+                FileChangeType::DELETED => {
+                    tracing::info!("File deleted: {}", uri);
+                    self.documents.remove(&uri);
+                    if let Ok(mut ws) = self.workspace.write() {
+                        if let Some(workspace) = ws.as_mut() {
+                            workspace.remove_file(&uri);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -1041,11 +1154,29 @@ impl LanguageServer for ElmLanguageServer {
         let position = params.text_document_position.position;
         let new_name = params.new_name;
 
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/elm_field_rename_debug.log")
+        {
+            let _ = writeln!(f, "\n=== RENAME START ===");
+            let _ = writeln!(f, "uri={}, pos={:?}, new_name={}", uri.as_str(), position, new_name);
+        }
+
         // First check if this is a field rename
         if let Some(doc) = self.documents.get(uri) {
             if let Ok(ws) = self.workspace.read() {
                 if let Some(workspace) = ws.as_ref() {
-                    if let Some(field_info) = workspace.get_field_at_position(uri, position, &doc.text) {
+                    let field_result = workspace.get_field_at_position(uri, position, &doc.text);
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/elm_field_rename_debug.log")
+                    {
+                        let _ = writeln!(f, "get_field_at_position returned {:?}", field_result.as_ref().map(|fi| &fi.name));
+                    }
+                    if let Some(field_info) = field_result {
                         tracing::info!(
                             "Renaming field {} in type alias {:?} to {}",
                             field_info.name,
@@ -1055,10 +1186,28 @@ impl LanguageServer for ElmLanguageServer {
 
                         // Find all field references using type inference
                         let refs = workspace.find_field_references(&field_info.name, &field_info.definition);
+                        let old_name = &field_info.name;
 
                         let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
 
                         for r in refs {
+                            // Note: For record pattern fields like `{ email }`, Elm doesn't support
+                            // explicit binding syntax `{ userEmail = email }`. So we just rename
+                            // the field directly. This changes both the field and the bound variable.
+                            // TODO: Also rename all usages of the old variable in the function scope.
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/elm_field_rename_debug.log")
+                            {
+                                let _ = writeln!(f, "  EDIT: {:?} line {} col {}-{} kind={:?} -> '{}'",
+                                    r.uri.path().split('/').last().unwrap_or(""),
+                                    r.range.start.line + 1,
+                                    r.range.start.character, r.range.end.character,
+                                    r.kind,
+                                    new_name
+                                );
+                            }
                             changes
                                 .entry(r.uri)
                                 .or_insert_with(Vec::new)
@@ -1069,17 +1218,40 @@ impl LanguageServer for ElmLanguageServer {
                         }
 
                         if !changes.is_empty() {
+                            let total_edits: usize = changes.values().map(|v| v.len()).sum();
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/elm_field_rename_debug.log")
+                            {
+                                let _ = writeln!(f, "field rename returning {} files, {} total edits", changes.len(), total_edits);
+                            }
                             tracing::info!("Field rename affects {} files", changes.len());
                             return Ok(Some(WorkspaceEdit {
                                 changes: Some(changes),
                                 ..Default::default()
                             }));
+                        } else {
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/elm_field_rename_debug.log")
+                            {
+                                let _ = writeln!(f, "field rename found no changes, falling through to symbol rename");
+                            }
                         }
                     }
                 }
             }
         }
 
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/elm_field_rename_debug.log")
+        {
+            let _ = writeln!(f, "FALLING THROUGH to symbol rename path");
+        }
         // Fall back to symbol rename
         let symbol_name = if let Some(doc) = self.documents.get(uri) {
             doc.get_symbol_at_position(position).map(|s| s.name.clone())
@@ -1813,6 +1985,7 @@ impl LanguageServer for ElmLanguageServer {
                     let old_name = func_name.clone();
 
                     // Use rename_symbol_by_name with the function name directly
+                    // (shadowing check is done inside rename_symbol_by_name)
                     match self.rename_symbol_by_name(&uri, &old_name, &new_name) {
                         Ok(Some(edit)) => {
                             if let Some(changes) = edit.changes {

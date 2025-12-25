@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 use crate::binder::BoundSymbolKind;
 use crate::document::ElmSymbol;
 use crate::parser::ElmParser;
-use crate::type_checker::{TypeChecker, FieldDefinition};
+use crate::type_checker::{TypeChecker, FieldDefinition, TargetTypeAlias};
 
 /// Represents an Elm module with its symbols and metadata
 #[derive(Debug, Clone)]
@@ -566,9 +566,37 @@ impl Workspace {
         uri: &Url,
         imports: &[ImportInfo],
     ) {
+        // Debug: trace all nodes at line 132
+        if node.start_position().row == 131 && uri.path().contains("Group.elm") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/elm_debug.log")
+            {
+                let _ = writeln!(f, "line 132, type={}, text={:?}",
+                    node.kind(),
+                    source.get(node.byte_range()).unwrap_or("").chars().take(30).collect::<String>());
+            }
+        }
+
         match node.kind() {
             "value_qid" | "upper_case_qid" => {
-                if !self.is_module_name_in_import(node) {
+                let text_check = &source[node.byte_range()];
+                let is_in_import = self.is_module_name_in_import(node);
+                // Debug: trace EventId specifically
+                if text_check == "EventId" && node.start_position().row == 131 {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/elm_debug.log")
+                    {
+                        let _ = writeln!(f, "QID EventId at 132: is_in_import={}", is_in_import);
+                    }
+                }
+
+                if !is_in_import {
                     let text = &source[node.byte_range()];
                     let kind = self.classify_reference_kind(node, text);
 
@@ -601,6 +629,18 @@ impl Workspace {
 
                         let resolved_name = self.resolve_reference(text, imports);
 
+                        // Debug: trace EventId resolved name
+                        if text == "EventId" && node.start_position().row == 131 {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/elm_debug.log")
+                            {
+                                let _ = writeln!(f, "QID EventId adding ref: resolved_name={}, kind={:?}", resolved_name, kind);
+                            }
+                        }
+
                         self.references
                             .entry(resolved_name)
                             .or_insert_with(Vec::new)
@@ -615,8 +655,18 @@ impl Workspace {
                 }
             }
             "lower_case_identifier" | "upper_case_identifier" => {
-                if !self.is_in_declaration_context(node) {
-                    let text = &source[node.byte_range()];
+                let text = &source[node.byte_range()];
+                let in_decl = self.is_in_declaration_context(node);
+
+                // Debug: trace EventId specifically
+                if text == "EventId" && node.start_position().row == 131 {
+                    tracing::info!("DEBUG: Found EventId at line 132, in_decl={}, node_type={}", in_decl, node.kind());
+                    if let Some(parent) = node.parent() {
+                        tracing::info!("DEBUG: Parent type={}", parent.kind());
+                    }
+                }
+
+                if !in_decl {
                     let kind = self.classify_reference_kind(node, text);
                     let range = Range {
                         start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
@@ -686,6 +736,13 @@ impl Workspace {
                     }
                     "field_type" => {
                         return Some(BoundSymbolKind::FieldType);
+                    }
+                    "field" => {
+                        // Record field assignment like `{ name = value }` - the identifier is a field name
+                        // Only the first child (field name) is a field, not the value expression
+                        if current == node {
+                            return Some(BoundSymbolKind::FieldType);
+                        }
                     }
                     "port_annotation" => {
                         return Some(BoundSymbolKind::Port);
@@ -967,7 +1024,9 @@ impl Workspace {
                 self.find_references(&symbol.name, symbol.module_name.as_deref())
             }
             BoundSymbolKind::UnionConstructor => self.find_constructor_references_typed(&symbol),
-            BoundSymbolKind::FieldType => self.find_field_references_typed(&symbol, content),
+            BoundSymbolKind::FieldType | BoundSymbolKind::RecordPatternField => {
+                self.find_field_references_typed(&symbol, content)
+            }
             BoundSymbolKind::Port => self.find_port_references_typed(&symbol),
             BoundSymbolKind::Operator | BoundSymbolKind::Import => {
                 // Use basic find_references for operators and imports
@@ -994,6 +1053,31 @@ impl Workspace {
         } else {
             symbol_name
         };
+
+        // Debug: trace EventId
+        if base_name == "EventId" {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/elm_debug.log")
+            {
+                let _ = writeln!(f, "\nfind_module_aware_references: EventId, defining_module={}, uri={}",
+                    defining_module, defining_uri.as_str());
+                // Check what refs we have stored
+                if let Some(refs) = self.references.get("EventId") {
+                    let _ = writeln!(f, "  Found {} refs under 'EventId'", refs.len());
+                    // Show all refs in Group.elm
+                    for r in refs.iter() {
+                        if r.uri.path().contains("Group.elm") {
+                            let _ = writeln!(f, "    - line {} kind={:?}", r.range.start.line + 1, r.kind);
+                        }
+                    }
+                } else {
+                    let _ = writeln!(f, "  No refs found under 'EventId'");
+                }
+            }
+        }
 
         tracing::debug!(
             "find_module_aware_references: symbol={}, defining_module={}, defining_uri={}",
@@ -2964,13 +3048,26 @@ impl Workspace {
         position: Position,
         content: &str,
     ) -> Option<FieldInfo> {
-        tracing::debug!("get_field_at_position: uri={}, pos={:?}", uri.as_str(), position);
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/elm_field_rename_debug.log")
+        {
+            let _ = writeln!(f, "get_field_at_position: uri={}, pos={:?}", uri.as_str(), position);
+        }
 
         // Use the cached tree from the type checker to ensure node IDs match
         let tree = match self.type_checker.get_tree(uri.as_str()) {
             Some(t) => t,
             None => {
-                tracing::debug!("get_field_at_position: no tree cached for {}", uri.as_str());
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/elm_field_rename_debug.log")
+                {
+                    let _ = writeln!(f, "  NO TREE cached for {}", uri.as_str());
+                }
                 return None;
             }
         };
@@ -2980,17 +3077,37 @@ impl Workspace {
         let point = tree_sitter::Point::new(position.line as usize, position.character as usize);
         let node = match Self::find_node_at_point(root, point) {
             Some(n) => {
-                tracing::debug!("get_field_at_position: found node kind={}", n.kind());
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/elm_field_rename_debug.log")
+                {
+                    let _ = writeln!(f, "  found node kind={}, text={}", n.kind(), n.utf8_text(content.as_bytes()).unwrap_or("?"));
+                }
                 n
             }
             None => {
-                tracing::debug!("get_field_at_position: no node at point");
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/elm_field_rename_debug.log")
+                {
+                    let _ = writeln!(f, "  no node at point");
+                }
                 return None;
             }
         };
 
         // Check if this is a field reference
-        let field_def = self.type_checker.find_field_definition(uri.as_str(), node, content)?;
+        let field_def = self.type_checker.find_field_definition(uri.as_str(), node, content);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/elm_field_rename_debug.log")
+        {
+            let _ = writeln!(f, "  find_field_definition returned: {:?}", field_def.as_ref().map(|d| &d.name));
+        }
+        let field_def = field_def?;
 
         // Calculate the range for just the field name
         let range = Range {
@@ -3012,6 +3129,12 @@ impl Workspace {
         definition: &FieldDefinition,
     ) -> Vec<SymbolReference> {
         let mut references = Vec::new();
+
+        // Create target for filtering structural matches
+        let target = definition.type_alias_name.as_ref().map(|name| TargetTypeAlias {
+            name: name.clone(),
+            module: definition.module_name.clone(),
+        });
 
         // Include the definition itself - use cached tree for correct node IDs
         if let Some(tree) = self.type_checker.get_tree(&definition.uri) {
@@ -3058,31 +3181,127 @@ impl Workspace {
             // Find all field usages in this file
             let usages = self.find_field_usages_in_tree(tree, content, field_name);
 
+            // Debug: log all usages found
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/elm_field_rename_debug.log")
+            {
+                let _ = writeln!(f, "find_field_references: {} usages found in {}", usages.len(), file_uri.path());
+                for (node_id, range) in &usages {
+                    let _ = writeln!(f, "  usage: line {}, col {}, node_id={}", range.start.line + 1, range.start.character, node_id);
+                }
+            }
+
             for (node_id, range) in usages {
                 // Skip the definition itself (already added)
                 if file_uri.as_str() == definition.uri && node_id == definition.node_id {
                     continue;
                 }
 
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/elm_field_rename_debug.log")
+                {
+                    let _ = writeln!(f, "  processing usage: line {}, col {}, node_id={}", range.start.line + 1, range.start.character, node_id);
+                }
+
                 // Find the node to check if it resolves to the same definition
                 if let Some(node) = Self::find_node_by_id(tree.root_node(), node_id) {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/elm_field_rename_debug.log")
+                    {
+                        let _ = writeln!(f, "    found node: kind={}, parent_kind={:?}", node.kind(), node.parent().map(|p| p.kind()));
+                    }
                     // Use type checker to resolve this field reference
-                    if let Some(ref_def) = self.type_checker.find_field_definition(
-                        file_uri.as_str(),
-                        node,
-                        &content,
-                    ) {
+                    // Pass target to filter structural matches to only the type alias we're renaming
+                    let ref_def = if let Some(ref target) = target {
+                        self.type_checker.find_field_definition_with_target(
+                            file_uri.as_str(),
+                            node,
+                            &content,
+                            target,
+                        )
+                    } else {
+                        self.type_checker.find_field_definition(
+                            file_uri.as_str(),
+                            node,
+                            &content,
+                        )
+                    };
+
+                    tracing::info!(
+                        "find_field_references: checking {} in {}, ref_def={:?}",
+                        field_name,
+                        file_uri.path(),
+                        ref_def.as_ref().map(|d| (&d.type_alias_name, &d.module_name))
+                    );
+
+                    if let Some(ref_def) = ref_def {
                         // Check if it resolves to the same type alias
                         if ref_def.type_alias_name == definition.type_alias_name
                             && ref_def.module_name == definition.module_name
                         {
+                            tracing::info!("find_field_references: MATCH - adding reference");
+                            // Determine the kind based on parent node
+                            let is_record_pattern = node.parent().map(|p| p.kind()) == Some("record_pattern");
+                            let kind = if is_record_pattern {
+                                BoundSymbolKind::RecordPatternField
+                            } else {
+                                BoundSymbolKind::FieldType
+                            };
                             references.push(SymbolReference {
                                 uri: file_uri.clone(),
                                 range,
                                 is_definition: false,
-                                kind: Some(BoundSymbolKind::FieldType),
+                                kind: Some(kind),
                                 type_context: definition.type_alias_name.clone(),
                             });
+
+                            // For record pattern fields, also find all variable usages
+                            // of this name within the enclosing function scope.
+                            // BUT ONLY if there are no OTHER bindings for the same name
+                            // (case patterns, let bindings, lambda params, etc.)
+                            if is_record_pattern {
+                                if let Some(scope_node) = Self::find_enclosing_scope(node) {
+                                    // Check if the scope has other bindings that would shadow this variable
+                                    let has_other_bindings = Self::scope_has_other_bindings(
+                                        scope_node,
+                                        &content,
+                                        field_name,
+                                        node.id(),
+                                    );
+
+                                    if !has_other_bindings {
+                                        let var_usages = self.find_variable_usages_in_scope(
+                                            scope_node,
+                                            &content,
+                                            field_name,
+                                            node,  // Exclude the pattern field itself
+                                        );
+                                        for (var_range, _) in var_usages {
+                                            references.push(SymbolReference {
+                                                uri: file_uri.clone(),
+                                                range: var_range,
+                                                is_definition: false,
+                                                kind: Some(BoundSymbolKind::FunctionParameter), // Treated as local variable
+                                                type_context: definition.type_alias_name.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::info!(
+                                "find_field_references: NO MATCH - expected {:?}/{:?}, got {:?}/{:?}",
+                                definition.type_alias_name, definition.module_name,
+                                ref_def.type_alias_name, ref_def.module_name
+                            );
                         }
                     }
                 }
@@ -3118,8 +3337,26 @@ impl Workspace {
         field_name: &str,
         usages: &mut Vec<(usize, Range)>,
     ) {
+        use std::io::Write;
         let node_kind = node.kind();
         let parent_kind = node.parent().map(|p| p.kind());
+
+        // Debug: log all lower_case_identifier nodes with matching text
+        if node_kind == "lower_case_identifier" || node_kind == "lower_pattern" {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if text == field_name {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/elm_field_rename_debug.log")
+                    {
+                        let _ = writeln!(f, "WALK: found {} at line {} col {}, node_kind={}, parent_kind={:?}",
+                            field_name, node.start_position().row + 1, node.start_position().column,
+                            node_kind, parent_kind);
+                    }
+                }
+            }
+        }
 
         // Check if this is a field reference matching our name
         let is_field = match (node_kind, parent_kind) {
@@ -3134,9 +3371,24 @@ impl Workspace {
                 // Check if this is the field name (first child, not the value)
                 if let Some(parent) = node.parent() {
                     // The field name is the first lower_case_identifier child
-                    parent.child(0)
+                    let first_child = parent.child(0);
+                    let matches = first_child
                         .map(|n| n.id() == node.id() && n.kind() == "lower_case_identifier")
-                        .unwrap_or(false)
+                        .unwrap_or(false);
+                    // Debug: log why it might fail
+                    if !matches {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open("/tmp/elm_field_rename_debug.log")
+                        {
+                            let fc_info = first_child.map(|n| (n.kind().to_string(), n.id(), n.utf8_text(source.as_bytes()).unwrap_or("?").to_string()));
+                            let _ = writeln!(f, "  FIELD CHECK FAILED: line {} col {}, first_child={:?}, this_node_id={}",
+                                node.start_position().row + 1, node.start_position().column,
+                                fc_info, node.id());
+                        }
+                    }
+                    matches
                 } else {
                     false
                 }
@@ -3210,6 +3462,226 @@ impl Workspace {
         }
 
         None
+    }
+
+    /// Find the enclosing function scope for a node (value_declaration or let_in_expr)
+    fn find_enclosing_scope(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+        let mut current = Some(node);
+        while let Some(n) = current {
+            match n.kind() {
+                "value_declaration" | "let_in_expr" => return Some(n),
+                _ => current = n.parent(),
+            }
+        }
+        None
+    }
+
+    /// Find all variable usages within a scope that match the given name
+    /// Returns a list of (range, node_id) for each usage
+    fn find_variable_usages_in_scope(
+        &self,
+        scope_node: tree_sitter::Node,
+        source: &str,
+        var_name: &str,
+        exclude_node: tree_sitter::Node,
+    ) -> Vec<(Range, usize)> {
+        let mut usages = Vec::new();
+        self.walk_for_variable_usages(scope_node, source, var_name, exclude_node.id(), &mut usages);
+        usages
+    }
+
+    /// Recursively walk the tree to find variable usages
+    fn walk_for_variable_usages(
+        &self,
+        node: tree_sitter::Node,
+        source: &str,
+        var_name: &str,
+        exclude_id: usize,
+        usages: &mut Vec<(Range, usize)>,
+    ) {
+        // Skip the excluded node (the pattern field itself)
+        if node.id() == exclude_id {
+            return;
+        }
+
+        // Check if this is a value_expr that matches our variable name
+        if node.kind() == "value_expr" || node.kind() == "lower_case_identifier" {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if text == var_name {
+                    // Check that this is a variable usage, not a field name
+                    // Field names would have parent of field_type, field_access_expr, field, etc.
+                    let parent_kind = node.parent().map(|p| p.kind());
+                    let is_field_context = matches!(
+                        parent_kind,
+                        Some("field_type")
+                            | Some("field_access_expr")
+                            | Some("field_accessor_function_expr")
+                            | Some("record_pattern")
+                    );
+                    // Also check if this is the field name in a record field (not the value)
+                    let is_field_name_in_field = if parent_kind == Some("field") {
+                        // In a `field` node, the first child is the field name
+                        node.parent()
+                            .and_then(|p| p.child(0))
+                            .map(|c| c.id() == node.id())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if !is_field_context && !is_field_name_in_field {
+                        let range = Range {
+                            start: Position::new(
+                                node.start_position().row as u32,
+                                node.start_position().column as u32,
+                            ),
+                            end: Position::new(
+                                node.end_position().row as u32,
+                                node.end_position().column as u32,
+                            ),
+                        };
+                        usages.push((range, node.id()));
+                    }
+                }
+            }
+        }
+
+        // Recurse into children
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.walk_for_variable_usages(child, source, var_name, exclude_id, usages);
+        }
+    }
+
+    /// Check if a scope contains other bindings for the given variable name
+    /// (case patterns, function parameters, let bindings, lambda parameters, etc.)
+    /// This is used to avoid renaming variable usages that are bound by something OTHER than
+    /// the record pattern we're processing.
+    fn scope_has_other_bindings(
+        scope_node: tree_sitter::Node,
+        source: &str,
+        var_name: &str,
+        exclude_node_id: usize,
+    ) -> bool {
+        Self::walk_for_other_bindings(scope_node, source, var_name, exclude_node_id)
+    }
+
+    /// Recursively check for variable bindings in patterns
+    fn walk_for_other_bindings(
+        node: tree_sitter::Node,
+        source: &str,
+        var_name: &str,
+        exclude_node_id: usize,
+    ) -> bool {
+        // Skip the node we're renaming (the record pattern field itself)
+        if node.id() == exclude_node_id {
+            return false;
+        }
+
+        let node_kind = node.kind();
+
+        // Check for bindings in various pattern types
+        let is_binding = match node_kind {
+            // Case pattern bindings: `Just x -> ...`
+            "pattern" | "union_pattern" | "cons_pattern" => {
+                // Look for lower_case_identifier children that match
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "lower_case_identifier" && child.id() != exclude_node_id {
+                        if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                            if text == var_name {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            // Let bindings: `let x = ... in ...`
+            "value_declaration" if node.parent().map(|p| p.kind()) == Some("let_in_expr") => {
+                // Check the function name
+                if let Some(decl) = node.child_by_field_name("functionDeclarationLeft") {
+                    if let Some(name_node) = decl.child(0) {
+                        if name_node.id() != exclude_node_id {
+                            if let Ok(text) = name_node.utf8_text(source.as_bytes()) {
+                                if text == var_name {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            // Function parameters (excluding the record pattern itself)
+            "function_declaration_left" => {
+                // Check all patterns in the function declaration
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "lower_pattern" && child.id() != exclude_node_id {
+                        if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                            if text == var_name {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            // Lambda parameters: `\x -> ...`
+            "anonymous_function_expr" => {
+                // Check the patterns before the arrow
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "pattern" || child.kind() == "lower_pattern" {
+                        if child.id() != exclude_node_id {
+                            if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                                if text == var_name {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            // Lower case identifier in a pattern context (catch-all)
+            "lower_pattern" | "lower_case_identifier" => {
+                // Check if this is in a pattern context (case, lambda, etc.)
+                let parent_kind = node.parent().map(|p| p.kind());
+                let is_pattern_context = matches!(
+                    parent_kind,
+                    Some("pattern")
+                        | Some("union_pattern")
+                        | Some("cons_pattern")
+                        | Some("case_of_branch")
+                        | Some("anonymous_function_expr")
+                );
+                if is_pattern_context && node.id() != exclude_node_id {
+                    if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                        if text == var_name {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        };
+
+        if is_binding {
+            return true;
+        }
+
+        // Recurse into children
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if Self::walk_for_other_bindings(child, source, var_name, exclude_node_id) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Classify the definition at a given position

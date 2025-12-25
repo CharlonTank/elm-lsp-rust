@@ -45,28 +45,4 @@ Type-aware renaming correctly renames only the specific field being targeted.
 
 ---
 
-## Cleemo Large-Scale Test Results (12 tests)
-
-Testing on **cleemo-lamdera-2** (~24k lines of Elm) with `lamdera make` compilation verification.
-
-| Tool | Test | Compiles? |
-|------|------|-----------|
-| `elm_rename_field` | `chatInput` → `messageInput` (12 edits) | ✅ YES |
-| `elm_rename_field` | `isCapacitor` → `isNativeApp` (8 edits, type-aware) | ✅ YES |
-| `elm_rename_field` | `layoutMode` → `displayMode` (7 edits) | ✅ YES |
-| `elm_rename_type` | `LayoutMode` → `ViewMode` | ✅ YES |
-| `elm_rename_type` | `LoginState` → `AuthState` | ✅ YES |
-| `elm_rename_type` | `FormError` → `ValidationError` | ✅ YES |
-| `elm_rename_variant` | `CardMode` → `GridMode` | ✅ YES |
-| `elm_rename_variant` | `JustArrived` → `InitialState` | ✅ YES |
-| `elm_rename_variant` | `NotLogged` → `Anonymous` | ✅ YES |
-| `elm_rename_function` | `emptyResearchForm` → `initialResearchForm` (4 edits) | ✅ YES |
-| `elm_rename_function` | `emptyPropertyAddressAutocomplete` → `blankPropertyAutocomplete` | ✅ YES |
-| `elm_rename_function` | `emptyOwnerData` → `initialOwnerData` | ✅ YES |
-
-**Note**: Field rename for `isCapacitor` correctly does NOT rename fields in other record types
-(e.g., DebugMenuConfig.isCapacitor is a different type and correctly left unchanged).
-
----
-
-*Last updated: 2025-12-23*
+*Last updated: 2025-12-25*

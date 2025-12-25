@@ -8,6 +8,3 @@ tests/fixture-backup/
 *.backup
 *.backup2
 .DS_Store
-tests/cleemo-lamdera-test/
-tests/test_cleemo*.mjs
-tests/test_isCapacitor.mjs

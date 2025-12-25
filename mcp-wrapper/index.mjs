@@ -280,14 +280,6 @@ async function ensureClient(workspaceRoot) {
   return lspClient;
 }
 
-// Restart the LSP client to clear cached file state
-function restartClient() {
-  if (lspClient) {
-    lspClient.stop();
-    lspClient.initialized = false;
-  }
-}
-
 // Resolve relative paths to absolute paths
 function resolveFilePath(filePath) {
   return resolve(filePath);

@@ -21,6 +21,9 @@ pub enum BoundSymbolKind {
     Operator,
     Import,
     FieldType,
+    /// A field reference inside a record pattern like `{ email, name }`.
+    /// When renaming, these need explicit binding: `{ newEmail = email }`.
+    RecordPatternField,
 }
 
 /// A bound symbol with its location and kind

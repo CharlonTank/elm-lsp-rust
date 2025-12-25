@@ -7,11 +7,15 @@ use elm_lsp::workspace::Workspace;
 fn main() {
     let project_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/Users/charles-andreassus/projects/cleemo-lamdera".to_string());
+        .unwrap_or_else(|| {
+            // Default to meetdown test project relative to this crate
+            let manifest_dir = env!("CARGO_MANIFEST_DIR");
+            format!("{}/tests/meetdown", manifest_dir)
+        });
 
     let test_file = std::env::args()
         .nth(2)
-        .unwrap_or_else(|| "src/DomId.elm".to_string());
+        .unwrap_or_else(|| "src/Group.elm".to_string());
 
     println!("==================================================");
     println!("ELM LSP RUST - BENCHMARK");
@@ -52,12 +56,12 @@ fn main() {
     println!("  Average: {}μs", avg);
     println!();
 
-    // Benchmark 3: Find references (small - landingBurgerMenuButton at line 64)
-    println!("--- FIND REFERENCES (landingBurgerMenuButton) ---");
+    // Benchmark 3: Find references (small)
+    println!("--- FIND REFERENCES (ownerId) ---");
     times.clear();
     for i in 1..=runs {
         let start = Instant::now();
-        let refs = workspace.find_references("landingBurgerMenuButton", Some("DomId"));
+        let refs = workspace.find_references("ownerId", Some("Group"));
         let elapsed = start.elapsed();
         times.push(elapsed);
         println!("  Run {}: {:?} ({} refs)", i, elapsed, refs.len());
@@ -66,12 +70,12 @@ fn main() {
     println!("  Average: {}μs", avg);
     println!();
 
-    // Benchmark 4: Find references (large - toString at line 20)
-    println!("--- FIND REFERENCES (toString - large) ---");
+    // Benchmark 4: Find references (large)
+    println!("--- FIND REFERENCES (Group - large) ---");
     times.clear();
     for i in 1..=runs {
         let start = Instant::now();
-        let refs = workspace.find_references("toString", Some("DomId"));
+        let refs = workspace.find_references("Group", Some("Group"));
         let elapsed = start.elapsed();
         times.push(elapsed);
         println!("  Run {}: {:?} ({} refs)", i, elapsed, refs.len());
@@ -85,7 +89,7 @@ fn main() {
     times.clear();
     for i in 1..=runs {
         let start = Instant::now();
-        let def = workspace.find_definition("landingBurgerMenuButton");
+        let def = workspace.find_definition("ownerId");
         let elapsed = start.elapsed();
         times.push(elapsed);
         println!("  Run {}: {:?} (found: {})", i, elapsed, def.is_some());

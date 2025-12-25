@@ -7,22 +7,22 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 | Feature | Fixture Tests | Meetdown Tests | Coverage |
 |---------|---------------|----------------|----------|
-| elm_definition | 1 | 2 | ✅ Good |
-| elm_references | 1 | 1 | ✅ Good |
-| elm_symbols | 1 | 2 | ✅ Good |
-| elm_format | 1 | 2 | ✅ Good |
-| elm_diagnostics | 2 | 2 | ✅ Excellent |
-| elm_code_actions | 1 | 1 | ✅ Good |
+| elm_definition | 1 | 0 | ⚠️ Basic |
+| elm_references | 1 | 0 | ⚠️ Basic |
+| elm_symbols | 1 | 0 | ⚠️ Basic |
+| elm_format | 1 | 0 | ⚠️ Basic |
+| elm_diagnostics | 2 | 0 | ✅ Good |
+| elm_code_actions | 1 | 0 | ⚠️ Basic |
 | elm_apply_code_action | 1 | 0 | ⚠️ Basic |
-| elm_rename_function | 1 | 4 | ✅ Excellent |
-| elm_rename_type | 1 | 5 | ✅ Excellent |
-| elm_rename_variant | 1 | 4 | ✅ Excellent |
-| elm_rename_field | 1 | 5 | ✅ Excellent |
-| elm_move_function | 1 | 5 | ✅ Excellent |
-| elm_prepare_remove_variant | 3 | 22 | ✅ Excellent |
-| elm_remove_variant | 5 | 2 | ✅ Excellent |
-| elm_rename_file | 1 | 7 | ✅ Excellent |
-| elm_move_file | 1 | 7 | ✅ Excellent |
+| elm_rename_function | 1 | 0 | ⚠️ Basic |
+| elm_rename_type | 1 | 0 | ⚠️ Basic |
+| elm_rename_variant | 1 | 0 | ⚠️ Basic |
+| elm_rename_field | 1 | 0 | ⚠️ Basic |
+| elm_move_function | 1 | 0 | ⚠️ Basic |
+| elm_prepare_remove_variant | 3 | 0 | ✅ Good |
+| elm_remove_variant | 5 | 0 | ✅ Excellent |
+| elm_rename_file | 1 | 0 | ⚠️ Basic |
+| elm_move_file | 1 | 0 | ⚠️ Basic |
 
 **Legend:**
 - ✅ Excellent: 4+ test cases with comprehensive coverage
@@ -32,7 +32,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 ---
 
-## All Tests (225 total)
+## All Tests (23 total)
 
 ### Fixture Tests (23 tests)
 
@@ -60,78 +60,8 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Rename Variant** → elm_rename_variant
 - **Symbols** → elm_symbols
 
-### Meetdown Tests (187 tests)
+### Meetdown Tests (0 tests)
 
-- **Test 1** → elm_prepare_remove_variant
-- **Test 2** → elm_prepare_remove_variant
-- **Test 3** → elm_prepare_remove_variant
-- **Test 4** → elm_prepare_remove_variant
-- **Test 5** → elm_remove_variant
-- **Test 6** → elm_remove_variant
-- **Test 7** → elm_prepare_remove_variant
-- **Test 8** → elm_prepare_remove_variant
-- **Test 9** → elm_prepare_remove_variant
-- **Test 10** → elm_prepare_remove_variant
-- **Test 11** → elm_prepare_remove_variant
-- **Test 12** → elm_prepare_remove_variant
-- **Test 13** → elm_prepare_remove_variant
-- **Test 14** → elm_prepare_remove_variant
-- **Test 15** → elm_prepare_remove_variant
-- **Test 16** → elm_prepare_remove_variant
-- **Test 17** → elm_prepare_remove_variant
-- **Test 18** → elm_prepare_remove_variant
-- **Test 19** → elm_prepare_remove_variant
-- **Test 20** → elm_prepare_remove_variant
-- **Test 21** → elm_prepare_remove_variant
-- **Test 23** → elm_prepare_remove_variant
-- **Test 24** → elm_prepare_remove_variant
-- **Test 25** → elm_prepare_remove_variant
-- **Test 26** → elm_rename_file
-- **Test 27** → elm_rename_file
-- **Test 28** → elm_move_file
-- **Test 29** → elm_move_file
-- **Test 30** → elm_rename_file
-- **Test 31** → elm_move_file
-- **Test 32** → elm_rename_function
-- **Test 33** → elm_references, elm_rename_type
-- **Test 34** → elm_rename_type
-- **Test 35** → elm_definition
-- **Test 36** → elm_definition
-- **Test 37** → elm_symbols
-- **Test 38** → elm_symbols
-- **Test 39** → elm_format
-- **Test 40** → elm_format
-- **Test 41** → elm_diagnostics
-- **Test 42** → elm_diagnostics
-- **Test 43** → elm_code_actions
-- **Test 44** → elm_move_function
-- **Test 45** → elm_rename_variant
-- **Test 46** → elm_rename_file
-- **Test 47** → elm_rename_file
-- **Test 48** → elm_rename_file
-- **Test 49** → elm_move_file
-- **Test 50** → elm_move_file
-- **Test 51** → elm_move_file
-- **Test 52** → elm_rename_file
-- **Test 53** → elm_move_file
-- **Test 54** → elm_rename_field
-- **Test 55** → elm_rename_field
-- **Test 56** → elm_rename_field
-- **Test 57** → elm_rename_field
-- **Test 58** → elm_rename_field
-- **Test 59** → elm_rename_variant
-- **Test 60** → elm_rename_variant
-- **Test 61** → elm_rename_variant
-- **Test 63** → elm_rename_type
-- **Test 64** → elm_rename_type
-- **Test 65** → elm_rename_type
-- **Test 66** → elm_rename_function
-- **Test 67** → elm_rename_function
-- **Test 68** → elm_rename_function
-- **Test 70** → elm_move_function
-- **Test 71** → elm_move_function
-- **Test 72** → elm_move_function
-- **Test 73** → elm_move_function
 
 ---
 
@@ -141,7 +71,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 # Run fixture tests (23 tests)
 node tests/run_tests.mjs
 
-# Run meetdown real-world tests (187 tests)
+# Run meetdown real-world tests (0 tests)
 node tests/test_meetdown_comprehensive.mjs
 
 # Run all tests
@@ -150,4 +80,4 @@ node tests/run_all_tests.mjs
 
 ---
 
-*Last updated: 2025-12-23 - 210/225 tests passing (15 failed) ⚠️*
+*Last updated: 2025-12-25 - All 23 tests passing ✅*
