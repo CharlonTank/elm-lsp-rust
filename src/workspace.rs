@@ -248,6 +248,9 @@ impl Workspace {
             // Index for type checking
             self.type_checker.index_file(uri.as_str(), &content, tree.clone());
 
+            // Index references from this file
+            self.find_references_in_tree(&tree, &content, &uri, &module_name, &imports);
+
             // Add symbols to global index
             for symbol in &symbols {
                 let qualified_name = format!("{}.{}", module_name, symbol.name);

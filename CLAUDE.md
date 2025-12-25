@@ -4,6 +4,8 @@
 
 This is the **elm-lsp-rust** plugin - a fast Elm Language Server written in Rust for Claude Code.
 
+**IMPORTANT: This LSP is NOT designed for use with text editors (VS Code, Vim, etc.). It is specifically built as a Claude Code plugin/MCP tool. The MCP wrapper exposes LSP functionality as MCP tools that Claude Code can use directly.**
+
 ### Architecture
 
 - **Rust LSP Server** (`src/`): Core language server with tree-sitter parsing
@@ -65,10 +67,15 @@ node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
 
 ### Test Results (2024-12-25)
 - Fixture: 23/23 (100%)
-- Meetdown: 201/201 (100%)
-- **Total: 224/224 (100%)**
+- Meetdown: 204/204 (100%)
+- **Total: 227/227 (100%)**
 
 ## Recent Changes (2024-12-25)
+
+### Fixed references not indexed at startup
+- **File**: `src/workspace.rs:252`
+- **Problem**: `index_file()` didn't call `find_references_in_tree()`, so references were never indexed at startup. Only `update_file()` indexed references, meaning `elm_references`, `elm_rename_variant`, `elm_remove_variant` etc. missed most usages.
+- **Fix**: Added `find_references_in_tree()` call in `index_file()` after type checker indexing.
 
 ### Fixed `elm_rename_field` for common field names
 - **Files**: `src/type_checker.rs`
