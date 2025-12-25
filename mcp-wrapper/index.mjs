@@ -1180,7 +1180,7 @@ server.tool(
 
 server.tool(
   "elm_prepare_remove_variant",
-  "Check if a variant can be removed from a custom type. Returns variant info, usage count, and other variants for reference.",
+  "Check if a variant can be removed from a custom type. Returns variant info, usage count, and other variants for reference. Constructor usages will be replaced with Debug.todo.",
   {
     file_path: z.string().describe("Path to the Elm file containing the type definition"),
     line: z.number().describe("Line number of the variant name (0-indexed)"),
@@ -1226,7 +1226,7 @@ server.tool(
                `Other variants: [${otherVariants}]\n`;
 
     if (blockingCount > 0) {
-      text += `Blocking usages (constructors): ${blockingCount}\n`;
+      text += `Constructor usages (replaced with Debug.todo): ${blockingCount}\n`;
     }
     if (patternCount > 0) {
       text += `Pattern usages (auto-removable): ${patternCount}\n`;
@@ -1239,15 +1239,13 @@ server.tool(
 
     if (!result.canRemove && result.totalVariants <= 1) {
       text += " (only variant)";
-    } else if (!result.canRemove && blockingCount > 0) {
-      text += " (has blocking constructor usages)";
     }
 
     text += `\nLine: ${result.range.start.line + 1}:${result.range.start.character}`;
 
-    // Add blocking usages with call chain context
+    // Show constructor usages that will be replaced with Debug.todo
     if (blockingUsages.length > 0) {
-      text += `\n\nBlocking usages (must replace manually):\n`;
+      text += `\n\nConstructor usages (will be replaced with Debug.todo):\n`;
       text += blockingUsages.slice(0, 10).map((u, idx) => {
         const func = u.function_name || "(top-level)";
         let uText = `  ${idx + 1}. ${u.module_name}.${func}:${u.line + 1}\n`;
@@ -1293,7 +1291,7 @@ server.tool(
 
 server.tool(
   "elm_remove_variant",
-  "Remove a variant from a custom type. Will fail if the variant is used anywhere (showing blocking usages with call chain context).",
+  "Remove a variant from a custom type. Constructor usages are replaced with Debug.todo, pattern matches are removed.",
   {
     file_path: z.string().describe("Path to the Elm file containing the type definition"),
     line: z.number().describe("Line number of the variant name (0-indexed)"),
@@ -1570,6 +1568,56 @@ server.tool(
         text: `Notified LSP about file change: ${old_path} → ${new_path}`,
       }],
     };
+  }
+);
+
+server.tool(
+  "elm_generate_erd",
+  "Generate a Mermaid ERD (Entity-Relationship Diagram) from an Elm type alias. " +
+  "Recursively includes all referenced types with inferred cardinality relationships. " +
+  "List/Dict/Set → one-to-many, Maybe → optional, direct reference → one-to-one.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    type_name: z.string().describe("Name of the type to generate ERD for (e.g., 'BackendModel')"),
+  },
+  async ({ file_path, type_name }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+
+    // Open the file to ensure it's indexed
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    // Execute the generate ERD command
+    const result = await client.executeCommand("elm.generateErd", [uri, type_name]);
+
+    if (result?.success) {
+      // Write raw mermaid to .mmd file
+      const erdPath = join(workspaceRoot, "erd.mmd");
+      writeFileSync(erdPath, result.mermaid, "utf-8");
+
+      let summary = `ERD saved to: ${erdPath}\n\n`;
+      summary += `**Entities:** ${result.entities} | **Relationships:** ${result.relationships}`;
+
+      if (result.warnings && result.warnings.length > 0) {
+        summary += `\n\n**Warnings:**\n${result.warnings.map(w => `- ${w}`).join('\n')}`;
+      }
+
+      return { content: [{ type: "text", text: summary }] };
+    } else {
+      return {
+        content: [{
+          type: "text",
+          text: `Failed to generate ERD: ${result?.error || "Unknown error"}`,
+        }],
+      };
+    }
   }
 );
 

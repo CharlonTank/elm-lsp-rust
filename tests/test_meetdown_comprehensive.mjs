@@ -601,19 +601,19 @@ async function main() {
   const client = new LSPClient();
   await client.start(MEETDOWN);
 
-  // ===== TEST 1: Type with constructor usage (should block) =====
-  startTest(1, "MeetOnlineAndInPerson (has constructor usage - should BLOCK)");
+  // ===== TEST 1: Type with constructor usage (will be replaced with Debug.todo) =====
+  startTest(1, "MeetOnlineAndInPerson (has constructor usage - replaced with Debug.todo)");
   {
     const file = join(MEETDOWN, "src/Event.elm");
     const pos = findVariantLine(file, "MeetOnlineAndInPerson");
     await client.openFile(file);
     const result = await client.prepareRemoveVariant(file, pos.line, pos.char);
 
-    logTest("Has blocking usages", result.blockingCount > 0);
-    logTest("Cannot remove (canRemove=false)", result.canRemove === false);
+    logTest("Has constructor usages", result.blockingCount > 0);
+    logTest("Can remove (constructors replaced with Debug.todo)", result.canRemove === true);
     logTest("Detected constructor usages", result.blockingUsages?.some(u => u.usage_type === "Constructor"));
     logTest("Found pattern usages too", result.patternCount > 0);
-    console.log(`     → ${result.blockingCount} blocking, ${result.patternCount} patterns\n`);
+    console.log(`     → ${result.blockingCount} constructor usages, ${result.patternCount} patterns\n`);
   }
 
   // ===== TEST 2: Analyze EventCancelled usages =====

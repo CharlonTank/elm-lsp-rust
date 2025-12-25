@@ -22,6 +22,7 @@ const CMD_RENAME_VARIANT: &str = "elm.renameVariant";
 const CMD_RENAME_TYPE: &str = "elm.renameType";
 const CMD_RENAME_FUNCTION: &str = "elm.renameFunction";
 const CMD_NOTIFY_FILE_RENAMED: &str = "elm.notifyFileRenamed";
+const CMD_GENERATE_ERD: &str = "elm.generateErd";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -677,6 +678,7 @@ impl LanguageServer for ElmLanguageServer {
                         CMD_REMOVE_VARIANT.to_string(),
                         CMD_RENAME_FILE.to_string(),
                         CMD_MOVE_FILE.to_string(),
+                        CMD_GENERATE_ERD.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -1490,7 +1492,8 @@ impl LanguageServer for ElmLanguageServer {
 
                     let blocking_count = blocking_usages.len();
                     let pattern_count = pattern_usages.len();
-                    let can_remove = total > 1 && blocking_count == 0;
+                    // Can always remove if more than 1 variant - constructor usages will be replaced with Debug.todo
+                    let can_remove = total > 1;
 
                     // Other variants (excluding the one being removed)
                     let other_variants: Vec<&String> = all_variants.iter()
@@ -2094,6 +2097,56 @@ impl LanguageServer for ElmLanguageServer {
                         Ok(Some(serde_json::json!({
                             "success": false,
                             "error": e.to_string()
+                        })))
+                    }
+                }
+            }
+            CMD_GENERATE_ERD => {
+                // Expected arguments: [file_uri, type_name]
+                if params.arguments.len() != 2 {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "Expected 2 arguments: file_uri, type_name"
+                    })));
+                }
+
+                let file_uri: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let type_name: String = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&file_uri)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                tracing::info!("Generating ERD for type {} in {}", type_name, uri);
+
+                let erd_result = {
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.generate_erd(&type_name, &uri)
+                        } else {
+                            Err("Workspace not initialized".to_string())
+                        }
+                    } else {
+                        Err("Could not acquire workspace lock".to_string())
+                    }
+                };
+
+                match erd_result {
+                    Ok(result) => {
+                        let mermaid = result.to_mermaid();
+                        Ok(Some(serde_json::json!({
+                            "success": true,
+                            "mermaid": mermaid,
+                            "entities": result.entities.len(),
+                            "relationships": result.relationships.len(),
+                            "warnings": result.warnings
+                        })))
+                    }
+                    Err(e) => {
+                        Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": e
                         })))
                     }
                 }

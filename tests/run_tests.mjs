@@ -614,7 +614,7 @@ async function testRemoveVariantWithDebugTodo() {
         throw new Error("Blue variant should be removed from type definition");
       }
 
-      if (!newContent.includes('Debug.todo "VARIANT REMOVAL DONE: Blue"')) {
+      if (!newContent.includes('Debug.todo "FIXME: Variant Removal: Blue"')) {
         throw new Error("Blue constructor usage should be replaced with Debug.todo");
       }
 
