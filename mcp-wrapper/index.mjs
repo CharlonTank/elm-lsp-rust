@@ -267,15 +267,31 @@ class ElmLspClient {
   }
 }
 
-// Global LSP client
+// Global LSP client with mutex to prevent race conditions
 let lspClient = null;
+let clientInitPromise = null;
 
 async function ensureClient(workspaceRoot) {
+  // If initialization is in progress, wait for it
+  if (clientInitPromise) {
+    await clientInitPromise;
+    // After waiting, check if the workspace matches
+    if (lspClient && lspClient.initialized && lspClient.workspaceRoot === workspaceRoot) {
+      return lspClient;
+    }
+  }
+
+  // Need to (re)initialize - create the promise to prevent concurrent initialization
   if (!lspClient) {
     lspClient = new ElmLspClient();
   }
   if (!lspClient.initialized || lspClient.workspaceRoot !== workspaceRoot) {
-    await lspClient.start(workspaceRoot);
+    clientInitPromise = lspClient.start(workspaceRoot);
+    try {
+      await clientInitPromise;
+    } finally {
+      clientInitPromise = null;
+    }
   }
   return lspClient;
 }
@@ -283,6 +299,17 @@ async function ensureClient(workspaceRoot) {
 // Resolve relative paths to absolute paths
 function resolveFilePath(filePath) {
   return resolve(filePath);
+}
+
+// Validate that a path is within the workspace boundary
+function validateInWorkspace(absPath, workspaceRoot) {
+  if (!workspaceRoot) return; // No validation if no workspace
+  // Normalize both paths to handle symlinks and trailing slashes
+  const normalizedPath = resolve(absPath);
+  const normalizedRoot = resolve(workspaceRoot);
+  if (!normalizedPath.startsWith(normalizedRoot + "/") && normalizedPath !== normalizedRoot) {
+    throw new Error(`Path ${normalizedPath} is outside workspace ${normalizedRoot}`);
+  }
 }
 
 // Find workspace root from a file path
@@ -300,12 +327,23 @@ function findWorkspaceRoot(filePath) {
 }
 
 // Apply workspace edits returned by rename
-async function applyWorkspaceEdit(changes, client = null) {
+async function applyWorkspaceEdit(changes, client = null, workspaceRoot = null) {
   const applied = [];
   const changedFiles = [];
 
   for (const [fileUri, edits] of Object.entries(changes)) {
-    const filePath = fileUri.replace("file://", "");
+    const filePath = new URL(fileUri).pathname;
+
+    // Validate path is within workspace before writing
+    if (workspaceRoot) {
+      try {
+        validateInWorkspace(filePath, workspaceRoot);
+      } catch (e) {
+        console.error(`Skipping edit outside workspace: ${filePath}`);
+        continue;
+      }
+    }
+
     if (!existsSync(filePath)) continue;
 
     let content = readFileSync(filePath, "utf-8");
@@ -390,7 +428,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `Definition at ${loc.uri.replace("file://", "")}:${loc.range.start.line + 1}:${loc.range.start.character}`,
+        text: `Definition at ${new URL(loc.uri).pathname}:${loc.range.start.line + 1}:${loc.range.start.character}`,
       }],
     };
   }
@@ -422,7 +460,7 @@ server.tool(
     }
 
     const refs = result.map(
-      (r) => `${r.uri.replace("file://", "")}:${r.range.start.line + 1}:${r.range.start.character}`
+      (r) => `${new URL(r.uri).pathname}:${r.range.start.line + 1}:${r.range.start.character}`
     );
     return {
       content: [{
@@ -502,12 +540,13 @@ server.tool(
   },
   async ({ file_path }) => {
     // Use elm-format directly since our LSP doesn't implement formatting
-    const { exec } = await import("child_process");
+    // Using execFile instead of exec to prevent command injection
+    const { execFile } = await import("child_process");
     const { promisify } = await import("util");
-    const execAsync = promisify(exec);
+    const execFileAsync = promisify(execFile);
 
     try {
-      await execAsync(`elm-format --yes "${file_path}"`);
+      await execFileAsync("elm-format", ["--yes", file_path]);
       return { content: [{ type: "text", text: `Successfully formatted ${file_path}` }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error formatting: ${error.message}` }] };
@@ -621,7 +660,7 @@ server.tool(
     }
 
     if (action.edit?.changes) {
-      const applied = await applyWorkspaceEdit(action.edit.changes, client);
+      const applied = await applyWorkspaceEdit(action.edit.changes, client, workspaceRoot);
       const summary = applied.map((a) => `${a.path}: ${a.edits} edits`).join("\n");
       return { content: [{ type: "text", text: `Applied "${action_title}":\n${summary}` }] };
     }
@@ -675,7 +714,7 @@ server.tool(
 
     // Apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes, client);
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -739,7 +778,7 @@ server.tool(
 
     // Apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes, client);
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -803,7 +842,7 @@ server.tool(
 
     // Apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes, client);
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -869,7 +908,7 @@ server.tool(
     }
 
     // Apply the changes
-    const applied = await applyWorkspaceEdit(result.changes, client);
+    const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
     const fileCount = applied.length;
     const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -900,6 +939,14 @@ server.tool(
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    // Validate both paths are within workspace
+    try {
+      validateInWorkspace(absPath, workspaceRoot);
+      validateInWorkspace(absTargetModule, workspaceRoot);
+    } catch (e) {
+      return { content: [{ type: "text", text: e.message }] };
     }
 
     if (!existsSync(absTargetModule)) {
@@ -1365,7 +1412,7 @@ server.tool(
 
     // Success - apply the changes
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes, client);
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -1425,7 +1472,7 @@ server.tool(
 
     // Apply the text edits (module declarations and imports)
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes, client);
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -1475,6 +1522,13 @@ server.tool(
       return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
     }
 
+    // Validate source path is within workspace
+    try {
+      validateInWorkspace(absPath, workspaceRoot);
+    } catch (e) {
+      return { content: [{ type: "text", text: e.message }] };
+    }
+
     if (!target_path.endsWith(".elm")) {
       return { content: [{ type: "text", text: "Target path must end with .elm" }] };
     }
@@ -1483,9 +1537,13 @@ server.tool(
     let relativeTargetPath = target_path;
     if (target_path.startsWith("/")) {
       const absTarget = resolveFilePath(target_path);
-      if (absTarget.startsWith(workspaceRoot)) {
-        relativeTargetPath = absTarget.slice(workspaceRoot.length + 1); // +1 for the /
+      // Validate target path is within workspace
+      try {
+        validateInWorkspace(absTarget, workspaceRoot);
+      } catch (e) {
+        return { content: [{ type: "text", text: e.message }] };
       }
+      relativeTargetPath = absTarget.slice(workspaceRoot.length + 1); // +1 for the /
     }
 
     const client = await ensureClient(workspaceRoot);
@@ -1505,7 +1563,7 @@ server.tool(
 
     // Apply the text edits (module declarations and imports)
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes, client);
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 
@@ -1739,7 +1797,7 @@ server.tool(
 
     // Apply the text edits
     if (result.changes) {
-      const applied = await applyWorkspaceEdit(result.changes, client);
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
       const fileCount = applied.length;
       const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
 

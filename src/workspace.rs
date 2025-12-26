@@ -493,13 +493,40 @@ impl Workspace {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "double_dot" => return ExposingInfo::All,
-                "exposed_value" | "exposed_type" => {
+                "exposed_value" => {
                     let mut inner_cursor = child.walk();
                     for inner_child in child.children(&mut inner_cursor) {
-                        if inner_child.kind() == "lower_case_identifier"
-                            || inner_child.kind() == "upper_case_identifier"
-                        {
+                        if inner_child.kind() == "lower_case_identifier" {
                             exposed.push(source[inner_child.byte_range()].to_string());
+                        }
+                    }
+                }
+                "exposed_type" => {
+                    // Capture the full exposed type including (..) if present
+                    // e.g., "EventType(..)" should be stored as "EventType(..)"
+                    let mut type_name = String::new();
+                    let mut has_all_constructors = false;
+                    let mut inner_cursor = child.walk();
+                    for inner_child in child.children(&mut inner_cursor) {
+                        match inner_child.kind() {
+                            "upper_case_identifier" => {
+                                type_name = source[inner_child.byte_range()].to_string();
+                            }
+                            "exposed_union_constructors" => {
+                                // Check if it's (..) meaning all constructors
+                                let text = &source[inner_child.byte_range()];
+                                if text.contains("..") {
+                                    has_all_constructors = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !type_name.is_empty() {
+                        if has_all_constructors {
+                            exposed.push(format!("{}(..)", type_name));
+                        } else {
+                            exposed.push(type_name);
                         }
                     }
                 }
@@ -571,16 +598,6 @@ impl Workspace {
     ) {
         // Debug: trace all nodes at line 132
         if node.start_position().row == 131 && uri.path().contains("Group.elm") {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/elm_debug.log")
-            {
-                let _ = writeln!(f, "line 132, type={}, text={:?}",
-                    node.kind(),
-                    source.get(node.byte_range()).unwrap_or("").chars().take(30).collect::<String>());
-            }
         }
 
         match node.kind() {
@@ -589,14 +606,6 @@ impl Workspace {
                 let is_in_import = self.is_module_name_in_import(node);
                 // Debug: trace EventId specifically
                 if text_check == "EventId" && node.start_position().row == 131 {
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/elm_debug.log")
-                    {
-                        let _ = writeln!(f, "QID EventId at 132: is_in_import={}", is_in_import);
-                    }
                 }
 
                 if !is_in_import {
@@ -634,14 +643,6 @@ impl Workspace {
 
                         // Debug: trace EventId resolved name
                         if text == "EventId" && node.start_position().row == 131 {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_debug.log")
-                            {
-                                let _ = writeln!(f, "QID EventId adding ref: resolved_name={}, kind={:?}", resolved_name, kind);
-                            }
                         }
 
                         self.references
@@ -1056,31 +1057,6 @@ impl Workspace {
         } else {
             symbol_name
         };
-
-        // Debug: trace EventId
-        if base_name == "EventId" {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/elm_debug.log")
-            {
-                let _ = writeln!(f, "\nfind_module_aware_references: EventId, defining_module={}, uri={}",
-                    defining_module, defining_uri.as_str());
-                // Check what refs we have stored
-                if let Some(refs) = self.references.get("EventId") {
-                    let _ = writeln!(f, "  Found {} refs under 'EventId'", refs.len());
-                    // Show all refs in Group.elm
-                    for r in refs.iter() {
-                        if r.uri.path().contains("Group.elm") {
-                            let _ = writeln!(f, "    - line {} kind={:?}", r.range.start.line + 1, r.kind);
-                        }
-                    }
-                } else {
-                    let _ = writeln!(f, "  No refs found under 'EventId'");
-                }
-            }
-        }
 
         tracing::debug!(
             "find_module_aware_references: symbol={}, defining_module={}, defining_uri={}",
@@ -1730,7 +1706,7 @@ impl Workspace {
     pub fn remove_variant(
         &self,
         uri: &Url,
-        _type_name: &str,
+        type_name: &str,
         variant_name: &str,
         _variant_index: usize,
         total_variants: usize,
@@ -1740,8 +1716,11 @@ impl Workspace {
             return Ok(RemoveVariantResult::error("Cannot remove the only variant from a type"));
         }
 
+        // Get the source module name for proper filtering
+        let source_module = self.get_module_name_from_uri(uri);
+
         // 2. Check for usages and separate by type
-        let usages = self.get_variant_usages(uri, variant_name);
+        let usages = self.get_variant_usages(uri, variant_name, Some(&source_module));
 
         // Constructor usages - will be replaced with Debug.todo
         let constructor_usages: Vec<_> = usages
@@ -1963,7 +1942,7 @@ impl Workspace {
     }
 
     /// Get the module name from a URI
-    fn get_module_name_from_uri(&self, uri: &Url) -> String {
+    pub fn get_module_name_from_uri(&self, uri: &Url) -> String {
         let path = match uri.to_file_path() {
             Ok(p) => p,
             Err(_) => return String::new(),
@@ -2070,9 +2049,15 @@ impl Workspace {
     }
 
     /// Get usages of a variant and determine if they are blocking
-    pub fn get_variant_usages(&self, source_uri: &Url, variant_name: &str) -> Vec<VariantUsage> {
+    /// source_module_name: The module where the variant is defined (e.g., "Router" for Router.RentReceipts)
+    pub fn get_variant_usages(&self, source_uri: &Url, variant_name: &str, source_module_name: Option<&str>) -> Vec<VariantUsage> {
         let refs = self.find_references(variant_name, None);
         let mut usages = Vec::new();
+
+        // Get the source module name if not provided
+        let source_module = source_module_name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.get_module_name_from_uri(source_uri));
 
         // Get the variant definition line to skip it
         let source_path = source_uri.to_file_path().ok();
@@ -2131,21 +2116,35 @@ impl Workspace {
                 None => continue,
             };
 
-            let module_name = self.get_module_name_from_uri(&uri);
+            let ref_module_name = self.get_module_name_from_uri(&uri);
 
-            // Check if this file has a LOCAL type definition with the same variant name
-            // This happens when a module defines its own type with the same variant (shadowing)
-            let has_local_variant = if uri != *source_uri {
-                // Look for "= VariantName" or "| VariantName" in type definitions
-                // that indicates a LOCAL variant with the same name
-                content.lines().any(|line| {
-                    let trimmed = line.trim();
-                    (trimmed.starts_with('=') || trimmed.starts_with('|'))
-                        && trimmed.split_whitespace().nth(1) == Some(variant_name)
-                })
-            } else {
-                false
-            };
+            // Get imports for this file to check if variant is imported from source module
+            let file_imports = self.modules.values()
+                .find(|m| m.path == uri.to_file_path().unwrap_or_default())
+                .map(|m| m.imports.clone())
+                .unwrap_or_default();
+
+            // Check if this file imports the variant from the source module
+            let imports_from_source = file_imports.iter().any(|import| {
+                if import.module_name == source_module {
+                    match &import.exposing {
+                        ExposingInfo::All => true,
+                        ExposingInfo::Explicit(exposed) => {
+                            // Check if variant is exposed directly or via type(..)
+                            exposed.iter().any(|e| {
+                                e == variant_name || e.contains("(..)")
+                            })
+                        }
+                    }
+                } else {
+                    false
+                }
+            });
+
+            // Get the alias used for the source module (if any)
+            let source_module_alias = file_imports.iter()
+                .find(|import| import.module_name == source_module)
+                .and_then(|import| import.alias.clone());
 
             // Process all refs in this file with the cached tree
             for r in file_refs {
@@ -2162,17 +2161,32 @@ impl Workspace {
                     continue;
                 }
 
-                // If this file has a local variant with the same name, skip unqualified usages
-                // to avoid incorrectly modifying code that uses the local type
-                if has_local_variant {
-                    // Check if this is a qualified reference (like Event.MeetOnline)
-                    let line = content.lines().nth(position.line as usize).unwrap_or("");
-                    let col = position.character as usize;
-                    let before_pos = if col > 0 && col <= line.len() { &line[..col] } else { "" };
-                    // If there's no dot before the variant name, it's unqualified - skip it
-                    if !before_pos.ends_with('.') {
-                        continue;
-                    }
+                // Check if this reference is actually from the source module
+                let line = content.lines().nth(position.line as usize).unwrap_or("");
+                let col = position.character as usize;
+                let before_pos = if col > 0 && col <= line.len() { &line[..col] } else { "" };
+
+                let is_from_source_module = if uri == *source_uri {
+                    // Same file as definition - it's our variant
+                    true
+                } else if before_pos.ends_with('.') {
+                    // Qualified reference - extract the qualifier and check
+                    let qualifier = before_pos.trim_end_matches('.')
+                        .rsplit(|c: char| !c.is_alphanumeric() && c != '.')
+                        .next()
+                        .unwrap_or("");
+
+                    // Check if qualifier matches source module or its alias
+                    qualifier == source_module
+                        || qualifier == source_module.rsplit('.').next().unwrap_or(&source_module)
+                        || source_module_alias.as_ref().map(|a| a == qualifier).unwrap_or(false)
+                } else {
+                    // Unqualified reference - only valid if imported from source module
+                    imports_from_source
+                };
+
+                if !is_from_source_module {
+                    continue;
                 }
 
                 // Get pattern branch range using pre-parsed tree
@@ -2215,7 +2229,7 @@ impl Workspace {
                     } else {
                         Some(function_name)
                     },
-                    module_name: module_name.clone(),
+                    module_name: ref_module_name.clone(),
                     call_chain: Vec::new(),
                     usage_type,
                     pattern_branch_range,
@@ -3726,26 +3740,11 @@ impl Workspace {
         position: Position,
         content: &str,
     ) -> Option<FieldInfo> {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "get_field_at_position: uri={}, pos={:?}", uri.as_str(), position);
-        }
 
         // Use the cached tree from the type checker to ensure node IDs match
         let tree = match self.type_checker.get_tree(uri.as_str()) {
             Some(t) => t,
             None => {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "  NO TREE cached for {}", uri.as_str());
-                }
                 return None;
             }
         };
@@ -3755,36 +3754,15 @@ impl Workspace {
         let point = tree_sitter::Point::new(position.line as usize, position.character as usize);
         let node = match Self::find_node_at_point(root, point) {
             Some(n) => {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "  found node kind={}, text={}", n.kind(), n.utf8_text(content.as_bytes()).unwrap_or("?"));
-                }
                 n
             }
             None => {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "  no node at point");
-                }
                 return None;
             }
         };
 
         // Check if this is a field reference
         let field_def = self.type_checker.find_field_definition(uri.as_str(), node, content);
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "  find_field_definition returned: {:?}", field_def.as_ref().map(|d| &d.name));
-        }
         let field_def = field_def?;
 
         // Calculate the range for just the field name
@@ -3859,43 +3837,14 @@ impl Workspace {
             // Find all field usages in this file
             let usages = self.find_field_usages_in_tree(tree, content, field_name);
 
-            // Debug: log all usages found
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/elm_field_rename_debug.log")
-            {
-                let _ = writeln!(f, "find_field_references: {} usages found in {}", usages.len(), file_uri.path());
-                for (node_id, range) in &usages {
-                    let _ = writeln!(f, "  usage: line {}, col {}, node_id={}", range.start.line + 1, range.start.character, node_id);
-                }
-            }
-
             for (node_id, range) in usages {
                 // Skip the definition itself (already added)
                 if file_uri.as_str() == definition.uri && node_id == definition.node_id {
                     continue;
                 }
 
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "  processing usage: line {}, col {}, node_id={}", range.start.line + 1, range.start.character, node_id);
-                }
-
                 // Find the node to check if it resolves to the same definition
                 if let Some(node) = Self::find_node_by_id(tree.root_node(), node_id) {
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/elm_field_rename_debug.log")
-                    {
-                        let _ = writeln!(f, "    found node: kind={}, parent_kind={:?}", node.kind(), node.parent().map(|p| p.kind()));
-                    }
                     // Use type checker to resolve this field reference
                     // Pass target to filter structural matches to only the type alias we're renaming
                     let ref_def = if let Some(ref target) = target {
@@ -4023,15 +3972,6 @@ impl Workspace {
         if node_kind == "lower_case_identifier" || node_kind == "lower_pattern" {
             if let Ok(text) = node.utf8_text(source.as_bytes()) {
                 if text == field_name {
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/elm_field_rename_debug.log")
-                    {
-                        let _ = writeln!(f, "WALK: found {} at line {} col {}, node_kind={}, parent_kind={:?}",
-                            field_name, node.start_position().row + 1, node.start_position().column,
-                            node_kind, parent_kind);
-                    }
                 }
             }
         }
@@ -4053,19 +3993,6 @@ impl Workspace {
                     let matches = first_child
                         .map(|n| n.id() == node.id() && n.kind() == "lower_case_identifier")
                         .unwrap_or(false);
-                    // Debug: log why it might fail
-                    if !matches {
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/tmp/elm_field_rename_debug.log")
-                        {
-                            let fc_info = first_child.map(|n| (n.kind().to_string(), n.id(), n.utf8_text(source.as_bytes()).unwrap_or("?").to_string()));
-                            let _ = writeln!(f, "  FIELD CHECK FAILED: line {} col {}, first_child={:?}, this_node_id={}",
-                                node.start_position().row + 1, node.start_position().column,
-                                fc_info, node.id());
-                        }
-                    }
                     matches
                 } else {
                     false

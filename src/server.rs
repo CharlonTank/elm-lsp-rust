@@ -1160,28 +1160,11 @@ impl LanguageServer for ElmLanguageServer {
         let position = params.text_document_position.position;
         let new_name = params.new_name;
 
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "\n=== RENAME START ===");
-            let _ = writeln!(f, "uri={}, pos={:?}, new_name={}", uri.as_str(), position, new_name);
-        }
-
         // First check if this is a field rename
         if let Some(doc) = self.documents.get(uri) {
             if let Ok(ws) = self.workspace.read() {
                 if let Some(workspace) = ws.as_ref() {
                     let field_result = workspace.get_field_at_position(uri, position, &doc.text);
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/elm_field_rename_debug.log")
-                    {
-                        let _ = writeln!(f, "get_field_at_position returned {:?}", field_result.as_ref().map(|fi| &fi.name));
-                    }
                     if let Some(field_info) = field_result {
                         tracing::info!(
                             "Renaming field {} in type alias {:?} to {}",
@@ -1201,19 +1184,6 @@ impl LanguageServer for ElmLanguageServer {
                             // explicit binding syntax `{ userEmail = email }`. So we just rename
                             // the field directly. This changes both the field and the bound variable.
                             // TODO: Also rename all usages of the old variable in the function scope.
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "  EDIT: {:?} line {} col {}-{} kind={:?} -> '{}'",
-                                    r.uri.path().split('/').last().unwrap_or(""),
-                                    r.range.start.line + 1,
-                                    r.range.start.character, r.range.end.character,
-                                    r.kind,
-                                    new_name
-                                );
-                            }
                             changes
                                 .entry(r.uri)
                                 .or_insert_with(Vec::new)
@@ -1225,38 +1195,16 @@ impl LanguageServer for ElmLanguageServer {
 
                         if !changes.is_empty() {
                             let total_edits: usize = changes.values().map(|v| v.len()).sum();
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "field rename returning {} files, {} total edits", changes.len(), total_edits);
-                            }
                             tracing::info!("Field rename affects {} files", changes.len());
                             return Ok(Some(WorkspaceEdit {
                                 changes: Some(changes),
                                 ..Default::default()
                             }));
                         } else {
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "field rename found no changes, falling through to symbol rename");
-                            }
                         }
                     }
                 }
             }
-        }
-
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "FALLING THROUGH to symbol rename path");
         }
         // Fall back to symbol rename
         let symbol_name = if let Some(doc) = self.documents.get(uri) {
@@ -1474,7 +1422,8 @@ impl LanguageServer for ElmLanguageServer {
                     // Get all usages
                     let all_usages = if let Ok(ws) = self.workspace.read() {
                         if let Some(workspace) = ws.as_ref() {
-                            workspace.get_variant_usages(&uri, &variant.name)
+                            let module_name = workspace.get_module_name_from_uri(&uri);
+                            workspace.get_variant_usages(&uri, &variant.name, Some(&module_name))
                         } else {
                             Vec::new()
                         }

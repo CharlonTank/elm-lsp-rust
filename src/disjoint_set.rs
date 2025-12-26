@@ -3,7 +3,7 @@
 //! This data structure maps type variables to their unified types,
 //! with path compression for efficient lookups.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::types::Type;
 
 /// Disjoint set for type variable substitutions
@@ -29,22 +29,22 @@ impl DisjointSet {
     }
 
     /// Get the canonical (fully resolved) type for a given type.
-    /// Follows the substitution chain with path compression.
+    /// Follows the substitution chain to find the root type.
     pub fn get(&self, ty: &Type) -> Type {
         match ty {
             Type::Var(var) => {
                 let mut current_id = var.id;
-                let mut path = vec![current_id];
+                let mut visited = HashSet::new();
+                visited.insert(current_id);
 
-                // Follow the chain
+                // Follow the chain with O(1) cycle detection
                 while let Some(next_type) = self.map.get(&current_id) {
                     match next_type {
                         Type::Var(next_var) => {
-                            if path.contains(&next_var.id) {
-                                // Cycle detected, return current
+                            if !visited.insert(next_var.id) {
+                                // Cycle detected (insert returns false if already present)
                                 return ty.clone();
                             }
-                            path.push(next_var.id);
                             current_id = next_var.id;
                         }
                         other => {

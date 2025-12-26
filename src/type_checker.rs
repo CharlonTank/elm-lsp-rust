@@ -114,15 +114,6 @@ impl TypeChecker {
         let parent_kind = node.parent().map(|p| p.kind());
         let node_text = node.utf8_text(source.as_bytes()).unwrap_or("");
 
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "    find_field_definition: node_kind={}, parent_kind={:?}, text={}, target={:?}", node_kind, parent_kind, node_text, target_alias.map(|t| &t.name));
-        }
-
         // Check if this is a field reference
         let field_name = match (node_kind, parent_kind) {
             // Field in type definition
@@ -210,36 +201,13 @@ impl TypeChecker {
                 // This is the definition itself
                 // Find the enclosing type alias
                 let type_alias_opt = self.find_enclosing_type_alias(parent);
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      resolve: find_enclosing_type_alias returned {:?}", type_alias_opt.map(|n| n.kind()));
-                }
                 let type_alias = type_alias_opt?;
                 let alias_name = self.get_type_alias_name(&type_alias, source)?;
                 let module_name = self.get_module_name(uri, source);
 
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      resolve: SUCCESS field={}, type_alias={}, module={}", field_name, alias_name, module_name);
-                }
-
                 // If target is specified, only return if this field belongs to the target type alias
                 if let Some(target) = target_alias {
                     if alias_name != target.name || module_name != target.module {
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/tmp/elm_field_rename_debug.log")
-                        {
-                            let _ = writeln!(f, "      resolve: SKIPPING - wrong type alias (expected {}.{}, got {}.{})",
-                                target.module, target.name, module_name, alias_name);
-                        }
                         return None;
                     }
                 }
@@ -258,31 +226,10 @@ impl TypeChecker {
                 // Get the target's type
                 let target = parent.child_by_field_name("target")?;
                 let target_text = target.utf8_text(source.as_bytes()).unwrap_or("?");
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      field_access_expr: target kind={}, text={}", target.kind(), target_text);
-                }
                 let target_type = self.infer_type_of_node(uri, target, source);
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      field_access_expr: inferred type={:?}", target_type);
-                }
 
                 if let Some(target_type) = target_type {
                     let result = self.field_definition_from_type_impl(&target_type, field_name, uri, target_alias);
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/elm_field_rename_debug.log")
-                    {
-                        let _ = writeln!(f, "      field_access_expr: result={:?}", result.as_ref().map(|d| (&d.type_alias_name, &d.module_name)));
-                    }
 
                     // If type-based resolution failed and target is a simple variable,
                     // try to collect all field accesses on that variable in the scope
@@ -290,22 +237,8 @@ impl TypeChecker {
                         // First, try to resolve the type from pattern binding (e.g., `(Group a)`)
                         if let Some(decl) = Self::find_containing_value_declaration(target) {
                             if let Some(pattern_type) = self.try_resolve_from_pattern_binding(target_text, decl, uri, source) {
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/elm_field_rename_debug.log")
-                                {
-                                    let _ = writeln!(f, "      field_access_expr: pattern binding type={}", pattern_type);
-                                }
                                 // Found a constructor pattern - use the constructor's record fields
                                 if let Some(def) = self.find_field_in_custom_type(&pattern_type, field_name, uri, target_alias) {
-                                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                                        .create(true)
-                                        .append(true)
-                                        .open("/tmp/elm_field_rename_debug.log")
-                                    {
-                                        let _ = writeln!(f, "      field_access_expr: found via pattern binding={:?}", (&def.type_alias_name, &def.module_name));
-                                    }
                                     return Some(def);
                                 }
                             }
@@ -314,34 +247,12 @@ impl TypeChecker {
                         if let Some(scope) = self.find_enclosing_scope(parent) {
                             let scope_text = scope.utf8_text(source.as_bytes()).unwrap_or("?");
                             let scope_preview: String = scope_text.chars().take(50).collect();
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "      field_access_expr: scope kind={}, preview={}...", scope.kind(), scope_preview);
-                            }
                             let all_fields = self.collect_field_accesses_on_variable(target_text, scope, source);
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "      field_access_expr: scope-collected fields={:?}", all_fields);
-                            }
                             // If we found at least 2 fields, use structural matching
                             if all_fields.len() >= 2 {
                                 // For structural matching, find the ACTUAL type first (without target filter)
                                 // then verify it matches the target
                                 let result = self.find_type_alias_by_fields(&all_fields, field_name, uri, None);
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/elm_field_rename_debug.log")
-                                {
-                                    let _ = writeln!(f, "      field_access_expr: structural match result={:?}",
-                                        result.as_ref().map(|d| (&d.type_alias_name, &d.module_name)));
-                                }
                                 if let Some(ref def) = result {
                                     // If we have a target, only return if the found type matches
                                     if let Some(target) = target_alias {
@@ -357,13 +268,6 @@ impl TypeChecker {
                                 }
                             }
                         } else {
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "      field_access_expr: NO SCOPE FOUND");
-                            }
                         }
                     }
 
@@ -376,38 +280,14 @@ impl TypeChecker {
                             // Recursively resolve the target field_access_expr to get its type
                             // We don't filter by target here - we want the actual type
                             if let Some(target_def) = self.find_field_definition(uri, target_field, source) {
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/elm_field_rename_debug.log")
-                                {
-                                    let _ = writeln!(f, "      field_access_expr: chained - resolved {} to {:?}",
-                                        target_field_name, (&target_def.type_alias_name, &target_def.module_name));
-                                }
                                 // Get the field's type from the target type
                                 if let Some(ref type_alias_name) = target_def.type_alias_name {
                                     // Look up the type alias and find the field's type
                                     if let Some(field_type) = self.get_field_type_from_type_alias(
                                         type_alias_name, &target_def.module_name, target_field_name, uri
                                     ) {
-                                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                                            .create(true)
-                                            .append(true)
-                                            .open("/tmp/elm_field_rename_debug.log")
-                                        {
-                                            let _ = writeln!(f, "      field_access_expr: chained - field {} has type {:?}",
-                                                target_field_name, field_type);
-                                        }
                                         // Now look for our field in that type
                                         if let Some(def) = self.find_field_in_type_alias_or_custom_type(&field_type, field_name, uri, target_alias) {
-                                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                                .create(true)
-                                                .append(true)
-                                                .open("/tmp/elm_field_rename_debug.log")
-                                            {
-                                                let _ = writeln!(f, "      field_access_expr: chained - found {:?}",
-                                                    (&def.type_alias_name, &def.module_name));
-                                            }
                                             return Some(def);
                                         }
                                     }
@@ -427,46 +307,18 @@ impl TypeChecker {
                 let record_expr = match parent.parent() {
                     Some(r) => r,
                     None => {
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/tmp/elm_field_rename_debug.log")
-                        {
-                            let _ = writeln!(f, "      field: no parent.parent() for {}", field_name);
-                        }
                         return None;
                     }
                 };
                 tracing::debug!("find_field_definition(field): record_expr kind = {:?}", record_expr.kind());
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      field: record_expr.kind()={}", record_expr.kind());
-                }
                 if record_expr.kind() == "record_expr" {
                     // Check if there's a base record (record update syntax like { a | name = ... })
                     let base_opt = record_expr.children(&mut record_expr.walk())
                         .find(|c| c.kind() == "record_base_identifier");
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/elm_field_rename_debug.log")
-                    {
-                        let _ = writeln!(f, "      field: has record_base_identifier={}", base_opt.is_some());
-                    }
                     if let Some(base) = base_opt {
                         let base_text = base.utf8_text(source.as_bytes()).unwrap_or("?");
                         let base_type = self.infer_type_of_node(uri, base, source);
                         tracing::debug!("find_field_definition(field): base type = {:?}", base_type);
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/tmp/elm_field_rename_debug.log")
-                        {
-                            let _ = writeln!(f, "      field: base={}, inferred_type={:?}", base_text, base_type);
-                        }
                         if let Some(ref base_type) = base_type {
                             let result = self.field_definition_from_type_impl(base_type, field_name, uri, target_alias);
                             if result.is_some() {
@@ -477,37 +329,16 @@ impl TypeChecker {
                         // Try pattern binding resolution (e.g., `(Group a)` -> a is Group)
                         if let Some(decl) = Self::find_containing_value_declaration(record_expr) {
                             if let Some(pattern_type) = self.try_resolve_from_pattern_binding(base_text, decl, uri, source) {
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/elm_field_rename_debug.log")
-                                {
-                                    let _ = writeln!(f, "      field(record_update): pattern binding type={}", pattern_type);
-                                }
                                 // Found a constructor pattern - use the constructor's record fields
                                 // Try to find the field in this custom type
                                 // If we have a target and the pattern type is NOT the target,
                                 // we should NOT fall through to structural matching
                                 if let Some(def) = self.find_field_in_custom_type(&pattern_type, field_name, uri, target_alias) {
-                                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                                        .create(true)
-                                        .append(true)
-                                        .open("/tmp/elm_field_rename_debug.log")
-                                    {
-                                        let _ = writeln!(f, "      field(record_update): found via pattern binding={:?}", (&def.type_alias_name, &def.module_name));
-                                    }
                                     return Some(def);
                                 }
                                 // If we found a pattern type but couldn't find the field matching our target,
                                 // it means this field belongs to a different type. Don't fall through to structural matching.
                                 if target_alias.is_some() {
-                                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                                        .create(true)
-                                        .append(true)
-                                        .open("/tmp/elm_field_rename_debug.log")
-                                    {
-                                        let _ = writeln!(f, "      field(record_update): pattern type {} doesn't match target, rejecting", pattern_type);
-                                    }
                                     return None;
                                 }
                             }
@@ -515,22 +346,8 @@ impl TypeChecker {
 
                         // Try lambda parameter type resolution (e.g., Cache.map (\a -> { a | name = ... }) cache)
                         if let Some(lambda_type) = self.try_resolve_lambda_param_type(base_text, record_expr, uri, source) {
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "      field(record_update): lambda param type={}", lambda_type);
-                            }
                             // Found a type from lambda context - look for the field in that type
                             if let Some(def) = self.find_field_in_type_alias_by_name(&lambda_type, field_name, uri, target_alias) {
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/elm_field_rename_debug.log")
-                                {
-                                    let _ = writeln!(f, "      field(record_update): found via lambda type={:?}", (&def.type_alias_name, &def.module_name));
-                                }
                                 return Some(def);
                             }
                         }
@@ -546,13 +363,6 @@ impl TypeChecker {
                                 if !combined_fields.contains(&f) {
                                     combined_fields.push(f);
                                 }
-                            }
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "      field(record_update): base={}, combined_fields={:?}", base_text, combined_fields);
                             }
 
                             // For structural matching, require at least 2 fields normally
@@ -586,14 +396,6 @@ impl TypeChecker {
                                             false
                                         }
                                     };
-
-                                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                                        .create(true)
-                                        .append(true)
-                                        .open("/tmp/elm_field_rename_debug.log")
-                                    {
-                                        let _ = writeln!(f, "      single-field check: target_matches={}, other_count={}, base_is_lambda_param={}", target_matches, other_count, base_is_lambda_param);
-                                    }
 
                                     // For single-field matches:
                                     // - If base is a lambda parameter: accept if target matches (trust mapping context)
@@ -670,23 +472,8 @@ impl TypeChecker {
             "record_pattern" => {
                 // Try to get the type being matched
                 let pattern_type = self.get_type(uri, parent.id());
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      record_pattern: pattern type = {:?}", pattern_type);
-                }
                 if let Some(ref pattern_type) = pattern_type {
                     let def = self.field_definition_from_type_impl(pattern_type, field_name, uri, target_alias);
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/elm_field_rename_debug.log")
-                    {
-                        let _ = writeln!(f, "      record_pattern: field_definition_from_type_impl returned {:?}",
-                            def.as_ref().map(|d| (&d.type_alias_name, &d.module_name)));
-                    }
                     if let Some(def) = def {
                         return Some(def);
                     }
@@ -694,13 +481,6 @@ impl TypeChecker {
 
                 // Fallback: collect fields from the record pattern and use structural matching
                 let record_fields = self.collect_pattern_fields(parent, source);
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      record_pattern: collected fields = {:?}", record_fields);
-                }
                 // Require at least 2 fields to avoid false positives
                 if record_fields.len() >= 2 {
                     // For structural matching, find the ACTUAL type first (without target filter)
@@ -993,14 +773,6 @@ impl TypeChecker {
         // Find the containing lambda (anonymous_function_expr)
         let lambda = Self::find_containing_node_of_kind(node, "anonymous_function_expr")?;
 
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "      try_resolve_lambda_param_type: found lambda, looking for param {}", var_name);
-        }
-
         // Check if var_name is a parameter of this lambda
         // Lambda structure: anonymous_function_expr -> pattern* -> arrow -> expr
         let mut param_index = None;
@@ -1022,14 +794,6 @@ impl TypeChecker {
             return None;
         }
         let param_index = param_index.unwrap();
-
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "      try_resolve_lambda_param_type: param {} is at index {}", var_name, param_index);
-        }
 
         // Find the containing function_call_expr
         let inner_func_call = Self::find_containing_node_of_kind(lambda, "function_call_expr")?;
@@ -1100,15 +864,6 @@ impl TypeChecker {
             }
         }
 
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "      try_resolve_lambda_param_type: func={:?}, lambda_arg_index={}, other_args.len()={}",
-                func_name, lambda_arg_index, other_args.len());
-        }
-
         // Try to infer from specific known function patterns
         if let Some(ref fname) = func_name {
             // For Cache.map (\a -> ...) cache, the lambda param type is the inner type of Cache
@@ -1117,33 +872,11 @@ impl TypeChecker {
 
             // Get the type of the collection argument (usually the last one)
             for arg in &other_args {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      try_resolve_lambda_param_type: other arg kind={}, text={}",
-                        arg.kind(), arg.utf8_text(source.as_bytes()).unwrap_or("?"));
-                }
                 let arg_type = self.infer_type_of_node(uri, *arg, source);
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/elm_field_rename_debug.log")
-                {
-                    let _ = writeln!(f, "      try_resolve_lambda_param_type: other arg type = {:?}", arg_type);
-                }
 
                 if let Some(ref arg_ty) = arg_type {
                     // Extract the inner type from common collection patterns
                     if let Some(inner_type) = self.extract_element_type_for_map(fname, arg_ty, param_index) {
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/tmp/elm_field_rename_debug.log")
-                        {
-                            let _ = writeln!(f, "      try_resolve_lambda_param_type: extracted inner type = {}", inner_type);
-                        }
                         return Some(inner_type);
                     }
                 }
@@ -1293,13 +1026,6 @@ impl TypeChecker {
                                         if let Some(name_node) = field_child.child_by_field_name("name") {
                                             if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
                                                 if name == field_name {
-                                                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                                                        .create(true)
-                                                        .append(true)
-                                                        .open("/tmp/elm_field_rename_debug.log")
-                                                    {
-                                                        let _ = writeln!(f, "      find_field_in_type_alias_by_name: found field {} in type {}.{}", field_name, module_name, type_name);
-                                                    }
                                                     return Some(FieldDefinition {
                                                         name: field_name.to_string(),
                                                         node_id: name_node.id(),
@@ -2214,16 +1940,6 @@ impl TypeChecker {
         // Sort by field count (prefer type aliases with fewer fields - closer match)
         candidates.sort_by_key(|(_, count)| *count);
 
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/elm_field_rename_debug.log")
-        {
-            let _ = writeln!(f, "        find_type_alias_by_fields: {} candidates for {:?}, target={:?}, best={:?}",
-                candidates.len(), record_fields, target.map(|t| &t.name),
-                candidates.first().map(|(d, c)| (&d.type_alias_name, *c)));
-        }
-
         candidates.into_iter().next().map(|(def, _)| def)
     }
 
@@ -2267,14 +1983,6 @@ impl TypeChecker {
 
         use std::io::Write;
         if all_fields_match {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/elm_field_rename_debug.log")
-            {
-                let _ = writeln!(f, "        check_type_alias_matches: {} ({} fields) CANDIDATE for {:?}",
-                    alias_name, type_fields.len(), record_fields);
-            }
         }
 
         if all_fields_match {
@@ -2335,15 +2043,6 @@ impl TypeChecker {
 
                     if all_fields_match {
                         if let Some(field_node) = target_field_node {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/elm_field_rename_debug.log")
-                            {
-                                let _ = writeln!(f, "        check_custom_type_matches: {} ({} fields) CANDIDATE for {:?}",
-                                    type_name, type_fields.len(), record_fields);
-                            }
                             return Some((FieldDefinition {
                                 name: target_field.to_string(),
                                 node_id: field_node.id(),
@@ -2419,14 +2118,6 @@ impl TypeChecker {
 
         use std::io::Write;
         if all_fields_match {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/elm_field_rename_debug.log")
-            {
-                let _ = writeln!(f, "        check_type_alias_matches: {} ({} fields) CANDIDATE for {:?}",
-                    alias_name, type_fields.len(), record_fields);
-            }
         }
 
         if all_fields_match {
