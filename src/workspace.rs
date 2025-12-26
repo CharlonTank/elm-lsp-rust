@@ -1227,6 +1227,37 @@ impl Workspace {
         self.modules.keys().collect()
     }
 
+    /// Check if moving a function from source to target would create an import cycle.
+    /// After a move, target will need to import source (for any dependencies the function has).
+    /// If source already imports target (directly or indirectly), this would create a cycle.
+    fn would_create_import_cycle(&self, source_module_name: &str, target_module_name: &str) -> bool {
+        // Build reachability: can source reach target through imports?
+        // If yes, adding target→source would create a cycle
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = vec![source_module_name.to_string()];
+
+        while let Some(current) = stack.pop() {
+            if current == target_module_name {
+                return true; // source can reach target, cycle would be created
+            }
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current.clone());
+
+            // Get imports of current module
+            if let Some(module) = self.modules.get(&current) {
+                for import in &module.imports {
+                    if !visited.contains(&import.module_name) {
+                        stack.push(import.module_name.clone());
+                    }
+                }
+            }
+        }
+
+        false // No path from source to target, safe to move
+    }
+
     /// Move a function from one module to another
     /// Returns the workspace edits needed to perform the move
     pub fn move_function(
@@ -1259,6 +1290,15 @@ impl Workspace {
             .ok_or_else(|| anyhow::anyhow!("Target module not found"))?;
 
         let target_module_name = target_module.module_name.clone();
+
+        // Check for import cycle before proceeding
+        if self.would_create_import_cycle(&source_module_name, &target_module_name) {
+            return Err(anyhow::anyhow!(
+                "Cannot move function: would create import cycle ({} imports {} directly or indirectly)",
+                source_module_name,
+                target_module_name
+            ));
+        }
 
         // Find the function in source module
         let function = source_module.symbols.iter()
