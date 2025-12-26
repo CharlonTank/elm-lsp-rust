@@ -1040,6 +1040,20 @@ server.tool(
       const sourceModuleName = extractModuleName(sourceContent);
       const targetModuleName = extractModuleName(targetContent);
 
+      // 2.5. Check for name clash in target module
+      const targetUri = `file://${absTargetModule}`;
+      await client.openDocument(targetUri, targetContent);
+      const targetSymbols = await client.getSymbols(targetUri);
+      const existingFunc = targetSymbols?.find(s => s.name === functionName);
+      if (existingFunc) {
+        return {
+          content: [{
+            type: "text",
+            text: `Cannot move function: Target module '${targetModuleName}' already has a function named '${functionName}'`,
+          }],
+        };
+      }
+
       // 3. Find where to insert in target file (at the end, before any trailing whitespace)
       // We'll add the function at the end of the file
       let insertLine = targetLines.length;

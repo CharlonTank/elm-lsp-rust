@@ -2655,7 +2655,7 @@ impl Workspace {
             return Ok(RemoveFieldResult::error("Cannot remove the only field from a type alias"));
         }
 
-        // 2. Get field definition
+        // 2. Get field definition - use type_checker for proper module/uri info
         let path = uri.to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid URI"))?;
         let content = std::fs::read_to_string(&path)?;
@@ -2663,9 +2663,13 @@ impl Workspace {
         let tree = self.parser.parse(&content)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
-        // Find the field in the type definition
-        let definition = self.find_field_definition_in_type(&tree, &content, type_name, field_name)
+        // Find the field node in the type definition
+        let field_node = self.find_field_node_in_type(&tree, &content, type_name, field_name)
             .ok_or_else(|| anyhow::anyhow!("Field not found in type definition"))?;
+
+        // Use type_checker to get proper definition with module/uri info
+        let definition = self.type_checker.find_field_definition(uri.as_str(), field_node, &content)
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve field definition"))?;
 
         // 3. Get all usages
         let usages = self.get_field_usages(field_name, &definition);
@@ -2799,6 +2803,71 @@ impl Workspace {
         };
 
         Ok(RemoveFieldResult::success(&message, changes))
+    }
+
+    /// Find a field node in a type alias by type name and field name
+    fn find_field_node_in_type<'a>(
+        &self,
+        tree: &'a tree_sitter::Tree,
+        content: &str,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
+        self.find_field_node_recursive(tree.root_node(), content, type_name, field_name)
+    }
+
+    fn find_field_node_recursive<'a>(
+        &self,
+        node: tree_sitter::Node<'a>,
+        content: &str,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
+        if node.kind() == "type_alias_declaration" {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = &content[name_node.byte_range()];
+                if name == type_name {
+                    // Found the type, now find the field
+                    return self.find_field_node_in_children(node, content, field_name);
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = self.find_field_node_recursive(child, content, type_name, field_name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn find_field_node_in_children<'a>(
+        &self,
+        node: tree_sitter::Node<'a>,
+        content: &str,
+        field_name: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
+        if node.kind() == "field_type" {
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    if child.kind() == "lower_case_identifier" {
+                        let name = &content[child.byte_range()];
+                        if name == field_name {
+                            return Some(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = self.find_field_node_in_children(child, content, field_name) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     /// Find a field definition in a type alias by type name and field name
