@@ -23,6 +23,8 @@ const CMD_RENAME_TYPE: &str = "elm.renameType";
 const CMD_RENAME_FUNCTION: &str = "elm.renameFunction";
 const CMD_NOTIFY_FILE_RENAMED: &str = "elm.notifyFileRenamed";
 const CMD_GENERATE_ERD: &str = "elm.generateErd";
+const CMD_PREPARE_REMOVE_FIELD: &str = "elm.prepareRemoveField";
+const CMD_REMOVE_FIELD: &str = "elm.removeField";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -679,6 +681,8 @@ impl LanguageServer for ElmLanguageServer {
                         CMD_RENAME_FILE.to_string(),
                         CMD_MOVE_FILE.to_string(),
                         CMD_GENERATE_ERD.to_string(),
+                        CMD_PREPARE_REMOVE_FIELD.to_string(),
+                        CMD_REMOVE_FIELD.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -2149,6 +2153,181 @@ impl LanguageServer for ElmLanguageServer {
                             "error": e
                         })))
                     }
+                }
+            }
+            CMD_PREPARE_REMOVE_FIELD => {
+                // Expected arguments: [uri, line, character]
+                if params.arguments.len() != 3 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 3 arguments: uri, line, character"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let character: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let result = {
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.prepare_remove_field(&uri, line, character)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some((type_name, field_name, all_fields, usages)) = result {
+                    let other_fields: Vec<&String> = all_fields.iter()
+                        .filter(|f| *f != &field_name)
+                        .collect();
+
+                    let can_remove = all_fields.len() > 1;
+
+                    // Group usages by type
+                    let definition_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::Definition).count();
+                    let field_access_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::FieldAccess).count();
+                    let field_accessor_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::FieldAccessor).count();
+                    let record_pattern_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordPattern).count();
+                    let record_literal_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordLiteral).count();
+                    let record_update_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordUpdate).count();
+
+                    Ok(Some(serde_json::json!({
+                        "success": true,
+                        "typeName": type_name,
+                        "fieldName": field_name,
+                        "totalFields": all_fields.len(),
+                        "otherFields": other_fields,
+                        "canRemove": can_remove,
+                        "usages": usages,
+                        "definitionCount": definition_count,
+                        "fieldAccessCount": field_access_count,
+                        "fieldAccessorCount": field_accessor_count,
+                        "recordPatternCount": record_pattern_count,
+                        "recordLiteralCount": record_literal_count,
+                        "recordUpdateCount": record_update_count,
+                        "totalUsages": usages.len()
+                    })))
+                } else {
+                    Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": format!("No field found at line {}", line + 1)
+                    })))
+                }
+            }
+            CMD_REMOVE_FIELD => {
+                // Expected arguments: [uri, line, character]
+                if params.arguments.len() != 3 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 3 arguments: uri, line, character"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let character: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                // First get the field info
+                let field_info = {
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.prepare_remove_field(&uri, line, character)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some((type_name, field_name, all_fields, _)) = field_info {
+                    let other_fields: Vec<&String> = all_fields.iter()
+                        .filter(|f| *f != &field_name)
+                        .collect();
+
+                    // Execute removal
+                    let remove_result = {
+                        if let Ok(ws) = self.workspace.read() {
+                            if let Some(workspace) = ws.as_ref() {
+                                workspace.remove_field(&uri, &type_name, &field_name, all_fields.len())
+                            } else {
+                                Err(anyhow::anyhow!("Workspace not initialized"))
+                            }
+                        } else {
+                            Err(anyhow::anyhow!("Could not acquire workspace lock"))
+                        }
+                    };
+
+                    match remove_result {
+                        Ok(result) => {
+                            if result.success {
+                                // Return the changes for the caller to apply
+                                let changes_json = if let Some(ref changes) = result.changes {
+                                    let mut changes_map = serde_json::Map::new();
+                                    for (uri, edits) in changes {
+                                        let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                            serde_json::json!({
+                                                "range": {
+                                                    "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                                    "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                                },
+                                                "newText": edit.new_text
+                                            })
+                                        }).collect();
+                                        changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                                    }
+                                    Some(serde_json::Value::Object(changes_map))
+                                } else {
+                                    None
+                                };
+
+                                Ok(Some(serde_json::json!({
+                                    "success": true,
+                                    "typeName": type_name,
+                                    "fieldName": field_name,
+                                    "otherFields": other_fields,
+                                    "message": result.message,
+                                    "changes": changes_json
+                                })))
+                            } else {
+                                Ok(Some(serde_json::json!({
+                                    "success": false,
+                                    "typeName": type_name,
+                                    "fieldName": field_name,
+                                    "otherFields": other_fields,
+                                    "error": result.message
+                                })))
+                            }
+                        }
+                        Err(e) => {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "typeName": type_name,
+                                "fieldName": field_name,
+                                "otherFields": other_fields,
+                                "error": e.to_string()
+                            })))
+                        }
+                    }
+                } else {
+                    Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": format!("No field found at line {}", line + 1)
+                    })))
                 }
             }
             _ => {

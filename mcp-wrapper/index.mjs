@@ -1621,6 +1621,148 @@ server.tool(
   }
 );
 
+server.tool(
+  "elm_prepare_remove_field",
+  "Check if a field can be removed from a type alias. Returns field info, usage count, and other fields for reference. " +
+  "Field accesses will be replaced with Debug.todo, record patterns will have the field removed or become _ if it's the only field.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    line: z.number().describe("Line number of the field name (0-indexed)"),
+    character: z.number().describe("Character position within the field name (0-indexed)"),
+    field_name: z.string().optional().describe("Expected field name (if provided, validates it matches what's at the position)"),
+  },
+  async ({ file_path, line, character, field_name }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.prepareRemoveField", [uri, line, character]);
+
+    if (!result || !result.success) {
+      return { content: [{ type: "text", text: result?.error || `No field found at line ${line + 1}` }] };
+    }
+
+    // Safety check: if field_name provided, verify it matches
+    if (field_name && result.fieldName !== field_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected field '${field_name}' but found '${result.fieldName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${field_name}'.`,
+        }],
+      };
+    }
+
+    const otherFields = result.otherFields?.join(", ") || "none";
+
+    let summary = `**Type:** ${result.typeName}\n`;
+    summary += `**Field:** ${result.fieldName}\n`;
+    summary += `**Other fields:** ${otherFields}\n`;
+    summary += `**Can remove:** ${result.canRemove ? "Yes" : "No (only field)"}\n\n`;
+
+    summary += `**Usage Summary:**\n`;
+    summary += `- Definition: ${result.definitionCount || 0}\n`;
+    summary += `- Field accesses (.field): ${result.fieldAccessCount || 0} (will be replaced with Debug.todo)\n`;
+    summary += `- Field accessors (.field as function): ${result.fieldAccessorCount || 0} (will be replaced with Debug.todo)\n`;
+    summary += `- Record patterns ({ field }): ${result.recordPatternCount || 0} (will be removed from pattern)\n`;
+    summary += `- Record literals ({ field = value }): ${result.recordLiteralCount || 0} (will be removed)\n`;
+    summary += `- Record updates ({ x | field = value }): ${result.recordUpdateCount || 0} (will be removed)\n`;
+    summary += `- **Total:** ${result.totalUsages || 0}\n`;
+
+    if (!result.canRemove) {
+      summary += `\n⚠️ Cannot remove: This is the only field in the type alias.`;
+    } else {
+      summary += `\n✓ Ready to remove. Use elm_remove_field to execute.`;
+    }
+
+    return { content: [{ type: "text", text: summary }] };
+  }
+);
+
+server.tool(
+  "elm_remove_field",
+  "Remove a field from a type alias. Field accesses are replaced with Debug.todo, record patterns have the field removed " +
+  "(or become _ if it's the only field), and record literals/updates have the field removed.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    line: z.number().describe("Line number of the field name (0-indexed)"),
+    character: z.number().describe("Character position within the field name (0-indexed)"),
+    field_name: z.string().describe("Expected field name (must match what's at the position)"),
+  },
+  async ({ file_path, line, character, field_name }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.removeField", [uri, line, character]);
+
+    if (!result) {
+      return { content: [{ type: "text", text: `No field found at line ${line + 1}. Expected: ${field_name}` }] };
+    }
+
+    // Safety check: verify the field at this position matches expected name
+    if (result.fieldName !== field_name) {
+      return {
+        content: [{
+          type: "text",
+          text: `Safety check failed: Expected field '${field_name}' but found '${result.fieldName}' at line ${line + 1}.\n` +
+                `The line number may have shifted. Please verify the correct line for '${field_name}'.`,
+        }],
+      };
+    }
+
+    if (!result.success) {
+      const otherFields = result.otherFields?.join(", ") || "none";
+      return {
+        content: [{
+          type: "text",
+          text: `Cannot remove field '${result.fieldName}' from '${result.typeName}'.\n` +
+                `Reason: ${result.error}\n` +
+                `Other fields: ${otherFields}`,
+        }],
+      };
+    }
+
+    // Apply the text edits
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes, client);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      const msg = result.message || `Removed field '${result.fieldName}'`;
+
+      return {
+        content: [{
+          type: "text",
+          text: `Successfully: ${msg}\n` +
+                `Applied ${totalEdits} edit(s) in ${fileCount} file(s)`,
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: result.message || "Field removed successfully",
+      }],
+    };
+  }
+);
+
 // Helper to extract module name from Elm source
 function extractModuleName(content) {
   const match = content.match(/^module\s+([A-Za-z.]+)\s+exposing/m);
