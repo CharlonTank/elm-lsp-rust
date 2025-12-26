@@ -1228,17 +1228,17 @@ impl Workspace {
     }
 
     /// Check if moving a function from source to target would create an import cycle.
-    /// After a move, target will need to import source (for any dependencies the function has).
-    /// If source already imports target (directly or indirectly), this would create a cycle.
+    /// After a move, source will import target (so existing usages of the moved function work).
+    /// If target already imports source (directly or indirectly), adding source→target creates a cycle.
     fn would_create_import_cycle(&self, source_module_name: &str, target_module_name: &str) -> bool {
-        // Build reachability: can source reach target through imports?
-        // If yes, adding target→source would create a cycle
+        // Check: can target reach source through imports?
+        // If yes, adding source→target would create a cycle
         let mut visited = std::collections::HashSet::new();
-        let mut stack = vec![source_module_name.to_string()];
+        let mut stack = vec![target_module_name.to_string()];
 
         while let Some(current) = stack.pop() {
-            if current == target_module_name {
-                return true; // source can reach target, cycle would be created
+            if current == source_module_name {
+                return true; // target can reach source, cycle would be created
             }
             if visited.contains(&current) {
                 continue;
@@ -1255,7 +1255,7 @@ impl Workspace {
             }
         }
 
-        false // No path from source to target, safe to move
+        false // No path from target to source, safe to move
     }
 
     /// Move a function from one module to another
