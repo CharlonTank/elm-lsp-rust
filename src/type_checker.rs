@@ -112,7 +112,6 @@ impl TypeChecker {
     ) -> Option<FieldDefinition> {
         let node_kind = node.kind();
         let parent_kind = node.parent().map(|p| p.kind());
-        let node_text = node.utf8_text(source.as_bytes()).unwrap_or("");
 
         // Check if this is a field reference
         let field_name = match (node_kind, parent_kind) {
@@ -174,17 +173,6 @@ impl TypeChecker {
         self.resolve_field_to_definition_impl(uri, &field_name, node, source, target_alias)
     }
 
-    /// Resolve a field reference to its type alias definition
-    fn resolve_field_to_definition(
-        &self,
-        uri: &str,
-        field_name: &str,
-        node: Node,
-        source: &str,
-    ) -> Option<FieldDefinition> {
-        self.resolve_field_to_definition_impl(uri, field_name, node, source, None)
-    }
-
     fn resolve_field_to_definition_impl(
         &self,
         uri: &str,
@@ -193,7 +181,6 @@ impl TypeChecker {
         source: &str,
         target_alias: Option<&TargetTypeAlias>,
     ) -> Option<FieldDefinition> {
-        use std::io::Write;
         let parent = node.parent()?;
 
         match parent.kind() {
@@ -222,7 +209,6 @@ impl TypeChecker {
                 })
             }
             "field_access_expr" => {
-                use std::io::Write;
                 // Get the target's type
                 let target = parent.child_by_field_name("target")?;
                 let target_text = target.utf8_text(source.as_bytes()).unwrap_or("?");
@@ -245,29 +231,16 @@ impl TypeChecker {
                         }
 
                         if let Some(scope) = self.find_enclosing_scope(parent) {
-                            let scope_text = scope.utf8_text(source.as_bytes()).unwrap_or("?");
-                            let scope_preview: String = scope_text.chars().take(50).collect();
                             let all_fields = self.collect_field_accesses_on_variable(target_text, scope, source);
                             // If we found at least 2 fields, use structural matching
                             if all_fields.len() >= 2 {
                                 // For structural matching, find the ACTUAL type first (without target filter)
                                 // then verify it matches the target
                                 let result = self.find_type_alias_by_fields(&all_fields, field_name, uri, None);
-                                if let Some(ref def) = result {
-                                    // If we have a target, only return if the found type matches
-                                    if let Some(target) = target_alias {
-                                        if def.type_alias_name.as_deref() == Some(target.name.as_str())
-                                            && def.module_name == target.module
-                                        {
-                                            return result;
-                                        }
-                                        // Found a different type - don't return it
-                                    } else {
-                                        return result;
-                                    }
+                                if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
+                                    return Some(def);
                                 }
                             }
-                        } else {
                         }
                     }
 
@@ -302,7 +275,6 @@ impl TypeChecker {
                 }
             }
             "field" => {
-                use std::io::Write;
                 // Record expression - try to find the record type
                 let record_expr = match parent.parent() {
                     Some(r) => r,
@@ -373,29 +345,7 @@ impl TypeChecker {
                                     // For single-field with target: count all candidates first
                                     // Only accept if target is a candidate AND there are few alternatives
                                     let (target_matches, other_count) = self.count_field_candidates(field_name, target_alias.unwrap());
-
-                                    // Check if the BASE of the record update is a lambda parameter.
-                                    // This is a stronger check than just "in a lambda" because the base
-                                    // might be a variable from outer scope (not the lambda param).
-                                    let base_is_lambda_param = {
-                                        if let Some(lambda) = Self::find_containing_node_of_kind(record_expr, "anonymous_function_expr") {
-                                            // Check if base_text matches any of the lambda's parameters
-                                            let mut is_param = false;
-                                            let mut cursor = lambda.walk();
-                                            for child in lambda.children(&mut cursor) {
-                                                if child.kind() == "pattern" {
-                                                    let param_text = child.utf8_text(source.as_bytes()).unwrap_or("");
-                                                    if param_text == base_text {
-                                                        is_param = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            is_param
-                                        } else {
-                                            false
-                                        }
-                                    };
+                                    let base_is_lambda_param = Self::is_lambda_parameter(record_expr, base_text, source);
 
                                     // For single-field matches:
                                     // - If base is a lambda parameter: accept if target matches (trust mapping context)
@@ -415,18 +365,8 @@ impl TypeChecker {
                                     // For 2+ fields: find the ACTUAL type first (not filtered by target)
                                     // then verify it matches the target
                                     let result = self.find_type_alias_by_fields(&combined_fields, field_name, uri, None);
-                                    if let Some(ref def) = result {
-                                        // If we have a target, only return if the found type matches
-                                        if let Some(target) = target_alias {
-                                            if def.type_alias_name.as_deref() == Some(target.name.as_str())
-                                                && def.module_name == target.module
-                                            {
-                                                return result;
-                                            }
-                                            // Found a different type - this field belongs to a different type alias
-                                        } else {
-                                            return result;
-                                        }
+                                    if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
+                                        return Some(def);
                                     }
                                 }
                             }
@@ -452,18 +392,8 @@ impl TypeChecker {
                         // then verify it matches the target
                         let result = self.find_type_alias_by_fields(&record_fields, field_name, uri, None);
                         tracing::debug!("find_field_definition(field): structural match result = {:?}", result.as_ref().map(|d| &d.type_alias_name));
-                        if let Some(ref def) = result {
-                            // If we have a target, only return if the found type matches
-                            if let Some(target) = target_alias {
-                                if def.type_alias_name.as_deref() == Some(target.name.as_str())
-                                    && def.module_name == target.module
-                                {
-                                    return result;
-                                }
-                                // Found a different type - don't return it
-                            } else {
-                                return result;
-                            }
+                        if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
+                            return Some(def);
                         }
                     }
                 }
@@ -485,18 +415,8 @@ impl TypeChecker {
                 if record_fields.len() >= 2 {
                     // For structural matching, find the ACTUAL type first (without target filter)
                     let result = self.find_type_alias_by_fields(&record_fields, field_name, uri, None);
-                    if let Some(ref def) = result {
-                        // If we have a target, only return if the found type matches
-                        if let Some(target) = target_alias {
-                            if def.type_alias_name.as_deref() == Some(target.name.as_str())
-                                && def.module_name == target.module
-                            {
-                                return result;
-                            }
-                            // Found a different type - don't return it
-                        } else {
-                            return result;
-                        }
+                    if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
+                        return Some(def);
                     }
                 }
                 None
@@ -539,7 +459,7 @@ impl TypeChecker {
     }
 
     /// Get the name of a type alias
-    fn get_type_alias_name<'a>(&self, type_alias: &Node, source: &'a str) -> Option<String> {
+    fn get_type_alias_name(&self, type_alias: &Node, source: &str) -> Option<String> {
         type_alias.child_by_field_name("name")
             .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             .map(|s| s.to_string())
@@ -582,7 +502,6 @@ impl TypeChecker {
         }
 
         // Otherwise do local inference
-        let tree = self.tree_cache.get(uri)?;
         let symbol_links = self.symbol_links_cache.get(uri)?;
 
         let mut scope = InferenceScope::new(source, uri.to_string(), symbol_links);
@@ -768,8 +687,6 @@ impl TypeChecker {
         uri: &str,
         source: &str,
     ) -> Option<String> {
-        use std::io::Write;
-
         // Find the containing lambda (anonymous_function_expr)
         let lambda = Self::find_containing_node_of_kind(node, "anonymous_function_expr")?;
 
@@ -779,7 +696,7 @@ impl TypeChecker {
         let mut param_count = 0;
         {
             let mut cursor = lambda.walk();
-            for (idx, child) in lambda.children(&mut cursor).enumerate() {
+            for child in lambda.children(&mut cursor) {
                 if child.kind() == "pattern" {
                     let param_text = child.utf8_text(source.as_bytes()).unwrap_or("");
                     if param_text == var_name {
@@ -790,10 +707,7 @@ impl TypeChecker {
             }
         }
 
-        if param_index.is_none() {
-            return None;
-        }
-        let param_index = param_index.unwrap();
+        let param_index = param_index?;
 
         // Find the containing function_call_expr
         let inner_func_call = Self::find_containing_node_of_kind(lambda, "function_call_expr")?;
@@ -826,7 +740,7 @@ impl TypeChecker {
 
         // Find the function being called and the lambda's position in the arguments
         let mut func_name: Option<String> = None;
-        let mut lambda_arg_index = 0;
+        let mut _lambda_arg_index = 0;
         let mut other_args: Vec<Node> = Vec::new();
 
         {
@@ -855,7 +769,7 @@ impl TypeChecker {
                     // Skip the lambda itself (identified by ancestry, not direct id comparison)
                     let contains_lambda = Self::node_contains_node(child, lambda);
                     if contains_lambda {
-                        lambda_arg_index = arg_idx;
+                        _lambda_arg_index = arg_idx;
                     } else if child.kind() != "(" && child.kind() != ")" && child.kind() != "," {
                         other_args.push(child);
                     }
@@ -975,6 +889,24 @@ impl TypeChecker {
         None
     }
 
+    /// Check if a variable name is a lambda parameter.
+    /// Returns true if the node is inside a lambda and var_name matches one of its parameters.
+    fn is_lambda_parameter(node: Node, var_name: &str, source: &str) -> bool {
+        if let Some(lambda) = Self::find_containing_node_of_kind(node, "anonymous_function_expr") {
+            let mut cursor = lambda.walk();
+            for child in lambda.children(&mut cursor) {
+                if child.kind() == "pattern" {
+                    if let Ok(param_text) = child.utf8_text(source.as_bytes()) {
+                        if param_text == var_name {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Find a field definition in a type alias by the type alias name.
     /// This searches all indexed files for a type alias with the given name
     /// and returns the field definition if found.
@@ -985,8 +917,6 @@ impl TypeChecker {
         _current_uri: &str,
         target_alias: Option<&TargetTypeAlias>,
     ) -> Option<FieldDefinition> {
-        use std::io::Write;
-
         // Search all indexed files for type aliases with this name
         for (uri, tree) in &self.tree_cache {
             let source = match self.source_cache.get(uri) {
@@ -1080,14 +1010,25 @@ impl TypeChecker {
         false
     }
 
-    /// Get field definition from a resolved type
-    fn field_definition_from_type(
-        &self,
-        ty: &Type,
-        field_name: &str,
-        _current_uri: &str,
+    /// Filter a field definition result by target alias.
+    /// Returns Some if no target specified, or if the definition matches the target.
+    fn filter_by_target_alias(
+        def: Option<FieldDefinition>,
+        target_alias: Option<&TargetTypeAlias>,
     ) -> Option<FieldDefinition> {
-        self.field_definition_from_type_impl(ty, field_name, _current_uri, None)
+        let def = def?;
+        if let Some(target) = target_alias {
+            if !Self::matches_target_alias(&def, target) {
+                return None;
+            }
+        }
+        Some(def)
+    }
+
+    /// Check if a field definition matches a target type alias.
+    fn matches_target_alias(def: &FieldDefinition, target: &TargetTypeAlias) -> bool {
+        def.type_alias_name.as_deref() == Some(target.name.as_str())
+            && def.module_name == target.module
     }
 
     /// Get the type of a field in a type alias (as a type name string)
@@ -1154,13 +1095,13 @@ impl TypeChecker {
         source: &str,
     ) -> Option<String> {
         // Look for record_type or the record itself
+        #[allow(clippy::question_mark)]
         let record_type = if record.kind() == "record_type" {
             record
         } else {
-            // Descend to find record_type
+            // Descend to find record_type (can't use ? due to cursor borrow lifetime)
             let mut cursor = record.walk();
-            let result = record.children(&mut cursor)
-                .find(|c| c.kind() == "record_type");
+            let result = record.children(&mut cursor).find(|c| c.kind() == "record_type");
             match result {
                 Some(r) => r,
                 None => return None,
@@ -1182,12 +1123,14 @@ impl TypeChecker {
                                 if let Some(qid) = type_child.child_by_field_name("name") {
                                     // Get the last part of the qualified name
                                     let mut qc = qid.walk();
+                                    #[allow(clippy::double_ended_iterator_last)]
                                     if let Some(last) = qid.children(&mut qc).last() {
                                         return last.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
                                     }
                                 }
                             } else if type_child.kind() == "upper_case_qid" {
                                 let mut qc = type_child.walk();
+                                #[allow(clippy::double_ended_iterator_last)]
                                 if let Some(last) = type_child.children(&mut qc).last() {
                                     return last.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
                                 }
@@ -1276,7 +1219,8 @@ impl TypeChecker {
         type_name: &str,
         module_name: &str,
     ) -> Option<FieldDefinition> {
-        // First find the actual record_type node
+        // First find the actual record_type node (can't use ? due to cursor borrow lifetime)
+        #[allow(clippy::question_mark)]
         let record = if record_type.kind() == "record_type" {
             record_type
         } else {
@@ -1309,16 +1253,6 @@ impl TypeChecker {
             }
         }
         None
-    }
-
-    fn field_definition_from_type_with_target(
-        &self,
-        ty: &Type,
-        field_name: &str,
-        current_uri: &str,
-        target: &TargetTypeAlias,
-    ) -> Option<FieldDefinition> {
-        self.field_definition_from_type_impl(ty, field_name, current_uri, Some(target))
     }
 
     fn field_definition_from_type_impl(
@@ -1598,17 +1532,17 @@ impl TypeChecker {
         if node.kind() == "upper_case_qid" {
             // Get just the last part of a qualified name
             let full_name = node.utf8_text(source.as_bytes()).ok()?;
-            return Some(full_name.split('.').last()?.to_string());
+            return Some(full_name.rsplit('.').next()?.to_string());
         }
         None
     }
 
     /// Find all field accesses on the same variable within a scope
     /// Returns a set of field names accessed on the given variable
-    fn collect_field_accesses_on_variable<'a>(
+    fn collect_field_accesses_on_variable(
         &self,
         variable_name: &str,
-        scope: Node<'a>,
+        scope: Node,
         source: &str,
     ) -> Vec<String> {
         let mut fields = Vec::new();
@@ -1616,10 +1550,10 @@ impl TypeChecker {
         fields
     }
 
-    fn collect_field_accesses_recursive<'a>(
+    fn collect_field_accesses_recursive(
         &self,
         variable_name: &str,
-        node: Node<'a>,
+        node: Node,
         source: &str,
         fields: &mut Vec<String>,
         depth: usize,
@@ -1883,7 +1817,6 @@ impl TypeChecker {
         _current_uri: &str,
         target: Option<&TargetTypeAlias>,
     ) -> Option<FieldDefinition> {
-        use std::io::Write;
         tracing::debug!("find_type_alias_by_fields: looking for {:?} with target field {}, target={:?}", record_fields, target_field, target.map(|t| &t.name));
 
         // Collect all matching candidates with their field counts
@@ -1906,10 +1839,8 @@ impl TypeChecker {
                     ) {
                         // If target is specified, filter to only matching type aliases
                         if let Some(target) = target {
-                            let matches_target = def.type_alias_name.as_deref() == Some(target.name.as_str())
-                                && def.module_name == target.module;
-                            if !matches_target {
-                                continue; // Skip non-matching candidates
+                            if !Self::matches_target_alias(&def, target) {
+                                continue;
                             }
                         }
                         candidates.push((def, field_count));
@@ -1921,10 +1852,8 @@ impl TypeChecker {
                     ) {
                         // If target is specified, filter to only matching types
                         if let Some(target) = target {
-                            let matches_target = def.type_alias_name.as_deref() == Some(target.name.as_str())
-                                && def.module_name == target.module;
-                            if !matches_target {
-                                continue; // Skip non-matching candidates
+                            if !Self::matches_target_alias(&def, target) {
+                                continue;
                             }
                         }
                         candidates.push((def, field_count));
@@ -1980,10 +1909,6 @@ impl TypeChecker {
 
         // Check if all record fields exist in this type alias
         let all_fields_match = record_fields.iter().all(|f| type_fields.contains(f));
-
-        use std::io::Write;
-        if all_fields_match {
-        }
 
         if all_fields_match {
             if let Some(field_node) = target_field_node {
@@ -2077,69 +2002,6 @@ impl TypeChecker {
         }
         None
     }
-
-    /// Check if a type alias contains all the given fields
-    fn check_type_alias_matches(
-        &self,
-        type_alias: Node,
-        record_fields: &[String],
-        target_field: &str,
-        uri: &str,
-        source: &str,
-    ) -> Option<FieldDefinition> {
-        // Get alias name
-        let alias_name = type_alias.child_by_field_name("name")
-            .and_then(|n| n.utf8_text(source.as_bytes()).ok())?;
-
-        // Find the record_type within the type alias
-        let type_expr = type_alias.child_by_field_name("typeExpression")?;
-        let record_type = self.find_record_type_node(type_expr)?;
-
-        // Collect fields from the type alias
-        let mut type_fields = std::collections::HashSet::new();
-        let mut target_field_node: Option<Node> = None;
-
-        let mut cursor = record_type.walk();
-        for child in record_type.children(&mut cursor) {
-            if child.kind() == "field_type" {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
-                        type_fields.insert(name.to_string());
-                        if name == target_field {
-                            target_field_node = Some(name_node);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check if all record fields exist in this type alias
-        let all_fields_match = record_fields.iter().all(|f| type_fields.contains(f));
-
-        use std::io::Write;
-        if all_fields_match {
-        }
-
-        if all_fields_match {
-            if let Some(field_node) = target_field_node {
-                tracing::info!(
-                    "check_type_alias_matches: MATCHED {} with type alias {}",
-                    target_field, alias_name
-                );
-                return Some(FieldDefinition {
-                    name: target_field.to_string(),
-                    node_id: field_node.id(),
-                    type_alias_name: Some(alias_name.to_string()),
-                    type_alias_node_id: Some(type_alias.id()),
-                    module_name: self.get_module_name(uri, source),
-                    uri: uri.to_string(),
-                });
-            }
-        }
-
-        None
-    }
-
     /// Find a record_type node within a type expression
     fn find_record_type_node<'a>(&self, node: Node<'a>) -> Option<Node<'a>> {
         if node.kind() == "record_type" {

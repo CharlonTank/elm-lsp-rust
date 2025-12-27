@@ -66,7 +66,7 @@ fn main() {
         times.push(elapsed);
         println!("  Run {}: {:?} ({} refs)", i, elapsed, refs.len());
     }
-    let avg: u128 = times.iter().map(|t| t.as_micros()).sum::<u128>() / runs as u128;
+    let avg: u128 = times.iter().map(|t| t.as_micros()).sum::<u128>() / runs;
     println!("  Average: {}μs", avg);
     println!();
 
@@ -80,7 +80,7 @@ fn main() {
         times.push(elapsed);
         println!("  Run {}: {:?} ({} refs)", i, elapsed, refs.len());
     }
-    let avg: u128 = times.iter().map(|t| t.as_micros()).sum::<u128>() / runs as u128;
+    let avg: u128 = times.iter().map(|t| t.as_micros()).sum::<u128>() / runs;
     println!("  Average: {}μs", avg);
     println!();
 
@@ -94,7 +94,7 @@ fn main() {
         times.push(elapsed);
         println!("  Run {}: {:?} (found: {})", i, elapsed, def.is_some());
     }
-    let avg: u128 = times.iter().map(|t| t.as_micros()).sum::<u128>() / runs as u128;
+    let avg: u128 = times.iter().map(|t| t.as_micros()).sum::<u128>() / runs;
     println!("  Average: {}μs", avg);
     println!();
 

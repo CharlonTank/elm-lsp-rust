@@ -1,9 +1,13 @@
 import { spawn, execSync } from "child_process";
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync, renameSync } from "fs";
 import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
-const LSP_PATH = "/Users/charles-andreassus/projects/elm-claude-improvements/elm-lsp-rust/target/release/elm_lsp";
-const MEETDOWN = "/Users/charles-andreassus/projects/elm-claude-improvements/elm-lsp-rust/tests/meetdown";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const PROJECT_ROOT = dirname(__dirname);
+const LSP_PATH = join(PROJECT_ROOT, "target/release/elm_lsp");
+const MEETDOWN = join(PROJECT_ROOT, "tests/meetdown");
 const BACKUP_DIR = "/tmp/meetdown_backup";
 
 class LSPClient {

@@ -5,7 +5,6 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::binder::BoundSymbolKind;
 use crate::diagnostics::DiagnosticsProvider;
 use crate::document::{Document, VariantInfo};
 use crate::parser::ElmParser;
@@ -85,7 +84,7 @@ impl ElmLanguageServer {
         // Try from open document first
         if let Some(doc) = self.documents.get(uri) {
             if let Some(line) = doc.get_line(position.line) {
-                return self.extract_word_from_line(&line, position.character as usize);
+                return self.extract_word_from_line(line, position.character as usize);
             }
         }
 
@@ -306,7 +305,7 @@ impl ElmLanguageServer {
                     seen_ranges.insert(key);
                     changes
                         .entry(symbol.definition_uri.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(TextEdit {
                             range: symbol.definition_range,
                             new_text: new_name.to_string(),
@@ -330,7 +329,7 @@ impl ElmLanguageServer {
                                             seen_ranges.insert(key);
                                             changes
                                                 .entry(symbol.definition_uri.clone())
-                                                .or_insert_with(Vec::new)
+                                                .or_default()
                                                 .push(TextEdit {
                                                     range: variant.range,
                                                     new_text: new_name.to_string(),
@@ -376,7 +375,7 @@ impl ElmLanguageServer {
                         seen_ranges.insert(key);
                         changes
                             .entry(r.uri)
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(TextEdit {
                                 range: r.range,
                                 new_text: new_name.to_string(),
@@ -418,135 +417,6 @@ impl ElmLanguageServer {
         Ok(None)
     }
 
-    /// Rename a symbol at a position using type-aware reference finding
-    /// This uses classify_definition_at_position to determine the symbol type
-    /// and dispatches to the appropriate type-specific finder
-    fn rename_at_position_typed(
-        &self,
-        uri: &Url,
-        position: Position,
-        new_name: &str,
-    ) -> Result<Option<WorkspaceEdit>> {
-        let content = if let Some(doc) = self.documents.get(uri) {
-            doc.text.clone()
-        } else {
-            return Ok(None);
-        };
-
-        let symbol = if let Ok(ws) = self.workspace.read() {
-            if let Some(workspace) = ws.as_ref() {
-                workspace.classify_definition_at_position(uri, position)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let symbol = match symbol {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        tracing::info!("Renaming {:?} {} to {}", symbol.kind, symbol.name, new_name);
-
-        let refs = if let Ok(ws) = self.workspace.read() {
-            if let Some(workspace) = ws.as_ref() {
-                match symbol.kind {
-                    crate::binder::BoundSymbolKind::Function => {
-                        workspace.find_function_references_typed(&symbol)
-                    }
-                    crate::binder::BoundSymbolKind::Type => {
-                        // For custom types, also include same-named constructor references
-                        // e.g., `type EventId = EventId Int` - renaming the type should also rename the constructor
-                        let mut refs = workspace.find_type_references_typed(&symbol);
-                        let constructor_refs = workspace.find_constructor_references_typed(&symbol);
-                        tracing::info!("Type rename: found {} type refs and {} constructor refs for {}",
-                            refs.len(), constructor_refs.len(), symbol.name);
-                        refs.extend(constructor_refs);
-                        refs
-                    }
-                    crate::binder::BoundSymbolKind::TypeAlias => {
-                        workspace.find_type_references_typed(&symbol)
-                    }
-                    crate::binder::BoundSymbolKind::UnionConstructor => {
-                        workspace.find_constructor_references_typed(&symbol)
-                    }
-                    crate::binder::BoundSymbolKind::FieldType => {
-                        workspace.find_field_references_typed(&symbol, &content)
-                    }
-                    crate::binder::BoundSymbolKind::Port => {
-                        workspace.find_port_references_typed(&symbol)
-                    }
-                    _ => {
-                        workspace.find_references(&symbol.name, symbol.module_name.as_deref())
-                    }
-                }
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
-
-        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
-            std::collections::HashMap::new();
-        let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> =
-            std::collections::HashSet::new();
-
-        // Add the definition itself
-        let def_key = (
-            uri.to_string(),
-            symbol.range.start.line,
-            symbol.range.start.character,
-            symbol.range.end.line,
-            symbol.range.end.character,
-        );
-        seen_ranges.insert(def_key);
-        changes
-            .entry(uri.clone())
-            .or_insert_with(Vec::new)
-            .push(TextEdit {
-                range: symbol.range,
-                new_text: new_name.to_string(),
-            });
-
-        // Add all references
-        for r in refs {
-            if r.uri.path().contains("/Evergreen/") {
-                continue;
-            }
-            let key = (
-                r.uri.to_string(),
-                r.range.start.line,
-                r.range.start.character,
-                r.range.end.line,
-                r.range.end.character,
-            );
-            if seen_ranges.contains(&key) {
-                continue;
-            }
-            seen_ranges.insert(key);
-            changes
-                .entry(r.uri)
-                .or_insert_with(Vec::new)
-                .push(TextEdit {
-                    range: r.range,
-                    new_text: new_name.to_string(),
-                });
-        }
-
-        if !changes.is_empty() {
-            tracing::info!("Type-aware rename affects {} files", changes.len());
-            return Ok(Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }));
-        }
-
-        Ok(None)
-    }
-
     /// Rename a variant using its definition range directly
     /// Variants are not indexed as top-level symbols, so we need this specialized function
     fn rename_variant_by_range(
@@ -573,7 +443,7 @@ impl ElmLanguageServer {
         seen_ranges.insert(def_key);
         changes
             .entry(uri.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(TextEdit {
                 range: variant_definition_range,
                 new_text: new_name.to_string(),
@@ -602,7 +472,7 @@ impl ElmLanguageServer {
                     seen_ranges.insert(key);
                     changes
                         .entry(r.uri)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(TextEdit {
                             range: r.range,
                             new_text: new_name.to_string(),
@@ -1175,18 +1045,16 @@ impl LanguageServer for ElmLanguageServer {
 
                         // Find all field references using type inference
                         let refs = workspace.find_field_references(&field_info.name, &field_info.definition);
-                        let old_name = &field_info.name;
 
                         let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
 
                         for r in refs {
-                            // Note: For record pattern fields like `{ email }`, Elm doesn't support
-                            // explicit binding syntax `{ userEmail = email }`. So we just rename
-                            // the field directly. This changes both the field and the bound variable.
-                            // TODO: Also rename all usages of the old variable in the function scope.
+                            // Note: For record pattern fields like `{ email }`, the bound variable
+                            // usages in the function scope are automatically included by
+                            // find_field_references via find_variable_usages_in_scope.
                             changes
                                 .entry(r.uri)
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push(TextEdit {
                                     range: r.range,
                                     new_text: new_name.clone(),
@@ -1194,13 +1062,11 @@ impl LanguageServer for ElmLanguageServer {
                         }
 
                         if !changes.is_empty() {
-                            let total_edits: usize = changes.values().map(|v| v.len()).sum();
-                            tracing::info!("Field rename affects {} files", changes.len());
+                            tracing::info!("Field rename affects {} files, {} edits", changes.len(), changes.values().map(|v| v.len()).sum::<usize>());
                             return Ok(Some(WorkspaceEdit {
                                 changes: Some(changes),
                                 ..Default::default()
                             }));
-                        } else {
                         }
                     }
                 }

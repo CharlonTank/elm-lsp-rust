@@ -55,11 +55,11 @@ pub struct StyledText {
     pub color: Option<String>,
 }
 
-impl MessagePart {
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for MessagePart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MessagePart::Text(s) => s.clone(),
-            MessagePart::Styled(styled) => styled.string.clone(),
+            MessagePart::Text(s) => write!(f, "{}", s),
+            MessagePart::Styled(styled) => write!(f, "{}", styled.string),
         }
     }
 }

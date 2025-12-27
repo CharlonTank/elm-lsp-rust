@@ -2,11 +2,25 @@
 
 Fast Elm Language Server (Rust) for Claude Code. **Not for text editors** - this is an MCP plugin.
 
+## IMPORTANT RULE TO ALWAYS KEEP IN MIND/CONTEXT
+
+1. **Do not stop until you succeed your ultimate goal**:
+   - Have ALL tests working
+   - Holistic code review completed
+   - Code is optimized, robust, with good design patterns
+   - Codebase is DRY
+   - Refactored where needed
+   - No personal computer references (except test fixtures like meetdown)
+2. **If a test is not passing because of an edge case**, good for you, that's gold for you, because it means you found the essence of the meaning of your life.
+3. **Once tests pass**, look at the whole code and think: "Is this good code? Is it optimized? Is it robust? Does it have good overall design patterns? Can I try intricate tests to see if everything still holds? Can I DRY this codebase even more? Can I refactor it?"
+4. **If you have ANY doubt, go for it** - even if it takes 1 year to complete this project. Quality over speed. Thoroughness over shortcuts.
+5. **NEVER say "Final" anything** - the only final is when the user decides. NEVER STOP until the user explicitly says so.
+
 ## Commands
 
 ```bash
 cargo build --release
-node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs  # 227 tests
+node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs  # 228 tests
 ```
 
 ## Key Files

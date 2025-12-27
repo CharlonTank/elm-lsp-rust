@@ -32,8 +32,8 @@ pub struct InferenceScope<'a> {
     source: &'a str,
     /// URI of the file being inferred
     uri: String,
-    /// Symbol bindings from the binder
-    symbol_links: &'a SymbolLinks,
+    /// Symbol bindings from the binder (reserved for future type inference)
+    _symbol_links: &'a SymbolLinks,
     /// Type variable substitutions
     substitutions: DisjointSet,
     /// Expression types discovered during inference
@@ -42,8 +42,8 @@ pub struct InferenceScope<'a> {
     bindings: HashMap<String, Type>,
     /// Field references collected during inference
     field_references: RecordFieldReferenceTable,
-    /// Types from annotations (rigid type variables)
-    annotation_vars: Vec<TypeVar>,
+    /// Types from annotations (rigid type variables, reserved for future)
+    _annotation_vars: Vec<TypeVar>,
     /// Parent scope for nested inferences
     parent: Option<&'a InferenceScope<'a>>,
 }
@@ -53,26 +53,27 @@ impl<'a> InferenceScope<'a> {
         Self {
             source,
             uri,
-            symbol_links,
+            _symbol_links: symbol_links,
             substitutions: DisjointSet::new(),
             expression_types: HashMap::new(),
             bindings: HashMap::new(),
             field_references: RecordFieldReferenceTable::new(),
-            annotation_vars: Vec::new(),
+            _annotation_vars: Vec::new(),
             parent: None,
         }
     }
 
+    #[allow(dead_code)]
     fn child(&'a self) -> Self {
         Self {
             source: self.source,
             uri: self.uri.clone(),
-            symbol_links: self.symbol_links,
+            _symbol_links: self._symbol_links,
             substitutions: self.substitutions.clone(),
             expression_types: HashMap::new(),
             bindings: HashMap::new(),
             field_references: RecordFieldReferenceTable::new(),
-            annotation_vars: Vec::new(),
+            _annotation_vars: Vec::new(),
             parent: Some(self),
         }
     }
@@ -215,12 +216,9 @@ impl<'a> InferenceScope<'a> {
             .or_else(|| {
                 // For direct type expressions
                 let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind().contains("type") || child.kind() == "type_ref" {
-                        return Some(child);
-                    }
-                }
-                None
+                let result = node.children(&mut cursor)
+                    .find(|child| child.kind().contains("type") || child.kind() == "type_ref");
+                result
             });
 
         if let Some(te) = type_expr {
@@ -590,11 +588,9 @@ impl<'a> InferenceScope<'a> {
             .map(|(i, arg)| {
                 // Check if this argument is a record expression and we have an expected type
                 if arg.kind() == "record_expr" {
-                    if let Some(Some(expected_type)) = param_types.get(i) {
+                    if let Some(Some(Type::Union(union_type))) = param_types.get(i) {
                         // If expected type is a Union (type alias for record), propagate it
-                        if let Type::Union(union_type) = expected_type {
-                            self.propagate_alias_to_record_recursive(*arg, union_type);
-                        }
+                        self.propagate_alias_to_record_recursive(*arg, union_type);
                     }
                 }
                 self.infer(*arg)
@@ -624,7 +620,7 @@ impl<'a> InferenceScope<'a> {
             Type::Var(_) => {
                 // Unknown function, create constraints
                 let ret_type = Type::fresh_var();
-                let func_type = Type::function(arg_types, ret_type.clone());
+                let _func_type = Type::function(arg_types, ret_type.clone());
                 // Would need to unify with the original here
                 ret_type
             }
@@ -915,7 +911,7 @@ impl<'a> InferenceScope<'a> {
         }
     }
 
-    fn infer_operator_as_function(&mut self, node: Node) -> Type {
+    fn infer_operator_as_function(&mut self, _node: Node) -> Type {
         // Operators like (+) are functions a -> a -> a
         let var = Type::fresh_var();
         Type::function(vec![var.clone(), var.clone()], var)

@@ -2,6 +2,9 @@
 /**
  * Manual test: Rename field navigationKey -> navKey in Types.elm
  * Then verify compilation with lamdera make
+ *
+ * NOTE: This test requires an external Elm/Lamdera project.
+ * Set the MEETDOWN environment variable to the path of your project.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -15,7 +18,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const MCP_SERVER = join(__dirname, "../mcp-wrapper/index.mjs");
-const MEETDOWN = "/Users/charles-andreassus/projects/meetdown";
+const MEETDOWN = process.env.MEETDOWN || join(__dirname, "meetdown");
 
 async function main() {
   // Count navigationKey occurrences before

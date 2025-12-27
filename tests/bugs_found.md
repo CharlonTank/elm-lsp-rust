@@ -1,12 +1,12 @@
 # Bugs Found During Deep Manual Testing
 
-Testing on **real meetdown codebase** at `/Users/charles-andreassus/projects/meetdown/` with `lamdera make` compilation.
+Testing on **real meetdown codebase** with `lamdera make` compilation.
 
 ## Test Protocol
 
-1. **Backup**: `cp -r /Users/charles-andreassus/projects/meetdown /tmp/meetdown_real_backup`
-2. **Restore**: `rm -rf /Users/charles-andreassus/projects/meetdown && cp -r /tmp/meetdown_real_backup /Users/charles-andreassus/projects/meetdown`
-3. **Compile**: `cd /Users/charles-andreassus/projects/meetdown && lamdera make src/Backend.elm src/Frontend.elm`
+1. **Backup**: `cp -r $PROJECT_DIR /tmp/project_backup`
+2. **Restore**: `rm -rf $PROJECT_DIR && cp -r /tmp/project_backup $PROJECT_DIR`
+3. **Compile**: `cd $PROJECT_DIR && lamdera make src/Backend.elm src/Frontend.elm`
 
 ---
 

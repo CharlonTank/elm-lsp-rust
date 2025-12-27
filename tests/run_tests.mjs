@@ -878,6 +878,78 @@ async function testRenameFile() {
   }
 }
 
+async function testRemoveFieldFirstField() {
+  // Test removing the FIRST field from a type alias (tricky case)
+  const testFile = join(FIXTURE_DIR, "src/FieldRename.elm");
+  backupFixture();
+
+  try {
+    // Person type is:
+    // type alias Person =
+    //     { name : String
+    //     , email : String
+    //     }
+    // We'll remove 'name' which is the FIRST field
+
+    // First, prepare to see what we're working with
+    const prepareResult = await callTool("elm_prepare_remove_field", {
+      file_path: testFile,
+      line: 4, // 0-indexed (line 5 in editor: "    { name : String")
+      character: 6, // position of "name" (after "    { ")
+      field_name: "name",
+    });
+
+    // Now remove the field
+    const result = await callTool("elm_remove_field", {
+      file_path: testFile,
+      line: 4, // 0-indexed
+      character: 6,
+      field_name: "name",
+    });
+
+    if (result.includes("Successfully") || result.includes("Removed")) {
+      const newContent = readFileSync(testFile, "utf-8");
+
+      // Key assertion: after removing first field, the result should be:
+      // type alias Person =
+      //     { email : String
+      //     }
+      // NOT:
+      //     , email : String
+      //     }
+
+      // Check the type definition looks correct
+      if (newContent.includes(", email")) {
+        throw new Error("After removing first field 'name', result should not have orphaned comma before 'email'. Got content with ', email'");
+      }
+
+      if (!newContent.includes("{ email : String")) {
+        throw new Error("After removing first field 'name', result should have '{ email : String'. Content: " +
+          newContent.split("\n").slice(3, 8).join("\n"));
+      }
+
+      // Field accesses should be replaced with Debug.todo
+      if (!newContent.includes("Debug.todo")) {
+        throw new Error("Field accesses should be replaced with Debug.todo");
+      }
+
+      // Check record update was handled correctly: { person | name = newName }
+      // After removing 'name' field, if 'name' was the ONLY field in the update,
+      // the update should become just 'person' (or replaced with something sensible)
+      // NOT '{ person | }' which is invalid Elm
+      if (newContent.includes("{ person | }")) {
+        throw new Error("Record update with only the removed field should not leave '{ person | }'");
+      }
+
+      logTest("remove_field: first field removes correctly", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
 async function testMoveFile() {
   // Test moving Utils.elm to Helpers/Utils.elm
   const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
@@ -1005,6 +1077,7 @@ async function runTests() {
       ["Remove Variant (variant with args)", testRemoveVariantWithArgs],
       ["Remove Variant (only variant)", testRemoveVariantOnlyVariant],
       ["Remove Variant (useless wildcard)", testRemoveVariantUselessWildcard],
+      ["Remove Field (first field)", testRemoveFieldFirstField],
       ["Rename File", testRenameFile],
       ["Move File", testMoveFile],
     ];

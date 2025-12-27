@@ -40,7 +40,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
 
 [[bin]]
 name = "benchmark"
@@ -48,6 +47,3 @@ path = "src/bin/benchmark.rs"
 
 [dev-dependencies]
 tempfile = "3"
-
-[build-dependencies]
-cc = "1"
