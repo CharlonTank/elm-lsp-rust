@@ -119,6 +119,78 @@ impl RemoveVariantResult {
 }
 
 // ============================================================================
+// Variant Addition Types
+// ============================================================================
+
+/// Information about a case expression that needs a new branch
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CaseExpressionInfo {
+    pub uri: String,
+    pub line: u32,
+    pub character: u32,
+    pub context: String,
+    pub module_name: String,
+    pub has_wildcard: bool,
+    /// Range where to insert the new branch
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insert_range: Option<Range>,
+    /// The indentation to use for the new branch
+    pub indentation: String,
+}
+
+/// Result of preparing to add a variant
+#[derive(Debug, serde::Serialize)]
+pub struct PrepareAddVariantResult {
+    pub success: bool,
+    pub message: String,
+    pub type_name: String,
+    pub variant_name: String,
+    pub existing_variants: Vec<String>,
+    pub case_expressions: Vec<CaseExpressionInfo>,
+    pub cases_needing_branch: usize,
+}
+
+impl PrepareAddVariantResult {
+    pub fn error(message: &str) -> Self {
+        Self {
+            success: false,
+            message: message.to_string(),
+            type_name: String::new(),
+            variant_name: String::new(),
+            existing_variants: Vec::new(),
+            case_expressions: Vec::new(),
+            cases_needing_branch: 0,
+        }
+    }
+}
+
+/// Result of adding a variant
+#[derive(Debug, serde::Serialize)]
+pub struct AddVariantResult {
+    pub success: bool,
+    pub message: String,
+    pub changes: Option<HashMap<Url, Vec<TextEdit>>>,
+}
+
+impl AddVariantResult {
+    pub fn error(message: &str) -> Self {
+        Self {
+            success: false,
+            message: message.to_string(),
+            changes: None,
+        }
+    }
+
+    pub fn success(message: &str, changes: HashMap<Url, Vec<TextEdit>>) -> Self {
+        Self {
+            success: true,
+            message: message.to_string(),
+            changes: Some(changes),
+        }
+    }
+}
+
+// ============================================================================
 // Field Removal Types
 // ============================================================================
 

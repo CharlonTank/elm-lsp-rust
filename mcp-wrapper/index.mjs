@@ -1835,6 +1835,127 @@ server.tool(
   }
 );
 
+server.tool(
+  "elm_prepare_add_variant",
+  "Check what would happen when adding a variant to a custom type. Returns existing variants and case expressions that would need new branches.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    type_name: z.string().describe("Name of the custom type (e.g., 'Color')"),
+    new_variant_name: z.string().describe("Name of the new variant to add (e.g., 'Purple')"),
+  },
+  async ({ file_path, type_name, new_variant_name }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    const result = await client.executeCommand("elm.prepareAddVariant", [uri, type_name, new_variant_name]);
+
+    if (!result || !result.success) {
+      return { content: [{ type: "text", text: result?.message || `Type '${type_name}' not found` }] };
+    }
+
+    const existingVariants = result.existingVariants?.join(", ") || "none";
+    const caseExpressions = result.caseExpressions || [];
+    const casesNeedingBranch = result.casesNeedingBranch || 0;
+
+    let text = `Type: ${result.typeName}\n` +
+               `New variant: ${result.variantName}\n` +
+               `Existing variants: [${existingVariants}]\n` +
+               `Case expressions found: ${caseExpressions.length}\n` +
+               `Cases needing new branch: ${casesNeedingBranch}\n`;
+
+    if (caseExpressions.length > 0) {
+      text += `\nCase expressions:\n`;
+      caseExpressions.forEach((c, idx) => {
+        const wildcard = c.has_wildcard ? " (has wildcard, no change needed)" : " (needs new branch)";
+        text += `  ${idx + 1}. ${c.module_name}:${c.line + 1}${wildcard}\n`;
+        text += `     Context: "${c.context}"\n`;
+      });
+    }
+
+    if (casesNeedingBranch > 0) {
+      text += `\n✓ Ready to add. Use elm_add_variant to execute.`;
+    } else if (caseExpressions.length > 0) {
+      text += `\nAll case expressions have wildcards - no pattern changes needed.`;
+    }
+
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+server.tool(
+  "elm_add_variant",
+  "Add a new variant to a custom type. Adds the variant to the type definition and inserts Debug.todo branches in case expressions.",
+  {
+    file_path: z.string().describe("Path to the Elm file containing the type definition"),
+    type_name: z.string().describe("Name of the custom type (e.g., 'Color')"),
+    new_variant_name: z.string().describe("Name of the new variant to add (e.g., 'Purple')"),
+    variant_args: z.string().optional().describe("Optional variant arguments (e.g., 'Int String' for 'Purple Int String')"),
+  },
+  async ({ file_path, type_name, new_variant_name, variant_args }) => {
+    const absPath = resolveFilePath(file_path);
+    const workspaceRoot = findWorkspaceRoot(absPath);
+    if (!workspaceRoot) {
+      return { content: [{ type: "text", text: "No elm.json found in parent directories" }] };
+    }
+
+    const client = await ensureClient(workspaceRoot);
+    const uri = `file://${absPath}`;
+    const content = readFileSync(absPath, "utf-8");
+    await client.openDocument(uri, content);
+
+    const args = [uri, type_name, new_variant_name];
+    if (variant_args) {
+      args.push(variant_args);
+    }
+
+    const result = await client.executeCommand("elm.addVariant", args);
+
+    if (!result) {
+      return { content: [{ type: "text", text: `Failed to add variant '${new_variant_name}' to type '${type_name}'` }] };
+    }
+
+    if (!result.success) {
+      return {
+        content: [{
+          type: "text",
+          text: `Cannot add variant '${new_variant_name}' to type '${type_name}'\n` +
+                `Reason: ${result.message}`,
+        }],
+      };
+    }
+
+    // Success - apply the changes
+    if (result.changes) {
+      const applied = await applyWorkspaceEdit(result.changes, client, workspaceRoot);
+      const fileCount = applied.length;
+      const totalEdits = applied.reduce((sum, a) => sum + a.edits, 0);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Successfully: ${result.message}\n` +
+                `Applied ${totalEdits} edit(s) in ${fileCount} file(s)`,
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: result.message || "Variant added successfully",
+      }],
+    };
+  }
+);
+
 // Helper to extract module name from Elm source
 function extractModuleName(content) {
   const match = content.match(/^module\s+([A-Za-z.]+)\s+exposing/m);

@@ -881,4 +881,333 @@ impl Workspace {
     fn is_union_pattern(pattern: &tree_sitter::Node) -> bool {
         pattern.kind() == "union_pattern" || pattern.kind() == "upper_case_qid"
     }
+
+    // ========================================================================
+    // Add Variant Operations
+    // ========================================================================
+
+    /// Prepare to add a new variant to a custom type
+    /// Returns information about the type and case expressions that need new branches
+    pub fn prepare_add_variant(
+        &self,
+        uri: &Url,
+        type_name: &str,
+        new_variant_name: &str,
+    ) -> super::PrepareAddVariantResult {
+        // Validate variant name starts with uppercase
+        if !new_variant_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            return super::PrepareAddVariantResult::error(
+                "Variant name must start with an uppercase letter",
+            );
+        }
+
+        // Find the type in this module
+        let path = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return super::PrepareAddVariantResult::error("Invalid URI"),
+        };
+
+        let module = match self.find_module_by_path(&path) {
+            Some(m) => m,
+            None => return super::PrepareAddVariantResult::error("Module not found"),
+        };
+
+        // Find the type definition
+        let type_symbol = module.symbols.iter().find(|s| {
+            s.kind == tower_lsp::lsp_types::SymbolKind::ENUM && s.name == type_name
+        });
+
+        let type_symbol = match type_symbol {
+            Some(s) => s,
+            None => {
+                return super::PrepareAddVariantResult::error(&format!(
+                    "Type '{}' not found in module",
+                    type_name
+                ))
+            }
+        };
+
+        // Get existing variants
+        let existing_variants: Vec<String> = type_symbol.variants.iter().map(|v| v.name.clone()).collect();
+
+        // Check if variant already exists
+        if existing_variants.contains(&new_variant_name.to_string()) {
+            return super::PrepareAddVariantResult::error(&format!(
+                "Variant '{}' already exists in type '{}'",
+                new_variant_name, type_name
+            ));
+        }
+
+        // Find all case expressions that match on this type by looking for pattern matches
+        // on any of the existing variants
+        let mut case_expressions = Vec::new();
+        let source_module = module.module_name.clone();
+
+        // Use the first variant to find all case expressions on this type
+        if let Some(first_variant) = existing_variants.first() {
+            let usages = self.get_variant_usages(uri, first_variant, Some(&source_module));
+
+            for usage in usages {
+                if usage.usage_type == UsageType::PatternMatch {
+                    // Found a pattern match - find the parent case expression
+                    if let Some(case_info) = self.get_case_expression_info(&usage) {
+                        // Check if we already have this case expression
+                        let already_have = case_expressions.iter().any(|c: &super::CaseExpressionInfo| {
+                            c.uri == case_info.uri
+                                && c.line == case_info.line
+                                && c.character == case_info.character
+                        });
+
+                        if !already_have {
+                            case_expressions.push(case_info);
+                        }
+                    }
+                }
+            }
+        }
+
+        let cases_needing_branch = case_expressions.iter().filter(|c| !c.has_wildcard).count();
+
+        super::PrepareAddVariantResult {
+            success: true,
+            message: format!(
+                "Found {} case expression(s) matching on '{}', {} need new branch",
+                case_expressions.len(),
+                type_name,
+                cases_needing_branch
+            ),
+            type_name: type_name.to_string(),
+            variant_name: new_variant_name.to_string(),
+            existing_variants,
+            case_expressions,
+            cases_needing_branch,
+        }
+    }
+
+    /// Get information about a case expression from a pattern match usage
+    fn get_case_expression_info(&self, usage: &VariantUsage) -> Option<super::CaseExpressionInfo> {
+        let uri = Url::parse(&usage.uri).ok()?;
+        let content = self.read_file_content(&uri)?;
+        let tree = self.parser.parse(&content)?;
+
+        let point = tree_sitter::Point {
+            row: usage.line as usize,
+            column: usage.character as usize,
+        };
+
+        let node = tree.root_node().descendant_for_point_range(point, point)?;
+
+        // Walk up to find the case_of_expr
+        let mut current = Some(node);
+        let mut case_of_expr = None;
+        while let Some(n) = current {
+            if n.kind() == "case_of_expr" {
+                case_of_expr = Some(n);
+                break;
+            }
+            current = n.parent();
+        }
+
+        let case_node = case_of_expr?;
+
+        // Check if case has a wildcard pattern
+        let has_wildcard = self.case_has_wildcard(&case_node, &content);
+
+        // Find the last branch to determine insertion point
+        let mut last_branch = None;
+        let mut cursor = case_node.walk();
+        for child in case_node.children(&mut cursor) {
+            if child.kind() == "case_of_branch" {
+                last_branch = Some(child);
+            }
+        }
+
+        let (insert_range, indentation) = if let Some(branch) = last_branch {
+            let end_pos = branch.end_position();
+            let lines: Vec<&str> = content.lines().collect();
+
+            // Get indentation from the last branch
+            let branch_line = lines.get(branch.start_position().row).unwrap_or(&"");
+            let indent = branch_line.len() - branch_line.trim_start().len();
+            let indentation = " ".repeat(indent);
+
+            (
+                Some(Range {
+                    start: Position {
+                        line: end_pos.row as u32,
+                        character: end_pos.column as u32,
+                    },
+                    end: Position {
+                        line: end_pos.row as u32,
+                        character: end_pos.column as u32,
+                    },
+                }),
+                indentation,
+            )
+        } else {
+            (None, "        ".to_string())
+        };
+
+        // Get context line
+        let context = content
+            .lines()
+            .nth(case_node.start_position().row)
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default();
+
+        Some(super::CaseExpressionInfo {
+            uri: usage.uri.clone(),
+            line: case_node.start_position().row as u32,
+            character: case_node.start_position().column as u32,
+            context,
+            module_name: usage.module_name.clone(),
+            has_wildcard,
+            insert_range,
+            indentation,
+        })
+    }
+
+    /// Check if a case expression has a wildcard pattern
+    fn case_has_wildcard(&self, case_node: &tree_sitter::Node, content: &str) -> bool {
+        let mut cursor = case_node.walk();
+        for child in case_node.children(&mut cursor) {
+            if child.kind() == "case_of_branch" {
+                // Find the pattern in this branch
+                let mut branch_cursor = child.walk();
+                for branch_child in child.children(&mut branch_cursor) {
+                    if branch_child.kind() == "pattern" {
+                        if Self::is_wildcard_pattern(&branch_child, content) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Add a new variant to a custom type and update all case expressions
+    pub fn add_variant(
+        &self,
+        uri: &Url,
+        type_name: &str,
+        new_variant_name: &str,
+        variant_args: Option<&str>,
+    ) -> anyhow::Result<super::AddVariantResult> {
+        // First, prepare to validate and gather info
+        let prep = self.prepare_add_variant(uri, type_name, new_variant_name);
+        if !prep.success {
+            return Ok(super::AddVariantResult::error(&prep.message));
+        }
+
+        // Read the file content
+        let path = uri.to_file_path().map_err(|_| anyhow::anyhow!("Invalid URI"))?;
+        let content = std::fs::read_to_string(&path)?;
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Find the type definition and its last variant line
+        let mut type_start_line = None;
+        let mut last_variant_line = None;
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+
+            // Find type declaration
+            if trimmed.starts_with("type ") && trimmed.contains(type_name) {
+                // Check if it's exactly our type (not a substring)
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 && parts[1] == type_name {
+                    type_start_line = Some(i);
+                }
+            }
+
+            // Track variant lines after finding type
+            if type_start_line.is_some() {
+                if trimmed.starts_with('=') || trimmed.starts_with('|') {
+                    last_variant_line = Some(i);
+                } else if last_variant_line.is_some()
+                    && !trimmed.is_empty()
+                    && !trimmed.starts_with('|')
+                    && !trimmed.starts_with('=')
+                {
+                    // We've moved past the type definition
+                    break;
+                }
+            }
+        }
+
+        let last_variant_line =
+            last_variant_line.ok_or_else(|| anyhow::anyhow!("Could not find type definition"))?;
+
+        // Build the changes
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+        // 1. Add the new variant after the last existing variant
+        let variant_line_content = lines[last_variant_line];
+        let indent = variant_line_content.len() - variant_line_content.trim_start().len();
+        let indentation = " ".repeat(indent);
+
+        let new_variant_text = if let Some(args) = variant_args {
+            format!("\n{}| {} {}", indentation, new_variant_name, args)
+        } else {
+            format!("\n{}| {}", indentation, new_variant_name)
+        };
+
+        changes.entry(uri.clone()).or_default().push(TextEdit {
+            range: Range {
+                start: Position {
+                    line: last_variant_line as u32,
+                    character: variant_line_content.len() as u32,
+                },
+                end: Position {
+                    line: last_variant_line as u32,
+                    character: variant_line_content.len() as u32,
+                },
+            },
+            new_text: new_variant_text,
+        });
+
+        // 2. Add branches to case expressions that don't have wildcards
+        let mut branches_added = 0;
+        for case_info in &prep.case_expressions {
+            if case_info.has_wildcard {
+                continue; // Wildcard already handles new variants
+            }
+
+            if let Some(insert_range) = case_info.insert_range {
+                let case_uri = Url::parse(&case_info.uri)
+                    .map_err(|_| anyhow::anyhow!("Invalid case URI"))?;
+
+                // Build the new branch with Debug.todo
+                let branch_text = format!(
+                    "\n\n{}{} ->\n{}    Debug.todo \"Handle {}\"",
+                    case_info.indentation, new_variant_name, case_info.indentation, new_variant_name
+                );
+
+                changes.entry(case_uri).or_default().push(TextEdit {
+                    range: insert_range,
+                    new_text: branch_text,
+                });
+
+                branches_added += 1;
+            }
+        }
+
+        // Sort edits in reverse order
+        Self::sort_edits_reverse(&mut changes);
+
+        let message = if branches_added > 0 {
+            format!(
+                "Added variant '{}' to '{}' and added {} case branch(es) with Debug.todo",
+                new_variant_name, type_name, branches_added
+            )
+        } else {
+            format!(
+                "Added variant '{}' to '{}' (all case expressions have wildcards)",
+                new_variant_name, type_name
+            )
+        };
+
+        Ok(super::AddVariantResult::success(&message, changes))
+    }
 }

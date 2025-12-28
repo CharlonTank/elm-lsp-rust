@@ -32,10 +32,12 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 ---
 
-## All Tests (228 total)
+## All Tests (231 total)
 
-### Fixture Tests (24 tests)
+### Fixture Tests (27 tests)
 
+- **Add Variant** → elm_add_variant
+- **Add Variant (with case expression)** → elm_add_variant
 - **Apply Code Action** → elm_apply_code_action
 - **Code Actions** → elm_code_actions
 - **Definition** → elm_definition
@@ -44,6 +46,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Format** → elm_format
 - **Move File** → elm_move_file, elm_notify_file_changed
 - **Move Function** → elm_move_function
+- **Prepare Add Variant** → elm_prepare_add_variant
 - **Prepare Remove Variant** → elm_prepare_remove_variant
 - **Prepare Remove Variant (with usages)** → elm_prepare_remove_variant
 - **References** → elm_references
@@ -141,7 +144,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 ## Test Execution
 
 ```bash
-# Run fixture tests (24 tests)
+# Run fixture tests (27 tests)
 node tests/run_tests.mjs
 
 # Run meetdown real-world tests (204 tests)
@@ -153,4 +156,4 @@ node tests/run_all_tests.mjs
 
 ---
 
-*Last updated: 2025-12-27 - All 228 tests passing ✅*
+*Last updated: 2025-12-28 - All 231 tests passing ✅*

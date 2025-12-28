@@ -820,6 +820,118 @@ async function testRemoveVariantUselessWildcard() {
   }
 }
 
+async function testPrepareAddVariant() {
+  // Test prepare_add_variant to see what would happen when adding a variant
+  const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+
+  const result = await callTool("elm_prepare_add_variant", {
+    file_path: testFile,
+    type_name: "Status",
+    new_variant_name: "Pending",
+  });
+
+  assertContains(result, "Status", "Should identify Status type");
+  assertContains(result, "Pending", "Should identify new variant name");
+  assertContains(result, "Active", "Should list existing variants");
+  assertContains(result, "Inactive", "Should list existing variants");
+  logTest("prepare_add_variant: check Status type", true);
+}
+
+async function testAddVariant() {
+  // Test adding a variant to a custom type
+  backupFixture();
+
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+    const originalContent = readFileSync(testFile, "utf-8");
+
+    // Verify Status type exists with Active and Inactive
+    assertContains(originalContent, "type Status", "Status type should exist");
+    assertContains(originalContent, "= Active", "Active should exist");
+    assertContains(originalContent, "| Inactive", "Inactive should exist");
+    // Verify Pending does NOT exist yet
+    if (originalContent.includes("| Pending")) {
+      throw new Error("Pending should NOT exist before adding");
+    }
+
+    // Add 'Pending' variant to Status type
+    const result = await callTool("elm_add_variant", {
+      file_path: testFile,
+      type_name: "Status",
+      new_variant_name: "Pending",
+    });
+
+    if (result.includes("Successfully") || result.includes("Added") || result.includes("added")) {
+      const newContent = readFileSync(testFile, "utf-8");
+
+      // Verify Pending was added to the type definition
+      if (!newContent.includes("| Pending")) {
+        throw new Error("Pending variant should be added to type definition");
+      }
+
+      // Verify code compiles (Status doesn't have any case expressions in this test file,
+      // so no Debug.todo should be added)
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after add variant: ${compileResult.error.substring(0, 200)}`);
+      }
+
+      logTest("add_variant: add Pending to Status", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
+async function testAddVariantWithCaseExpression() {
+  // Test adding a variant when case expressions exist
+  backupFixture();
+
+  try {
+    const testFile = join(FIXTURE_DIR, "src/TestRemoveVariant.elm");
+    const originalContent = readFileSync(testFile, "utf-8");
+
+    // Verify Message type exists and has case expressions
+    assertContains(originalContent, "type Message", "Message type should exist");
+    assertContains(originalContent, "case msg of", "Case expression should exist");
+
+    // Add 'ErrorMsg' variant to Message type
+    const result = await callTool("elm_add_variant", {
+      file_path: testFile,
+      type_name: "Message",
+      new_variant_name: "ErrorMsg",
+    });
+
+    if (result.includes("Successfully") || result.includes("Added") || result.includes("added")) {
+      const newContent = readFileSync(testFile, "utf-8");
+
+      // Verify ErrorMsg was added to the type definition
+      if (!newContent.includes("| ErrorMsg")) {
+        throw new Error("ErrorMsg variant should be added to type definition");
+      }
+
+      // Verify Debug.todo branches were added for case expressions
+      if (!newContent.includes('Debug.todo "Handle ErrorMsg"')) {
+        throw new Error("Debug.todo branch should be added for ErrorMsg in case expressions");
+      }
+
+      // Verify code compiles
+      const compileResult = compileFixture();
+      if (!compileResult.success) {
+        throw new Error(`Code does not compile after add variant with case: ${compileResult.error.substring(0, 200)}`);
+      }
+
+      logTest("add_variant: add ErrorMsg with Debug.todo branches", true);
+    } else {
+      throw new Error(`Unexpected result: ${result}`);
+    }
+  } finally {
+    restoreFixture();
+  }
+}
+
 async function testRenameFile() {
   // Test renaming Utils.elm to Helper.elm
   const utilsFile = join(FIXTURE_DIR, "src/Utils.elm");
@@ -1077,6 +1189,9 @@ async function runTests() {
       ["Remove Variant (variant with args)", testRemoveVariantWithArgs],
       ["Remove Variant (only variant)", testRemoveVariantOnlyVariant],
       ["Remove Variant (useless wildcard)", testRemoveVariantUselessWildcard],
+      ["Prepare Add Variant", testPrepareAddVariant],
+      ["Add Variant", testAddVariant],
+      ["Add Variant (with case expression)", testAddVariantWithCaseExpression],
       ["Remove Field (first field)", testRemoveFieldFirstField],
       ["Rename File", testRenameFile],
       ["Move File", testMoveFile],

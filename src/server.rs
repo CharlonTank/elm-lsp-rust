@@ -24,6 +24,8 @@ const CMD_NOTIFY_FILE_RENAMED: &str = "elm.notifyFileRenamed";
 const CMD_GENERATE_ERD: &str = "elm.generateErd";
 const CMD_PREPARE_REMOVE_FIELD: &str = "elm.prepareRemoveField";
 const CMD_REMOVE_FIELD: &str = "elm.removeField";
+const CMD_PREPARE_ADD_VARIANT: &str = "elm.prepareAddVariant";
+const CMD_ADD_VARIANT: &str = "elm.addVariant";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -553,6 +555,8 @@ impl LanguageServer for ElmLanguageServer {
                         CMD_GENERATE_ERD.to_string(),
                         CMD_PREPARE_REMOVE_FIELD.to_string(),
                         CMD_REMOVE_FIELD.to_string(),
+                        CMD_PREPARE_ADD_VARIANT.to_string(),
+                        CMD_ADD_VARIANT.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -2143,6 +2147,141 @@ impl LanguageServer for ElmLanguageServer {
                         "success": false,
                         "error": format!("No field found at line {}", line + 1)
                     })))
+                }
+            }
+            CMD_PREPARE_ADD_VARIANT => {
+                // Expected arguments: [uri, type_name, new_variant_name]
+                if params.arguments.len() != 3 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 3 arguments: uri, type_name, new_variant_name"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let type_name: String = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let new_variant_name: String = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let result = {
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.prepare_add_variant(&uri, &type_name, &new_variant_name)
+                        } else {
+                            crate::workspace::PrepareAddVariantResult::error("Workspace not initialized")
+                        }
+                    } else {
+                        crate::workspace::PrepareAddVariantResult::error("Could not acquire workspace lock")
+                    }
+                };
+
+                // Convert case_expressions to JSON
+                let case_expressions_json: Vec<serde_json::Value> = result.case_expressions.iter().map(|c| {
+                    serde_json::json!({
+                        "uri": c.uri,
+                        "line": c.line,
+                        "character": c.character,
+                        "context": c.context,
+                        "module_name": c.module_name,
+                        "has_wildcard": c.has_wildcard,
+                        "indentation": c.indentation
+                    })
+                }).collect();
+
+                Ok(Some(serde_json::json!({
+                    "success": result.success,
+                    "message": result.message,
+                    "typeName": result.type_name,
+                    "variantName": result.variant_name,
+                    "existingVariants": result.existing_variants,
+                    "caseExpressions": case_expressions_json,
+                    "casesNeedingBranch": result.cases_needing_branch
+                })))
+            }
+            CMD_ADD_VARIANT => {
+                // Expected arguments: [uri, type_name, new_variant_name, variant_args (optional)]
+                if params.arguments.len() < 3 || params.arguments.len() > 4 {
+                    return Ok(Some(serde_json::json!({
+                        "error": "Expected 3-4 arguments: uri, type_name, new_variant_name, [variant_args]"
+                    })));
+                }
+
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let type_name: String = serde_json::from_value(params.arguments[1].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let new_variant_name: String = serde_json::from_value(params.arguments[2].clone())
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+                let variant_args: Option<String> = if params.arguments.len() > 3 {
+                    serde_json::from_value(params.arguments[3].clone()).ok()
+                } else {
+                    None
+                };
+
+                let uri = Url::parse(&uri_str)
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                let result = {
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            workspace.add_variant(&uri, &type_name, &new_variant_name, variant_args.as_deref())
+                        } else {
+                            Err(anyhow::anyhow!("Workspace not initialized"))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("Could not acquire workspace lock"))
+                    }
+                };
+
+                match result {
+                    Ok(add_result) => {
+                        if add_result.success {
+                            // Return the changes for the caller to apply
+                            let changes_json = if let Some(ref changes) = add_result.changes {
+                                let mut changes_map = serde_json::Map::new();
+                                for (uri, edits) in changes {
+                                    let edits_json: Vec<serde_json::Value> = edits.iter().map(|edit| {
+                                        serde_json::json!({
+                                            "range": {
+                                                "start": { "line": edit.range.start.line, "character": edit.range.start.character },
+                                                "end": { "line": edit.range.end.line, "character": edit.range.end.character }
+                                            },
+                                            "newText": edit.new_text
+                                        })
+                                    }).collect();
+                                    changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                                }
+                                Some(serde_json::Value::Object(changes_map))
+                            } else {
+                                None
+                            };
+
+                            Ok(Some(serde_json::json!({
+                                "success": true,
+                                "message": add_result.message,
+                                "typeName": type_name,
+                                "variantName": new_variant_name,
+                                "changes": changes_json
+                            })))
+                        } else {
+                            Ok(Some(serde_json::json!({
+                                "success": false,
+                                "message": add_result.message,
+                                "typeName": type_name,
+                                "variantName": new_variant_name
+                            })))
+                        }
+                    }
+                    Err(e) => {
+                        Ok(Some(serde_json::json!({
+                            "success": false,
+                            "message": e.to_string()
+                        })))
+                    }
                 }
             }
             _ => {
