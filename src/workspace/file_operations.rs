@@ -254,7 +254,7 @@ impl Workspace {
 }
 
 /// Extract module name from file content using simple string parsing
-fn extract_module_name_from_content(content: &str) -> Option<String> {
+pub(crate) fn extract_module_name_from_content(content: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(after_module) = trimmed.strip_prefix("module ") {
@@ -276,7 +276,7 @@ fn extract_module_name_from_content(content: &str) -> Option<String> {
 }
 
 /// Find the range of the module declaration (just "module ModuleName exposing" part)
-fn find_module_declaration_range(content: &str) -> Option<Range> {
+pub(crate) fn find_module_declaration_range(content: &str) -> Option<Range> {
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if let Some(after_module) = trimmed.strip_prefix("module ") {

@@ -1067,6 +1067,33 @@ impl Workspace {
         })
     }
 
+    /// Find the position where new imports should be inserted in a file.
+    /// Returns the position at the end of the last import statement (or after module declaration).
+    fn find_import_insertion_point(&self, uri: &Url) -> Option<Position> {
+        let content = self.read_file_content(uri)?;
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Find the last import line
+        let mut last_import_line = None;
+        let mut module_line = None;
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("module ") {
+                module_line = Some(i);
+            } else if trimmed.starts_with("import ") {
+                last_import_line = Some(i);
+            }
+        }
+
+        // Insert after the last import, or after module declaration
+        let insert_line = last_import_line.or(module_line)?;
+        Some(Position {
+            line: (insert_line + 1) as u32,
+            character: 0,
+        })
+    }
+
     /// Check if a case expression has a wildcard pattern
     fn case_has_wildcard(&self, case_node: &tree_sitter::Node, content: &str) -> bool {
         let mut cursor = case_node.walk();
@@ -1087,17 +1114,35 @@ impl Workspace {
     }
 
     /// Add a new variant to a custom type and update all case expressions
+    /// If `branches` is provided, each element corresponds to the case expression at that index.
+    /// Each branch has { imports: [...], code: "..." }. Empty code = Debug.todo.
+    /// When branches is provided, must match exact count of cases needing branches.
     pub fn add_variant(
         &self,
         uri: &Url,
         type_name: &str,
         new_variant_name: &str,
         variant_args: Option<&str>,
+        branches: Option<&[super::BranchConfig]>,
     ) -> anyhow::Result<super::AddVariantResult> {
         // First, prepare to validate and gather info
         let prep = self.prepare_add_variant(uri, type_name, new_variant_name);
         if !prep.success {
             return Ok(super::AddVariantResult::error(&prep.message));
+        }
+
+        // Validate branches count - if provided, must match exactly
+        if let Some(br) = branches {
+            if br.len() != prep.cases_needing_branch {
+                return Ok(super::AddVariantResult::error_with_info(
+                    &format!(
+                        "Wrong number of branches: got {} but exactly {} case expression(s) need branches. Use elm_prepare_add_variant to see which cases need code.",
+                        br.len(),
+                        prep.cases_needing_branch
+                    ),
+                    prep,
+                ));
+            }
         }
 
         // Read the file content
@@ -1168,7 +1213,11 @@ impl Workspace {
         });
 
         // 2. Add branches to case expressions that don't have wildcards
+        // Also collect imports per file for later
         let mut branches_added = 0;
+        let mut branch_index = 0;
+        let mut imports_by_file: HashMap<Url, Vec<String>> = HashMap::new();
+
         for case_info in &prep.case_expressions {
             if case_info.has_wildcard {
                 continue; // Wildcard already handles new variants
@@ -1178,10 +1227,36 @@ impl Workspace {
                 let case_uri = Url::parse(&case_info.uri)
                     .map_err(|_| anyhow::anyhow!("Invalid case URI"))?;
 
-                // Build the new branch with Debug.todo
+                // Default Debug.todo with variant name
+                let default_todo = format!("Debug.todo \"Handle {}\"", new_variant_name);
+
+                // Get branch config for this index, or use default
+                let branch_body = if let Some(br) = branches {
+                    if let Some(config) = br.get(branch_index) {
+                        // Collect imports for this file
+                        let imports = config.imports();
+                        if !imports.is_empty() {
+                            imports_by_file
+                                .entry(case_uri.clone())
+                                .or_default()
+                                .extend(imports.iter().cloned());
+                        }
+                        // Use code or fall back to Debug.todo
+                        match config.code() {
+                            Some(code) => code.to_string(),
+                            None => default_todo.clone(),
+                        }
+                    } else {
+                        default_todo.clone()
+                    }
+                } else {
+                    default_todo.clone()
+                };
+
+                // Build the new branch
                 let branch_text = format!(
-                    "\n\n{}{} ->\n{}    Debug.todo \"Handle {}\"",
-                    case_info.indentation, new_variant_name, case_info.indentation, new_variant_name
+                    "\n\n{}{} ->\n{}    {}",
+                    case_info.indentation, new_variant_name, case_info.indentation, branch_body
                 );
 
                 changes.entry(case_uri).or_default().push(TextEdit {
@@ -1190,21 +1265,64 @@ impl Workspace {
                 });
 
                 branches_added += 1;
+                branch_index += 1;
+            }
+        }
+
+        // 3. Add imports to files (merge and dedupe per file)
+        let mut imports_added = 0;
+        for (file_uri, import_list) in imports_by_file {
+            // Dedupe imports
+            let mut unique_imports: Vec<String> = import_list.clone();
+            unique_imports.sort();
+            unique_imports.dedup();
+
+            if !unique_imports.is_empty() {
+                if let Some(import_pos) = self.find_import_insertion_point(&file_uri) {
+                    let import_text = unique_imports
+                        .iter()
+                        .map(|i| format!("import {}", i))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    changes.entry(file_uri).or_default().push(TextEdit {
+                        range: Range {
+                            start: import_pos,
+                            end: import_pos,
+                        },
+                        new_text: format!("{}\n", import_text),
+                    });
+                    imports_added += 1;
+                }
             }
         }
 
         // Sort edits in reverse order
         Self::sort_edits_reverse(&mut changes);
 
+        let has_custom_code = branches.map(|b| b.iter().any(|c| c.code().is_some())).unwrap_or(false);
+        let import_suffix = if imports_added > 0 {
+            format!(", added imports to {} file(s)", imports_added)
+        } else {
+            String::new()
+        };
+
         let message = if branches_added > 0 {
-            format!(
-                "Added variant '{}' to '{}' and added {} case branch(es) with Debug.todo",
-                new_variant_name, type_name, branches_added
-            )
+            if has_custom_code {
+                format!(
+                    "Added variant '{}' to '{}' and added {} case branch(es) with custom code{}",
+                    new_variant_name, type_name, branches_added, import_suffix
+                )
+            } else {
+                format!(
+                    "Added variant '{}' to '{}' and added {} case branch(es) with Debug.todo{}",
+                    new_variant_name, type_name, branches_added, import_suffix
+                )
+            }
         } else {
             format!(
-                "Added variant '{}' to '{}' (all case expressions have wildcards)",
-                new_variant_name, type_name
+                "Added variant '{}' to '{}' (all case expressions have wildcards){}",
+                new_variant_name, type_name, import_suffix
             )
         };
 

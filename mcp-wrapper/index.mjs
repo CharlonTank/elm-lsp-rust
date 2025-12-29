@@ -1892,14 +1892,25 @@ server.tool(
 
 server.tool(
   "elm_add_variant",
-  "Add a new variant to a custom type. Adds the variant to the type definition and inserts Debug.todo branches in case expressions.",
+  "Add a new variant to a custom type. Adds the variant to the type definition and inserts branches in case expressions. " +
+  "Use branches to provide code and imports for each case expression (indexed by prepare_add_variant output). " +
+  "If branches is provided, it must have exactly the same count as casesNeedingBranch from prepare_add_variant. " +
+  "Branch format: 'AddDebug' for Debug.todo, {AddCode: 'expr'} for code, {AddCodeWithImports: {imports: [...], code: 'expr'}} for code + imports.",
   {
     file_path: z.string().describe("Path to the Elm file containing the type definition"),
     type_name: z.string().describe("Name of the custom type (e.g., 'Color')"),
     new_variant_name: z.string().describe("Name of the new variant to add (e.g., 'Purple')"),
     variant_args: z.string().optional().describe("Optional variant arguments (e.g., 'Int String' for 'Purple Int String')"),
+    branches: z.array(z.union([
+      z.literal("AddDebug").describe("Insert Debug.todo for this branch"),
+      z.object({ AddCode: z.string() }).describe("Insert custom code expression"),
+      z.object({ AddCodeWithImports: z.object({
+        imports: z.array(z.string()).describe("Import statements (without 'import ' prefix)"),
+        code: z.string().describe("Code expression"),
+      })}).describe("Insert code with imports"),
+    ])).optional().describe("Array of branch configs. Must match casesNeedingBranch count exactly."),
   },
-  async ({ file_path, type_name, new_variant_name, variant_args }) => {
+  async ({ file_path, type_name, new_variant_name, variant_args, branches }) => {
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {
@@ -1912,8 +1923,11 @@ server.tool(
     await client.openDocument(uri, content);
 
     const args = [uri, type_name, new_variant_name];
-    if (variant_args) {
-      args.push(variant_args);
+    if (variant_args !== undefined || branches !== undefined) {
+      args.push(variant_args || "");
+    }
+    if (branches !== undefined) {
+      args.push(branches);
     }
 
     const result = await client.executeCommand("elm.addVariant", args);
@@ -1923,13 +1937,19 @@ server.tool(
     }
 
     if (!result.success) {
-      return {
-        content: [{
-          type: "text",
-          text: `Cannot add variant '${new_variant_name}' to type '${type_name}'\n` +
-                `Reason: ${result.message}`,
-        }],
-      };
+      let text = `Cannot add variant '${new_variant_name}' to type '${type_name}'\nReason: ${result.message}`;
+      // Include prepare info if available (for branch count mismatch errors)
+      if (result.prepareInfo) {
+        text += `\n\nPrepare info (casesNeedingBranch: ${result.prepareInfo.casesNeedingBranch}):`;
+        if (result.prepareInfo.caseExpressions) {
+          result.prepareInfo.caseExpressions.forEach((c, i) => {
+            if (!c.hasWildcard) {
+              text += `\n  [${i}] ${c.moduleName}: ${c.context}`;
+            }
+          });
+        }
+      }
+      return { content: [{ type: "text", text }] };
     }
 
     // Success - apply the changes

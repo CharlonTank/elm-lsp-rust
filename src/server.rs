@@ -8,7 +8,7 @@ use tower_lsp::{Client, LanguageServer};
 use crate::diagnostics::DiagnosticsProvider;
 use crate::document::{Document, VariantInfo};
 use crate::parser::ElmParser;
-use crate::workspace::Workspace;
+use crate::workspace::{BranchConfig, Workspace};
 
 // Custom commands
 const CMD_MOVE_FUNCTION: &str = "elm.moveFunction";
@@ -2203,10 +2203,11 @@ impl LanguageServer for ElmLanguageServer {
                 })))
             }
             CMD_ADD_VARIANT => {
-                // Expected arguments: [uri, type_name, new_variant_name, variant_args (optional)]
-                if params.arguments.len() < 3 || params.arguments.len() > 4 {
+                // Expected arguments: [uri, type_name, new_variant_name, variant_args (optional), branches (optional)]
+                // branches is an array of {imports: [...], code: "..."}
+                if params.arguments.len() < 3 || params.arguments.len() > 5 {
                     return Ok(Some(serde_json::json!({
-                        "error": "Expected 3-4 arguments: uri, type_name, new_variant_name, [variant_args]"
+                        "error": "Expected 3-5 arguments: uri, type_name, new_variant_name, [variant_args], [branches]"
                     })));
                 }
 
@@ -2221,6 +2222,11 @@ impl LanguageServer for ElmLanguageServer {
                 } else {
                     None
                 };
+                let branches: Option<Vec<BranchConfig>> = if params.arguments.len() > 4 {
+                    serde_json::from_value(params.arguments[4].clone()).ok()
+                } else {
+                    None
+                };
 
                 let uri = Url::parse(&uri_str)
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
@@ -2228,7 +2234,7 @@ impl LanguageServer for ElmLanguageServer {
                 let result = {
                     if let Ok(ws) = self.workspace.read() {
                         if let Some(workspace) = ws.as_ref() {
-                            workspace.add_variant(&uri, &type_name, &new_variant_name, variant_args.as_deref())
+                            workspace.add_variant(&uri, &type_name, &new_variant_name, variant_args.as_deref(), branches.as_deref())
                         } else {
                             Err(anyhow::anyhow!("Workspace not initialized"))
                         }
@@ -2268,12 +2274,29 @@ impl LanguageServer for ElmLanguageServer {
                                 "changes": changes_json
                             })))
                         } else {
-                            Ok(Some(serde_json::json!({
+                            // Include prepare_info if available (for branch count mismatch errors)
+                            let mut response = serde_json::json!({
                                 "success": false,
                                 "message": add_result.message,
                                 "typeName": type_name,
                                 "variantName": new_variant_name
-                            })))
+                            });
+                            if let Some(ref prep_info) = add_result.prepare_info {
+                                response["prepareInfo"] = serde_json::json!({
+                                    "casesNeedingBranch": prep_info.cases_needing_branch,
+                                    "existingVariants": prep_info.existing_variants,
+                                    "caseExpressions": prep_info.case_expressions.iter().map(|c| {
+                                        serde_json::json!({
+                                            "uri": c.uri,
+                                            "line": c.line,
+                                            "context": c.context,
+                                            "moduleName": c.module_name,
+                                            "hasWildcard": c.has_wildcard
+                                        })
+                                    }).collect::<Vec<_>>()
+                                });
+                            }
+                            Ok(Some(response))
                         }
                     }
                     Err(e) => {

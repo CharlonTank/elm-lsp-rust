@@ -1804,42 +1804,47 @@ mod tests {
 
     #[test]
     fn test_extract_module_name_from_content() {
-        let (temp_dir, workspace) = create_test_workspace();
-
         let content = "module MyModule exposing (..)";
         assert_eq!(
-            workspace.extract_module_name_from_content(content),
+            file_operations::extract_module_name_from_content(content),
             Some("MyModule".to_string())
         );
 
         let content2 = "module Utils.Helper exposing (helper)";
         assert_eq!(
-            workspace.extract_module_name_from_content(content2),
+            file_operations::extract_module_name_from_content(content2),
             Some("Utils.Helper".to_string())
         );
 
         let content3 = "-- no module declaration";
-        assert_eq!(workspace.extract_module_name_from_content(content3), None);
-
-        drop(temp_dir);
+        assert_eq!(
+            file_operations::extract_module_name_from_content(content3),
+            None
+        );
     }
 
     #[test]
-    fn test_path_string_to_module_name() {
+    fn test_path_to_module_name() {
         let (temp_dir, workspace) = create_test_workspace();
+        let src_dir = temp_dir.path().join("src");
 
+        // Create nested directories for testing
+        fs::create_dir_all(src_dir.join("Utils")).unwrap();
+        fs::create_dir_all(src_dir.join("Pages").join("Home")).unwrap();
+
+        // Use absolute paths that match the workspace's source_dirs
         assert_eq!(
-            workspace.path_string_to_module_name("src/Main.elm"),
+            workspace.path_to_module_name(&src_dir.join("Main.elm")),
             "Main"
         );
 
         assert_eq!(
-            workspace.path_string_to_module_name("src/Utils/Helper.elm"),
+            workspace.path_to_module_name(&src_dir.join("Utils").join("Helper.elm")),
             "Utils.Helper"
         );
 
         assert_eq!(
-            workspace.path_string_to_module_name("src/Pages/Home/View.elm"),
+            workspace.path_to_module_name(&src_dir.join("Pages").join("Home").join("View.elm")),
             "Pages.Home.View"
         );
 
@@ -1982,17 +1987,13 @@ value = help
 
     #[test]
     fn test_find_module_declaration_range() {
-        let (temp_dir, workspace) = create_test_workspace();
-
         let content = "module MyModule exposing (..)\n\nvalue = 42";
-        let range = workspace.find_module_declaration_range(content);
+        let range = file_operations::find_module_declaration_range(content);
 
         assert!(range.is_some());
         let range = range.unwrap();
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.character, 0);
-
-        drop(temp_dir);
     }
 
     #[test]

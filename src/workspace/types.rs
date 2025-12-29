@@ -164,12 +164,68 @@ impl PrepareAddVariantResult {
     }
 }
 
+/// Configuration for a single branch when adding a variant.
+///
+/// JSON format examples:
+/// - `"AddDebug"` → inserts Debug.todo
+/// - `{"AddCode": "LightTheme"}` → inserts custom code
+/// - `{"AddCodeWithImports": {"imports": ["Module"], "code": "expr"}}` → code + imports
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum BranchConfig {
+    /// Use Debug.todo for this branch
+    Debug(DebugVariant),
+    /// Custom code expression
+    Code(CodeVariant),
+    /// Custom code with imports
+    CodeWithImports(CodeWithImportsVariant),
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum DebugVariant {
+    AddDebug,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum CodeVariant {
+    AddCode(String),
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum CodeWithImportsVariant {
+    AddCodeWithImports { imports: Vec<String>, code: String },
+}
+
+impl BranchConfig {
+    /// Get the code expression, or None for Debug.todo
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            BranchConfig::Debug(_) => None,
+            BranchConfig::Code(CodeVariant::AddCode(code)) => Some(code),
+            BranchConfig::CodeWithImports(CodeWithImportsVariant::AddCodeWithImports { code, .. }) => Some(code),
+        }
+    }
+
+    /// Get imports if any
+    pub fn imports(&self) -> &[String] {
+        match self {
+            BranchConfig::Debug(_) => &[],
+            BranchConfig::Code(_) => &[],
+            BranchConfig::CodeWithImports(CodeWithImportsVariant::AddCodeWithImports { imports, .. }) => imports,
+        }
+    }
+}
+
 /// Result of adding a variant
 #[derive(Debug, serde::Serialize)]
 pub struct AddVariantResult {
     pub success: bool,
     pub message: String,
     pub changes: Option<HashMap<Url, Vec<TextEdit>>>,
+    /// When there's an error about too many branch_codes, include the prepare info
+    /// so the caller knows exactly how many are needed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepare_info: Option<PrepareAddVariantResult>,
 }
 
 impl AddVariantResult {
@@ -178,6 +234,16 @@ impl AddVariantResult {
             success: false,
             message: message.to_string(),
             changes: None,
+            prepare_info: None,
+        }
+    }
+
+    pub fn error_with_info(message: &str, prep: PrepareAddVariantResult) -> Self {
+        Self {
+            success: false,
+            message: message.to_string(),
+            changes: None,
+            prepare_info: Some(prep),
         }
     }
 
@@ -186,6 +252,7 @@ impl AddVariantResult {
             success: true,
             message: message.to_string(),
             changes: Some(changes),
+            prepare_info: None,
         }
     }
 }
