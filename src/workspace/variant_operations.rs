@@ -1010,6 +1010,13 @@ impl Workspace {
 
         let case_node = case_of_expr?;
 
+        // Verify the usage is actually a direct pattern in this case expression's branches.
+        // This prevents false positives where a variant is used as a value INSIDE a branch body
+        // (e.g., `Maybe.withDefault HomepageRoute` inside `case urlRequest of`)
+        if !self.is_usage_in_case_pattern(&case_node, &point) {
+            return None;
+        }
+
         // Check if case has a wildcard pattern
         let has_wildcard = self.case_has_wildcard(&case_node, &content);
 
@@ -1104,6 +1111,52 @@ impl Workspace {
                 for branch_child in child.children(&mut branch_cursor) {
                     if branch_child.kind() == "pattern" {
                         if Self::is_wildcard_pattern(&branch_child, content) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a usage point is within a direct pattern of a case expression's branches.
+    /// Returns true only if the point is inside the pattern part (before the ->) of a branch,
+    /// not in the body of the branch.
+    fn is_usage_in_case_pattern(
+        &self,
+        case_node: &tree_sitter::Node,
+        usage_point: &tree_sitter::Point,
+    ) -> bool {
+        let mut cursor = case_node.walk();
+        for child in case_node.children(&mut cursor) {
+            if child.kind() == "case_of_branch" {
+                // Find the pattern in this branch
+                let mut branch_cursor = child.walk();
+                for branch_child in child.children(&mut branch_cursor) {
+                    if branch_child.kind() == "pattern" {
+                        let pattern_start = branch_child.start_position();
+                        let pattern_end = branch_child.end_position();
+
+                        // Check if usage point is within this pattern
+                        let in_pattern = if usage_point.row > pattern_start.row
+                            && usage_point.row < pattern_end.row
+                        {
+                            true
+                        } else if usage_point.row == pattern_start.row
+                            && usage_point.row == pattern_end.row
+                        {
+                            usage_point.column >= pattern_start.column
+                                && usage_point.column <= pattern_end.column
+                        } else if usage_point.row == pattern_start.row {
+                            usage_point.column >= pattern_start.column
+                        } else if usage_point.row == pattern_end.row {
+                            usage_point.column <= pattern_end.column
+                        } else {
+                            false
+                        };
+
+                        if in_pattern {
                             return true;
                         }
                     }
