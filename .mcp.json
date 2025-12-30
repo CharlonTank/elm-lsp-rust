@@ -1,8 +1,6 @@
 {
-  "mcpServers": {
-    "elr": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-wrapper/index.mjs"]
-    }
+  "elr": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-wrapper/index.mjs"]
   }
 }

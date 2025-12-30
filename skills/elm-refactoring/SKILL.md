@@ -12,10 +12,10 @@ When working in an Elm project (has `elm.json`), use these MCP tools instead of 
 Activate automatically when the user works with Elm code and needs to:
 - **Navigate**: Go to definition, find references, get symbols
 - **Refactor**: Rename symbols, move functions, rename/move files
-- **Maintain types**: Remove unused variants from custom types
-- **Check code**: Get diagnostics, code actions
+- **Maintain types**: Add/remove variants, add/remove fields
+- **Check code**: Get diagnostics, code actions, format
 
-## Available MCP Tools (13 total)
+## Available MCP Tools
 
 All tools use the `mcp__plugin_elm-lsp-rust_elr__` prefix.
 
@@ -27,8 +27,8 @@ All tools use the `mcp__plugin_elm-lsp-rust_elr__` prefix.
 Go to where a symbol is defined.
 ```
 file_path: "/path/to/File.elm"
-line: 28
-character: 5
+line: 28        # 0-indexed
+character: 5    # 0-indexed
 ```
 
 #### elm_references
@@ -58,7 +58,7 @@ file_path: "/path/to/File.elm"
 ```
 
 #### elm_code_actions
-Get available code actions for a range (e.g., "Expose function").
+Get available code actions for a range.
 ```
 file_path: "/path/to/File.elm"
 start_line: 28
@@ -89,7 +89,7 @@ file_path: "/path/to/File.elm"
 ### Renaming
 
 #### elm_rename_variant
-Rename a variant across all files in the project.
+Rename a custom type variant across all files.
 ```
 file_path: "/path/to/File.elm"
 line: 28
@@ -99,32 +99,32 @@ newName: "NewVariantName"
 ```
 
 #### elm_rename_type
-Rename a type across all files in the project.
+Rename a type across all files.
 ```
 file_path: "/path/to/File.elm"
 line: 28
 character: 0
-old_name: "OldTypeName"   # REQUIRED: safety check
+old_name: "OldTypeName"
 newName: "NewTypeName"
 ```
 
 #### elm_rename_function
-Rename a function across all files in the project.
+Rename a function across all files.
 ```
 file_path: "/path/to/File.elm"
 line: 28
 character: 0
-old_name: "oldFunctionName"   # REQUIRED: safety check
+old_name: "oldFunctionName"
 newName: "newFunctionName"
 ```
 
 #### elm_rename_field
-Rename a record field across all files in the project.
+Rename a record field across all files (type-aware).
 ```
 file_path: "/path/to/File.elm"
 line: 28
 character: 0
-old_name: "oldFieldName"   # REQUIRED: safety check
+old_name: "oldFieldName"
 newName: "newFieldName"
 ```
 
@@ -136,9 +136,9 @@ newName: "newFieldName"
 Move a function from one module to another.
 ```
 file_path: "/path/to/Source.elm"
-line: 28           # line where function is defined
+line: 28
 character: 0
-function_name: "myFunction"   # REQUIRED: safety check
+function_name: "myFunction"
 target_module: "/path/to/Target.elm"
 ```
 
@@ -156,44 +156,105 @@ file_path: "/path/to/File.elm"
 target_path: "src/Utils/File.elm"
 ```
 
+#### elm_notify_file_changed
+Notify LSP after external file rename/move.
+```
+old_path: "/path/to/Old.elm"
+new_path: "/path/to/New.elm"
+```
+
 ---
 
-### Smart Variant Removal
+### Smart Variant Operations
 
-#### elm_prepare_remove_variant
-Analyze a variant before removal - shows blocking usages vs auto-removable patterns.
+#### elm_prepare_add_variant
+Check what happens when adding a variant - shows case expressions needing branches.
 ```
 file_path: "/path/to/Types.elm"
-line: 15           # line of the variant (e.g., "| MyVariant")
-character: 4       # position within variant name
-variant_name: "MyVariant"   # optional: safety check
+type_name: "MyType"
+new_variant_name: "NewVariant"
 ```
 
 Returns:
-- `canRemove`: true if no blocking (constructor) usages
-- `blockingUsages`: constructor usages that must be replaced manually
-- `patternUsages`: pattern matches that will be auto-removed
-- `otherVariants`: alternative variants to use
+- `existingVariants`: current variants
+- `caseExpressions`: all case expressions on this type
+- `casesNeedingBranch`: count of cases without wildcards
 
-#### elm_remove_variant
-Remove a variant and auto-remove its pattern match branches.
+#### elm_add_variant
+Add a variant to a custom type and update all case expressions.
+```
+file_path: "/path/to/Types.elm"
+type_name: "MyType"
+new_variant_name: "NewVariant"
+variant_args: "String Int"           # optional
+branches: [                          # optional, per-case code
+  "AddDebug",                        # Debug.todo
+  { "AddCode": "someExpression" },   # custom code
+  { "AddCodeWithImports": { "imports": ["Module"], "code": "expr" } }
+]
+```
+
+#### elm_prepare_remove_variant
+Analyze a variant before removal - shows blocking vs auto-removable usages.
 ```
 file_path: "/path/to/Types.elm"
 line: 15
 character: 4
-variant_name: "MyVariant"   # REQUIRED: safety check
+variant_name: "MyVariant"   # optional safety check
 ```
 
-**Workflow:**
-1. Call `elm_prepare_remove_variant` to check feasibility
-2. If blocked: user must replace constructor usages with other variants
-3. If clear: call `elm_remove_variant` to remove variant + patterns
+Returns:
+- `canRemove`: true if no blocking usages
+- `blockingUsages`: constructor usages (replaced with Debug.todo)
+- `patternUsages`: pattern matches (auto-removed)
+
+#### elm_remove_variant
+Remove a variant and auto-remove pattern match branches.
+```
+file_path: "/path/to/Types.elm"
+line: 15
+character: 4
+variant_name: "MyVariant"   # REQUIRED
+```
+
+---
+
+### Smart Field Operations
+
+#### elm_prepare_remove_field
+Check what happens when removing a field from a type alias.
+```
+file_path: "/path/to/Types.elm"
+line: 15
+character: 4
+field_name: "myField"   # optional safety check
+```
+
+#### elm_remove_field
+Remove a field from a type alias and update all usages.
+```
+file_path: "/path/to/Types.elm"
+line: 15
+character: 4
+field_name: "myField"   # REQUIRED
+```
+
+---
+
+### Visualization
+
+#### elm_generate_erd
+Generate a Mermaid ERD diagram from a type alias.
+```
+file_path: "/path/to/Types.elm"
+type_name: "BackendModel"
+```
 
 ---
 
 ## Important Notes
 
-- **Line/character positions are 0-indexed** (subtract 1 from editor display)
+- **Line/character positions are 0-indexed**
 - **Always verify compilation** after refactoring: `lamdera make src/Frontend.elm src/Backend.elm`
 - These tools understand Elm's scope and semantics - safer than text replace
 
