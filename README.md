@@ -10,13 +10,20 @@ This plugin is distributed through the [elm-marketplace](https://github.com/Char
 
 ```bash
 # Add the Elm marketplace
-claude plugin marketplace add https://github.com/CharlonTank/elm-lsp-plugin
+/plugin marketplace add CharlonTank/elm-lsp-plugin
 
 # Install this plugin
-claude plugin install elm-lsp-rust@elm-marketplace
+/plugin install elm-lsp-rust@CharlonTank/elm-lsp-plugin
 ```
 
 Then restart Claude Code.
+
+### Alternative: Interactive Installation
+
+1. Run `/plugin` to open the plugin manager
+2. Navigate to the **Discover** tab
+3. Add the marketplace if not already added
+4. Browse and install `elm-lsp-rust`
 
 ### How Plugin Distribution Works
 
@@ -29,8 +36,7 @@ Then restart Claude Code.
 │  .claude-plugin/marketplace.json                                │
 │  └── plugins: [                                                 │
 │        { name: "elm-lsp-rust",                                  │
-│          source: "CharlonTank/elm-lsp-rust",                   │
-│          version: "0.3.8" }                                     │
+│          source: "CharlonTank/elm-lsp-rust" }                   │
 │      ]                                                          │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -58,56 +64,64 @@ When you install via the marketplace:
 
 | Feature | Description |
 |---------|-------------|
-| **Hover** | Type signatures and documentation |
 | **Go to Definition** | Jump to symbol definitions |
 | **Find References** | All usages across workspace |
-| **Rename** | Safe rename across all files (including exposing lists) |
+| **Rename** | Safe rename across all files (functions, types, variants, fields) |
 | **Document Symbols** | List all symbols in a file |
-| **Workspace Symbols** | Search symbols across project |
 | **Diagnostics** | Compiler errors via `elm make` / `lamdera make` |
 | **Formatting** | Via `elm-format` |
 | **Code Actions** | Quick fixes and refactorings |
 | **Move Function** | Move function to another module with import updates |
 | **File Rename/Move** | Rename or move Elm files with module/import updates |
+| **Add Variant** | Add variant to custom type with auto case branch updates |
 | **Remove Variant** | Smart union type variant removal |
+| **Remove Field** | Remove field from type alias with usage updates |
+| **ERD Generation** | Generate Mermaid diagrams from types |
 
-### Remove Variant (Unique Feature)
+### Smart Type Operations
 
-Intelligently removes union type variants:
-
-- **Replaces** constructor usages with `Debug.todo "VARIANT REMOVAL DONE: <original>"`
-- **Auto-removes** pattern match branches using the variant
-- **Auto-removes** useless wildcards that would cover nothing after removal
-- **Errors** if trying to remove the only variant from a type
-
+**Add Variant**: Adds a variant and automatically inserts branches in all case expressions:
 ```elm
-type Color = Red | Green | Blue | Unused
-
--- Remove "Unused": automatically removes pattern branches
--- Remove "Blue": constructor usages replaced with Debug.todo
+-- elm_add_variant with custom branch code for each case expression
+type Route = HomeRoute | AboutRoute | NewRoute
+-- All case expressions get new branches with your specified code
 ```
 
-## MCP Tools
+**Remove Variant**: Intelligently removes variants:
+- Replaces constructor usages with `Debug.todo`
+- Auto-removes pattern match branches
+- Errors if removing the only variant
+
+**Remove Field**: Removes fields from type aliases:
+- Updates record literals, patterns, and field accesses
+- Replaces field access with `Debug.todo`
+
+## MCP Tools (22 total)
 
 | Tool | Description |
 |------|-------------|
-| `elm_hover` | Get type at position |
 | `elm_definition` | Go to definition |
 | `elm_references` | Find all references |
 | `elm_symbols` | List file symbols |
+| `elm_diagnostics` | Get compiler errors |
+| `elm_code_actions` | Get available actions |
+| `elm_apply_code_action` | Apply a code action |
+| `elm_format` | Format file |
 | `elm_rename_variant` | Rename a variant |
 | `elm_rename_type` | Rename a type |
 | `elm_rename_function` | Rename a function |
 | `elm_rename_field` | Rename a record field |
-| `elm_diagnostics` | Get compiler errors |
-| `elm_format` | Format file |
-| `elm_code_actions` | Get available actions |
-| `elm_apply_code_action` | Apply a code action by title |
 | `elm_move_function` | Move function to module |
 | `elm_rename_file` | Rename an Elm file |
-| `elm_move_file` | Move an Elm file to a new location |
-| `elm_prepare_remove_variant` | Analyze variant usages |
-| `elm_remove_variant` | Remove variant from type |
+| `elm_move_file` | Move an Elm file |
+| `elm_notify_file_changed` | Notify LSP of external file changes |
+| `elm_prepare_add_variant` | Check what adding a variant would affect |
+| `elm_add_variant` | Add variant with auto case branch updates |
+| `elm_prepare_remove_variant` | Check what removing a variant would affect |
+| `elm_remove_variant` | Remove variant with auto pattern removal |
+| `elm_prepare_remove_field` | Check what removing a field would affect |
+| `elm_remove_field` | Remove field from type alias |
+| `elm_generate_erd` | Generate Mermaid ERD from type |
 
 ## Building from Source
 
@@ -136,7 +150,7 @@ elm-lsp-rust/
 ├── scripts/
 │   └── setup.sh         # Build script run on plugin install
 ├── skills/              # Claude Code skills
-└── tests/               # Test suite (122 tests)
+└── tests/               # Test suite (228 tests)
 ```
 
 ### Key Design Decisions
@@ -149,17 +163,11 @@ elm-lsp-rust/
 ## Testing
 
 ```bash
-# Run fixture tests (23 tests)
-node tests/run_tests.mjs
-
-# Run comprehensive tests on real-world codebase (99 tests)
-node tests/test_meetdown_comprehensive.mjs
-
-# Run all tests
+# Run all tests (228 tests total)
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
 ```
 
-All 122 tests cover: hover, definition, references, symbols, rename, diagnostics, completion, code actions, move function, file rename/move, and remove variant (including edge cases).
+Tests cover: definition, references, symbols, rename (functions, types, variants, fields), diagnostics, code actions, move function, file rename/move, add/remove variant, add/remove field, and ERD generation.
 
 ## Related
 
