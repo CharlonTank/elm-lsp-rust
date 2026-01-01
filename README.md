@@ -4,26 +4,13 @@ A fast Elm Language Server written in Rust, designed for Claude Code integration
 
 ## Installation
 
-### Via Claude Code Marketplace (Recommended)
-
-This plugin is distributed through the [elm-marketplace](https://github.com/CharlonTank/elm-lsp-plugin):
+In Claude Code, run:
 
 ```bash
-# Add the Elm marketplace
-/plugin marketplace add CharlonTank/elm-lsp-plugin
-
-# Install this plugin
 /plugin install elm-lsp-rust@CharlonTank/elm-lsp-plugin
 ```
 
 Then restart Claude Code.
-
-### Alternative: Interactive Installation
-
-1. Run `/plugin` to open the plugin manager
-2. Navigate to the **Discover** tab
-3. Add the marketplace if not already added
-4. Browse and install `elm-lsp-rust`
 
 ### How Plugin Distribution Works
 
