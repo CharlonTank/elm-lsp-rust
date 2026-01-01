@@ -1007,6 +1007,14 @@ impl LanguageServer for ElmLanguageServer {
             }
         }
 
+        // Check if this is a variant
+        if let Some((_type_name, variant_info, _, _, _)) = self.get_variant_at_position(uri, position) {
+            return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                range: variant_info.range,
+                placeholder: variant_info.name.clone(),
+            }));
+        }
+
         // Fall back to symbol rename
         if let Some(doc) = self.documents.get(uri) {
             if let Some(symbol) = doc.get_symbol_at_position(position) {
@@ -1014,13 +1022,14 @@ impl LanguageServer for ElmLanguageServer {
                 if let Ok(ws) = self.workspace.read() {
                     if let Some(workspace) = ws.as_ref() {
                         if workspace.is_protected_lamdera_type(&symbol.name) {
-                            // Cannot rename protected Lamdera types
-                            return Ok(None);
+                            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                                format!("Cannot rename '{}' - this type is required by Lamdera", symbol.name)
+                            ));
                         }
                     }
                 }
                 return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-                    range: symbol.range,
+                    range: symbol.definition_range.unwrap_or(symbol.range),
                     placeholder: symbol.name.clone(),
                 }));
             }
@@ -1076,6 +1085,18 @@ impl LanguageServer for ElmLanguageServer {
                 }
             }
         }
+        // Check if this is a variant rename
+        if let Some((_type_name, variant_info, _, _, _)) = self.get_variant_at_position(uri, position) {
+            // Validate that variant name starts with uppercase
+            if !new_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                    "Variant names must start with an uppercase letter"
+                ));
+            }
+            tracing::info!("Renaming variant {} to {}", variant_info.name, new_name);
+            return self.rename_variant_by_range(uri, &variant_info.name, variant_info.range, &new_name);
+        }
+
         // Fall back to symbol rename
         let symbol_name = if let Some(doc) = self.documents.get(uri) {
             doc.get_symbol_at_position(position).map(|s| s.name.clone())
@@ -1600,6 +1621,14 @@ impl LanguageServer for ElmLanguageServer {
 
                 let uri = Url::parse(&uri_str)
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+                // Validate that variant name starts with uppercase
+                if !new_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": "Variant names must start with an uppercase letter"
+                    })));
+                }
 
                 let position = Position { line, character };
 

@@ -680,6 +680,11 @@ server.tool(
     newName: z.string().describe("The new name for the variant"),
   },
   async ({ file_path, line, character, old_name, newName }) => {
+    // Validate that variant name starts with uppercase
+    if (!newName || !/^[A-Z]/.test(newName)) {
+      return { content: [{ type: "text", text: "Variant names must start with an uppercase letter" }] };
+    }
+
     const absPath = resolveFilePath(file_path);
     const workspaceRoot = findWorkspaceRoot(absPath);
     if (!workspaceRoot) {

@@ -48,6 +48,16 @@ impl ElmSymbol {
         }
         true
     }
+
+    pub fn is_position_on_name(&self, position: Position) -> bool {
+        let name_range = self.definition_range.unwrap_or(self.range);
+        position.line >= name_range.start.line
+            && position.line <= name_range.end.line
+            && (position.line != name_range.start.line
+                || position.character >= name_range.start.character)
+            && (position.line != name_range.end.line
+                || position.character <= name_range.end.character)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +79,7 @@ impl Document {
     }
 
     pub fn get_symbol_at_position(&self, position: Position) -> Option<&ElmSymbol> {
-        self.symbols.iter().find(|s| s.contains_position(position))
+        self.symbols.iter().find(|s| s.is_position_on_name(position))
     }
 
     pub fn get_line(&self, line: u32) -> Option<&str> {
