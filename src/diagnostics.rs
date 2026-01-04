@@ -9,7 +9,11 @@ pub enum ElmMakeOutput {
     #[serde(rename = "compile-errors")]
     CompileErrors { errors: Vec<ElmError> },
     #[serde(rename = "error")]
-    GeneralError { path: Option<String>, title: String, message: Vec<MessagePart> },
+    GeneralError {
+        path: Option<String>,
+        title: String,
+        message: Vec<MessagePart>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,7 +74,9 @@ pub struct DiagnosticsProvider {
 
 impl DiagnosticsProvider {
     pub fn new() -> Self {
-        Self { workspace_root: None }
+        Self {
+            workspace_root: None,
+        }
     }
 
     pub fn set_workspace_root(&mut self, root: &str) {
@@ -98,7 +104,9 @@ impl DiagnosticsProvider {
             Err(_) => return vec![],
         };
 
-        let workspace_root = self.workspace_root.clone()
+        let workspace_root = self
+            .workspace_root
+            .clone()
             .or_else(|| Self::find_workspace_root(&file_path));
 
         let workspace_root = match workspace_root {
@@ -188,7 +196,8 @@ impl DiagnosticsProvider {
         );
 
         // Build message from parts
-        let message_text: String = problem.message
+        let message_text: String = problem
+            .message
             .iter()
             .map(|part| part.to_string())
             .collect();

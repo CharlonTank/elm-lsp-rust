@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use tree_sitter::{Node, Tree};
 
-use crate::binder::{SymbolLinks, bind_tree};
-use crate::inference::{InferenceScope, InferenceResult, infer_file};
+use crate::binder::{bind_tree, SymbolLinks};
+use crate::inference::{infer_file, InferenceResult, InferenceScope};
 use crate::types::Type;
 
 /// Result of finding a definition
@@ -63,12 +63,14 @@ impl TypeChecker {
     /// Index a file for type checking
     pub fn index_file(&mut self, uri: &str, source: &str, tree: Tree) {
         // Store source and tree
-        self.source_cache.insert(uri.to_string(), source.to_string());
+        self.source_cache
+            .insert(uri.to_string(), source.to_string());
         self.tree_cache.insert(uri.to_string(), tree.clone());
 
         // Bind symbols
         let symbol_links = bind_tree(source, &tree);
-        self.symbol_links_cache.insert(uri.to_string(), symbol_links);
+        self.symbol_links_cache
+            .insert(uri.to_string(), symbol_links);
 
         // Run type inference
         let result = infer_file(source, &tree, uri);
@@ -77,7 +79,8 @@ impl TypeChecker {
 
     /// Get the type of an expression at a given node
     pub fn get_type(&self, uri: &str, node_id: usize) -> Option<Type> {
-        self.inference_cache.get(uri)
+        self.inference_cache
+            .get(uri)
             .and_then(|result| result.expression_types.get(&node_id).cloned())
     }
 
@@ -155,8 +158,18 @@ impl TypeChecker {
                             if first_child.kind() == "lower_case_identifier" {
                                 // Check if node is this first child or a descendant of it
                                 if Self::is_same_or_ancestor(first_child, node) {
-                                    return Some(node.utf8_text(source.as_bytes()).ok()?.to_string())
-                                        .and_then(|name| self.resolve_field_to_definition_impl(uri, &name, node, source, target_alias));
+                                    return Some(
+                                        node.utf8_text(source.as_bytes()).ok()?.to_string(),
+                                    )
+                                    .and_then(|name| {
+                                        self.resolve_field_to_definition_impl(
+                                            uri,
+                                            &name,
+                                            node,
+                                            source,
+                                            target_alias,
+                                        )
+                                    });
                                 }
                             }
                         }
@@ -215,29 +228,52 @@ impl TypeChecker {
                 let target_type = self.infer_type_of_node(uri, target, source);
 
                 if let Some(target_type) = target_type {
-                    let result = self.field_definition_from_type_impl(&target_type, field_name, uri, target_alias);
+                    let result = self.field_definition_from_type_impl(
+                        &target_type,
+                        field_name,
+                        uri,
+                        target_alias,
+                    );
 
                     // If type-based resolution failed and target is a simple variable,
                     // try to collect all field accesses on that variable in the scope
                     if result.is_none() && target.kind() == "value_expr" {
                         // First, try to resolve the type from pattern binding (e.g., `(Group a)`)
                         if let Some(decl) = Self::find_containing_value_declaration(target) {
-                            if let Some(pattern_type) = self.try_resolve_from_pattern_binding(target_text, decl, uri, source) {
+                            if let Some(pattern_type) = self.try_resolve_from_pattern_binding(
+                                target_text,
+                                decl,
+                                uri,
+                                source,
+                            ) {
                                 // Found a constructor pattern - use the constructor's record fields
-                                if let Some(def) = self.find_field_in_custom_type(&pattern_type, field_name, uri, target_alias) {
+                                if let Some(def) = self.find_field_in_custom_type(
+                                    &pattern_type,
+                                    field_name,
+                                    uri,
+                                    target_alias,
+                                ) {
                                     return Some(def);
                                 }
                             }
                         }
 
                         if let Some(scope) = self.find_enclosing_scope(parent) {
-                            let all_fields = self.collect_field_accesses_on_variable(target_text, scope, source);
+                            let all_fields =
+                                self.collect_field_accesses_on_variable(target_text, scope, source);
                             // If we found at least 2 fields, use structural matching
                             if all_fields.len() >= 2 {
                                 // For structural matching, find the ACTUAL type first (without target filter)
                                 // then verify it matches the target
-                                let result = self.find_type_alias_by_fields(&all_fields, field_name, uri, None);
-                                if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
+                                let result = self.find_type_alias_by_fields(
+                                    &all_fields,
+                                    field_name,
+                                    uri,
+                                    None,
+                                );
+                                if let Some(def) =
+                                    Self::filter_by_target_alias(result, target_alias)
+                                {
                                     return Some(def);
                                 }
                             }
@@ -249,18 +285,31 @@ impl TypeChecker {
                     if result.is_none() && target.kind() == "field_access_expr" {
                         // Get the field name from the target (e.g., "form" from "model.form")
                         if let Some(target_field) = target.child_by_field_name("field") {
-                            let target_field_name = target_field.utf8_text(source.as_bytes()).unwrap_or("");
+                            let target_field_name =
+                                target_field.utf8_text(source.as_bytes()).unwrap_or("");
                             // Recursively resolve the target field_access_expr to get its type
                             // We don't filter by target here - we want the actual type
-                            if let Some(target_def) = self.find_field_definition(uri, target_field, source) {
+                            if let Some(target_def) =
+                                self.find_field_definition(uri, target_field, source)
+                            {
                                 // Get the field's type from the target type
                                 if let Some(ref type_alias_name) = target_def.type_alias_name {
                                     // Look up the type alias and find the field's type
                                     if let Some(field_type) = self.get_field_type_from_type_alias(
-                                        type_alias_name, &target_def.module_name, target_field_name, uri
+                                        type_alias_name,
+                                        &target_def.module_name,
+                                        target_field_name,
+                                        uri,
                                     ) {
                                         // Now look for our field in that type
-                                        if let Some(def) = self.find_field_in_type_alias_or_custom_type(&field_type, field_name, uri, target_alias) {
+                                        if let Some(def) = self
+                                            .find_field_in_type_alias_or_custom_type(
+                                                &field_type,
+                                                field_name,
+                                                uri,
+                                                target_alias,
+                                            )
+                                        {
                                             return Some(def);
                                         }
                                     }
@@ -282,17 +331,29 @@ impl TypeChecker {
                         return None;
                     }
                 };
-                tracing::debug!("find_field_definition(field): record_expr kind = {:?}", record_expr.kind());
+                tracing::debug!(
+                    "find_field_definition(field): record_expr kind = {:?}",
+                    record_expr.kind()
+                );
                 if record_expr.kind() == "record_expr" {
                     // Check if there's a base record (record update syntax like { a | name = ... })
-                    let base_opt = record_expr.children(&mut record_expr.walk())
+                    let base_opt = record_expr
+                        .children(&mut record_expr.walk())
                         .find(|c| c.kind() == "record_base_identifier");
                     if let Some(base) = base_opt {
                         let base_text = base.utf8_text(source.as_bytes()).unwrap_or("?");
                         let base_type = self.infer_type_of_node(uri, base, source);
-                        tracing::debug!("find_field_definition(field): base type = {:?}", base_type);
+                        tracing::debug!(
+                            "find_field_definition(field): base type = {:?}",
+                            base_type
+                        );
                         if let Some(ref base_type) = base_type {
-                            let result = self.field_definition_from_type_impl(base_type, field_name, uri, target_alias);
+                            let result = self.field_definition_from_type_impl(
+                                base_type,
+                                field_name,
+                                uri,
+                                target_alias,
+                            );
                             if result.is_some() {
                                 return result;
                             }
@@ -300,12 +361,19 @@ impl TypeChecker {
 
                         // Try pattern binding resolution (e.g., `(Group a)` -> a is Group)
                         if let Some(decl) = Self::find_containing_value_declaration(record_expr) {
-                            if let Some(pattern_type) = self.try_resolve_from_pattern_binding(base_text, decl, uri, source) {
+                            if let Some(pattern_type) =
+                                self.try_resolve_from_pattern_binding(base_text, decl, uri, source)
+                            {
                                 // Found a constructor pattern - use the constructor's record fields
                                 // Try to find the field in this custom type
                                 // If we have a target and the pattern type is NOT the target,
                                 // we should NOT fall through to structural matching
-                                if let Some(def) = self.find_field_in_custom_type(&pattern_type, field_name, uri, target_alias) {
+                                if let Some(def) = self.find_field_in_custom_type(
+                                    &pattern_type,
+                                    field_name,
+                                    uri,
+                                    target_alias,
+                                ) {
                                     return Some(def);
                                 }
                                 // If we found a pattern type but couldn't find the field matching our target,
@@ -317,9 +385,16 @@ impl TypeChecker {
                         }
 
                         // Try lambda parameter type resolution (e.g., Cache.map (\a -> { a | name = ... }) cache)
-                        if let Some(lambda_type) = self.try_resolve_lambda_param_type(base_text, record_expr, uri, source) {
+                        if let Some(lambda_type) =
+                            self.try_resolve_lambda_param_type(base_text, record_expr, uri, source)
+                        {
                             // Found a type from lambda context - look for the field in that type
-                            if let Some(def) = self.find_field_in_type_alias_by_name(&lambda_type, field_name, uri, target_alias) {
+                            if let Some(def) = self.find_field_in_type_alias_by_name(
+                                &lambda_type,
+                                field_name,
+                                uri,
+                                target_alias,
+                            ) {
                                 return Some(def);
                             }
                         }
@@ -327,9 +402,11 @@ impl TypeChecker {
                         // If type-based resolution failed, try scope-based field collection
                         // (similar to field_access_expr case)
                         if let Some(scope) = self.find_enclosing_scope(parent) {
-                            let all_fields = self.collect_field_accesses_on_variable(base_text, scope, source);
+                            let all_fields =
+                                self.collect_field_accesses_on_variable(base_text, scope, source);
                             // Also collect fields from the record update itself
-                            let record_fields = self.collect_record_expr_fields(record_expr, source);
+                            let record_fields =
+                                self.collect_record_expr_fields(record_expr, source);
                             let mut combined_fields = all_fields;
                             for f in record_fields {
                                 if !combined_fields.contains(&f) {
@@ -344,13 +421,16 @@ impl TypeChecker {
                                 if combined_fields.len() == 1 && target_alias.is_some() {
                                     // For single-field with target: count all candidates first
                                     // Only accept if target is a candidate AND there are few alternatives
-                                    let (target_matches, other_count) = self.count_field_candidates(field_name, target_alias.unwrap());
-                                    let base_is_lambda_param = Self::is_lambda_parameter(record_expr, base_text, source);
+                                    let (target_matches, other_count) = self
+                                        .count_field_candidates(field_name, target_alias.unwrap());
+                                    let base_is_lambda_param =
+                                        Self::is_lambda_parameter(record_expr, base_text, source);
 
                                     // For single-field matches:
                                     // - If base is a lambda parameter: accept if target matches (trust mapping context)
                                     // - Otherwise: only accept if there are 3 or fewer alternatives (conservative)
-                                    let should_accept = target_matches && (base_is_lambda_param || other_count <= 3);
+                                    let should_accept = target_matches
+                                        && (base_is_lambda_param || other_count <= 3);
 
                                     if should_accept {
                                         // Return definition for the target type
@@ -364,8 +444,15 @@ impl TypeChecker {
                                 } else {
                                     // For 2+ fields: find the ACTUAL type first (not filtered by target)
                                     // then verify it matches the target
-                                    let result = self.find_type_alias_by_fields(&combined_fields, field_name, uri, None);
-                                    if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
+                                    let result = self.find_type_alias_by_fields(
+                                        &combined_fields,
+                                        field_name,
+                                        uri,
+                                        None,
+                                    );
+                                    if let Some(def) =
+                                        Self::filter_by_target_alias(result, target_alias)
+                                    {
                                         return Some(def);
                                     }
                                 }
@@ -375,23 +462,38 @@ impl TypeChecker {
 
                     // Try to get cached type from inference
                     let record_type = self.get_type(uri, record_expr.id());
-                    tracing::debug!("find_field_definition(field): cached type = {:?}", record_type);
+                    tracing::debug!(
+                        "find_field_definition(field): cached type = {:?}",
+                        record_type
+                    );
                     if let Some(record_type) = record_type {
                         // Only return if we found a definition - otherwise fall through to structural matching
-                        if let Some(def) = self.field_definition_from_type_impl(&record_type, field_name, uri, target_alias) {
+                        if let Some(def) = self.field_definition_from_type_impl(
+                            &record_type,
+                            field_name,
+                            uri,
+                            target_alias,
+                        ) {
                             return Some(def);
                         }
                     }
 
                     // Fallback: structural matching - collect fields from record_expr and match against type aliases
                     let record_fields = self.collect_record_expr_fields(record_expr, source);
-                    tracing::debug!("find_field_definition(field): collected fields = {:?}", record_fields);
+                    tracing::debug!(
+                        "find_field_definition(field): collected fields = {:?}",
+                        record_fields
+                    );
                     // Require at least 2 fields to avoid false positives (many types share common field names)
                     if record_fields.len() >= 2 {
                         // For structural matching, find the ACTUAL type first (without target filter)
                         // then verify it matches the target
-                        let result = self.find_type_alias_by_fields(&record_fields, field_name, uri, None);
-                        tracing::debug!("find_field_definition(field): structural match result = {:?}", result.as_ref().map(|d| &d.type_alias_name));
+                        let result =
+                            self.find_type_alias_by_fields(&record_fields, field_name, uri, None);
+                        tracing::debug!(
+                            "find_field_definition(field): structural match result = {:?}",
+                            result.as_ref().map(|d| &d.type_alias_name)
+                        );
                         if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
                             return Some(def);
                         }
@@ -403,7 +505,12 @@ impl TypeChecker {
                 // Try to get the type being matched
                 let pattern_type = self.get_type(uri, parent.id());
                 if let Some(ref pattern_type) = pattern_type {
-                    let def = self.field_definition_from_type_impl(pattern_type, field_name, uri, target_alias);
+                    let def = self.field_definition_from_type_impl(
+                        pattern_type,
+                        field_name,
+                        uri,
+                        target_alias,
+                    );
                     if let Some(def) = def {
                         return Some(def);
                     }
@@ -414,7 +521,8 @@ impl TypeChecker {
                 // Require at least 2 fields to avoid false positives
                 if record_fields.len() >= 2 {
                     // For structural matching, find the ACTUAL type first (without target filter)
-                    let result = self.find_type_alias_by_fields(&record_fields, field_name, uri, None);
+                    let result =
+                        self.find_type_alias_by_fields(&record_fields, field_name, uri, None);
                     if let Some(def) = Self::filter_by_target_alias(result, target_alias) {
                         return Some(def);
                     }
@@ -460,7 +568,8 @@ impl TypeChecker {
 
     /// Get the name of a type alias
     fn get_type_alias_name(&self, type_alias: &Node, source: &str) -> Option<String> {
-        type_alias.child_by_field_name("name")
+        type_alias
+            .child_by_field_name("name")
             .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             .map(|s| s.to_string())
     }
@@ -472,9 +581,11 @@ impl TypeChecker {
             let mut cursor = tree.root_node().walk();
             for child in tree.root_node().children(&mut cursor) {
                 if child.kind() == "module_declaration" {
-                    if let Some(name) = child.child_by_field_name("name")
-                        .or_else(|| child.children(&mut child.walk())
-                            .find(|c| c.kind() == "upper_case_qid")) {
+                    if let Some(name) = child.child_by_field_name("name").or_else(|| {
+                        child
+                            .children(&mut child.walk())
+                            .find(|c| c.kind() == "upper_case_qid")
+                    }) {
                         if let Ok(text) = name.utf8_text(source.as_bytes()) {
                             return text.to_string();
                         }
@@ -493,7 +604,11 @@ impl TypeChecker {
 
     /// Infer the type of a specific node
     fn infer_type_of_node(&self, uri: &str, node: Node, source: &str) -> Option<Type> {
-        tracing::info!("infer_type_of_node: node kind={}, id={}", node.kind(), node.id());
+        tracing::info!(
+            "infer_type_of_node: node kind={}, id={}",
+            node.kind(),
+            node.id()
+        );
 
         // First check cache
         if let Some(ty) = self.get_type(uri, node.id()) {
@@ -517,7 +632,10 @@ impl TypeChecker {
                 tracing::info!("infer_type_of_node: got type from decl inference: {:?}", ty);
                 return Some(ty);
             }
-            tracing::info!("infer_type_of_node: node {} not in expression_types after decl inference", node.id());
+            tracing::info!(
+                "infer_type_of_node: node {} not in expression_types after decl inference",
+                node.id()
+            );
         }
 
         let ty = scope.infer(node);
@@ -554,7 +672,9 @@ impl TypeChecker {
         let mut cursor = func_decl_left.walk();
         for child in func_decl_left.children(&mut cursor) {
             if child.kind() == "pattern" || child.kind() == "parenthesized_expr" {
-                if let Some(constructor_name) = self.find_var_in_union_pattern(child, var_name, source) {
+                if let Some(constructor_name) =
+                    self.find_var_in_union_pattern(child, var_name, source)
+                {
                     return Some(constructor_name);
                 }
             }
@@ -563,7 +683,12 @@ impl TypeChecker {
     }
 
     /// Recursively search for a variable in a union pattern and return the constructor name
-    fn find_var_in_union_pattern(&self, node: Node, var_name: &str, source: &str) -> Option<String> {
+    fn find_var_in_union_pattern(
+        &self,
+        node: Node,
+        var_name: &str,
+        source: &str,
+    ) -> Option<String> {
         match node.kind() {
             "union_pattern" => {
                 // Get the constructor name (first child, usually upper_case_qid)
@@ -571,7 +696,10 @@ impl TypeChecker {
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() == "upper_case_qid" {
-                        constructor_name = child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                        constructor_name = child
+                            .utf8_text(source.as_bytes())
+                            .ok()
+                            .map(|s| s.to_string());
                     }
                     // Check if the variable is in this pattern's arguments
                     if child.kind() == "pattern" || child.kind() == "lower_pattern" {
@@ -580,7 +708,9 @@ impl TypeChecker {
                             return constructor_name;
                         }
                         // Also recurse into nested patterns
-                        if let Some(result) = self.find_var_in_union_pattern(child, var_name, source) {
+                        if let Some(result) =
+                            self.find_var_in_union_pattern(child, var_name, source)
+                        {
                             return Some(result);
                         }
                     }
@@ -623,10 +753,13 @@ impl TypeChecker {
             let mut cursor = root.walk();
             for child in root.children(&mut cursor) {
                 if child.kind() == "type_declaration" {
-                    let type_name = child.child_by_field_name("name")
+                    let type_name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
 
-                    if type_name.is_none() { continue; }
+                    if type_name.is_none() {
+                        continue;
+                    }
                     let type_name = type_name.unwrap();
 
                     // Check each variant
@@ -635,29 +768,44 @@ impl TypeChecker {
                         if variant.kind() == "union_variant" {
                             // Get variant/constructor name
                             if let Some(variant_name_node) = variant.child_by_field_name("name") {
-                                let variant_name = variant_name_node.utf8_text(source.as_bytes()).unwrap_or("");
+                                let variant_name =
+                                    variant_name_node.utf8_text(source.as_bytes()).unwrap_or("");
                                 if variant_name == constructor_name {
                                     // Found the constructor - now look for the record field
-                                    if let Some(record_type) = self.find_record_in_union_variant(variant) {
+                                    if let Some(record_type) =
+                                        self.find_record_in_union_variant(variant)
+                                    {
                                         let mut fc = record_type.walk();
                                         for field_child in record_type.children(&mut fc) {
                                             if field_child.kind() == "field_type" {
-                                                if let Some(name_node) = field_child.child_by_field_name("name") {
-                                                    if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                                                if let Some(name_node) =
+                                                    field_child.child_by_field_name("name")
+                                                {
+                                                    if let Ok(name) =
+                                                        name_node.utf8_text(source.as_bytes())
+                                                    {
                                                         if name == field_name {
                                                             // Check target filter if specified
                                                             if let Some(target) = target_alias {
-                                                                let module_name = self.get_module_name(uri, source);
-                                                                if type_name != target.name || module_name != target.module {
+                                                                let module_name = self
+                                                                    .get_module_name(uri, source);
+                                                                if type_name != target.name
+                                                                    || module_name != target.module
+                                                                {
                                                                     continue;
                                                                 }
                                                             }
                                                             return Some(FieldDefinition {
                                                                 name: field_name.to_string(),
                                                                 node_id: name_node.id(),
-                                                                type_alias_name: Some(type_name.to_string()),
-                                                                type_alias_node_id: Some(child.id()),
-                                                                module_name: self.get_module_name(uri, source),
+                                                                type_alias_name: Some(
+                                                                    type_name.to_string(),
+                                                                ),
+                                                                type_alias_node_id: Some(
+                                                                    child.id(),
+                                                                ),
+                                                                module_name: self
+                                                                    .get_module_name(uri, source),
                                                                 uri: uri.to_string(),
                                                             });
                                                         }
@@ -750,16 +898,27 @@ impl TypeChecker {
             for child in func_call.children(&mut cursor) {
                 if !saw_func {
                     // First meaningful child is the function
-                    if child.kind() == "value_expr" || child.kind() == "value_qid" ||
-                       child.kind() == "field_access_expr" || child.kind() == "upper_case_qid" {
-                        func_name = Some(child.utf8_text(source.as_bytes()).unwrap_or("").to_string());
+                    if child.kind() == "value_expr"
+                        || child.kind() == "value_qid"
+                        || child.kind() == "field_access_expr"
+                        || child.kind() == "upper_case_qid"
+                    {
+                        func_name =
+                            Some(child.utf8_text(source.as_bytes()).unwrap_or("").to_string());
                         saw_func = true;
                     } else if child.kind() == "parenthesized_expr" && look_at_outer {
                         // When looking at outer call, the parenthesized inner call IS the function
                         // Extract the function name from inside
-                        if let Some(inner_call) = Self::find_child_of_kind(child, "function_call_expr") {
+                        if let Some(inner_call) =
+                            Self::find_child_of_kind(child, "function_call_expr")
+                        {
                             if let Some(inner_func) = inner_call.child(0) {
-                                func_name = Some(inner_func.utf8_text(source.as_bytes()).unwrap_or("").to_string());
+                                func_name = Some(
+                                    inner_func
+                                        .utf8_text(source.as_bytes())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                );
                             }
                         }
                         saw_func = true;
@@ -790,7 +949,9 @@ impl TypeChecker {
 
                 if let Some(ref arg_ty) = arg_type {
                     // Extract the inner type from common collection patterns
-                    if let Some(inner_type) = self.extract_element_type_for_map(fname, arg_ty, param_index) {
+                    if let Some(inner_type) =
+                        self.extract_element_type_for_map(fname, arg_ty, param_index)
+                    {
                         return Some(inner_type);
                     }
                 }
@@ -803,15 +964,26 @@ impl TypeChecker {
     /// Extract the element type for common map-like function patterns.
     /// For `Cache.map` with `Cache a` argument, returns the type `a`.
     /// For `List.map` with `List a` argument, returns the type `a`.
-    fn extract_element_type_for_map(&self, func_name: &str, arg_type: &Type, param_index: usize) -> Option<String> {
+    fn extract_element_type_for_map(
+        &self,
+        func_name: &str,
+        arg_type: &Type,
+        param_index: usize,
+    ) -> Option<String> {
         // Handle qualified names like Cache.map, List.map, SeqDict.map, etc.
         let func_parts: Vec<&str> = func_name.split('.').collect();
         let simple_name = func_parts.last().unwrap_or(&func_name);
 
         // Check for map-like functions where first lambda param is the element type
-        if *simple_name == "map" || *simple_name == "filterMap" || *simple_name == "foldl" ||
-           *simple_name == "foldr" || *simple_name == "filter" || *simple_name == "any" ||
-           *simple_name == "all" || *simple_name == "member" {
+        if *simple_name == "map"
+            || *simple_name == "filterMap"
+            || *simple_name == "foldl"
+            || *simple_name == "foldr"
+            || *simple_name == "filter"
+            || *simple_name == "any"
+            || *simple_name == "all"
+            || *simple_name == "member"
+        {
             // For these functions, extract element type from the collection
             return self.extract_inner_type_from_collection(arg_type, param_index);
         }
@@ -855,9 +1027,7 @@ impl TypeChecker {
                 // For record types, not a collection
                 None
             }
-            Type::MutableRecord(_) => {
-                None
-            }
+            Type::MutableRecord(_) => None,
             _ => None,
         }
     }
@@ -929,7 +1099,8 @@ impl TypeChecker {
             let mut cursor = root.walk();
             for child in root.children(&mut cursor) {
                 if child.kind() == "type_alias_declaration" {
-                    let decl_name = child.child_by_field_name("name")
+                    let decl_name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
 
                     if decl_name == Some(type_name) {
@@ -953,13 +1124,18 @@ impl TypeChecker {
                                 let mut fc = record.walk();
                                 for field_child in record.children(&mut fc) {
                                     if field_child.kind() == "field_type" {
-                                        if let Some(name_node) = field_child.child_by_field_name("name") {
-                                            if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                                        if let Some(name_node) =
+                                            field_child.child_by_field_name("name")
+                                        {
+                                            if let Ok(name) = name_node.utf8_text(source.as_bytes())
+                                            {
                                                 if name == field_name {
                                                     return Some(FieldDefinition {
                                                         name: field_name.to_string(),
                                                         node_id: name_node.id(),
-                                                        type_alias_name: Some(type_name.to_string()),
+                                                        type_alias_name: Some(
+                                                            type_name.to_string(),
+                                                        ),
                                                         type_alias_node_id: Some(child.id()),
                                                         module_name: module_name.clone(),
                                                         uri: uri.to_string(),
@@ -1057,7 +1233,8 @@ impl TypeChecker {
             let mut cursor = root.walk();
             for child in root.children(&mut cursor) {
                 if child.kind() == "type_alias_declaration" {
-                    let name = child.child_by_field_name("name")
+                    let name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
                     if name == Some(type_alias_name) {
                         // Found the type alias - look for the field
@@ -1066,15 +1243,22 @@ impl TypeChecker {
                         }
                     }
                 } else if child.kind() == "type_declaration" {
-                    let name = child.child_by_field_name("name")
+                    let name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
                     if name == Some(type_alias_name) {
                         // Custom type - look in each variant's record
                         let mut vc = child.walk();
                         for variant in child.children(&mut vc) {
                             if variant.kind() == "union_variant" {
-                                if let Some(record_type) = self.find_record_in_union_variant(variant) {
-                                    if let Some(field_type) = self.find_field_type_in_record(record_type, field_name, source) {
+                                if let Some(record_type) =
+                                    self.find_record_in_union_variant(variant)
+                                {
+                                    if let Some(field_type) = self.find_field_type_in_record(
+                                        record_type,
+                                        field_name,
+                                        source,
+                                    ) {
                                         return Some(field_type);
                                     }
                                 }
@@ -1101,7 +1285,9 @@ impl TypeChecker {
         } else {
             // Descend to find record_type (can't use ? due to cursor borrow lifetime)
             let mut cursor = record.walk();
-            let result = record.children(&mut cursor).find(|c| c.kind() == "record_type");
+            let result = record
+                .children(&mut cursor)
+                .find(|c| c.kind() == "record_type");
             match result {
                 Some(r) => r,
                 None => return None,
@@ -1111,7 +1297,8 @@ impl TypeChecker {
         let mut cursor = record_type.walk();
         for child in record_type.children(&mut cursor) {
             if child.kind() == "field_type" {
-                let name = child.child_by_field_name("name")
+                let name = child
+                    .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source.as_bytes()).ok());
                 if name == Some(field_name) {
                     // Found the field - get its type expression
@@ -1125,19 +1312,28 @@ impl TypeChecker {
                                     let mut qc = qid.walk();
                                     #[allow(clippy::double_ended_iterator_last)]
                                     if let Some(last) = qid.children(&mut qc).last() {
-                                        return last.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                                        return last
+                                            .utf8_text(source.as_bytes())
+                                            .ok()
+                                            .map(|s| s.to_string());
                                     }
                                 }
                             } else if type_child.kind() == "upper_case_qid" {
                                 let mut qc = type_child.walk();
                                 #[allow(clippy::double_ended_iterator_last)]
                                 if let Some(last) = type_child.children(&mut qc).last() {
-                                    return last.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                                    return last
+                                        .utf8_text(source.as_bytes())
+                                        .ok()
+                                        .map(|s| s.to_string());
                                 }
                             }
                         }
                         // Fallback - get the whole text
-                        return type_expr.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                        return type_expr
+                            .utf8_text(source.as_bytes())
+                            .ok()
+                            .map(|s| s.to_string());
                     }
                 }
             }
@@ -1165,7 +1361,8 @@ impl TypeChecker {
             let mut cursor = root.walk();
             for child in root.children(&mut cursor) {
                 if child.kind() == "type_alias_declaration" {
-                    let name = child.child_by_field_name("name")
+                    let name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
                     if name == Some(type_name) {
                         // Check target filter
@@ -1176,13 +1373,21 @@ impl TypeChecker {
                         }
                         // Found the type alias - look for the field
                         if let Some(type_expr) = child.child_by_field_name("typeExpression") {
-                            if let Some(def) = self.find_field_in_record_type_simple(type_expr, field_name, source, uri, type_name, &module_name) {
+                            if let Some(def) = self.find_field_in_record_type_simple(
+                                type_expr,
+                                field_name,
+                                source,
+                                uri,
+                                type_name,
+                                &module_name,
+                            ) {
                                 return Some(def);
                             }
                         }
                     }
                 } else if child.kind() == "type_declaration" {
-                    let name = child.child_by_field_name("name")
+                    let name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
                     if name == Some(type_name) {
                         // Check target filter
@@ -1195,8 +1400,17 @@ impl TypeChecker {
                         let mut vc = child.walk();
                         for variant in child.children(&mut vc) {
                             if variant.kind() == "union_variant" {
-                                if let Some(record_type) = self.find_record_in_union_variant(variant) {
-                                    if let Some(def) = self.find_field_in_record_type_simple(record_type, field_name, source, uri, type_name, &module_name) {
+                                if let Some(record_type) =
+                                    self.find_record_in_union_variant(variant)
+                                {
+                                    if let Some(def) = self.find_field_in_record_type_simple(
+                                        record_type,
+                                        field_name,
+                                        source,
+                                        uri,
+                                        type_name,
+                                        &module_name,
+                                    ) {
                                         return Some(def);
                                     }
                                 }
@@ -1226,7 +1440,8 @@ impl TypeChecker {
         } else {
             // Descend to find record_type
             let mut cursor = record_type.walk();
-            let result = record_type.children(&mut cursor)
+            let result = record_type
+                .children(&mut cursor)
                 .find(|c| c.kind() == "record_type");
             match result {
                 Some(r) => r,
@@ -1291,7 +1506,8 @@ impl TypeChecker {
                         let fields: Vec<String> = mr.fields.keys().cloned().collect();
                         // For structural matching, find the ACTUAL type first (without target filter)
                         // then verify it matches the target
-                        let result = self.find_type_alias_by_fields(&fields, field_name, _current_uri, None);
+                        let result =
+                            self.find_type_alias_by_fields(&fields, field_name, _current_uri, None);
                         if let Some(ref def) = result {
                             // If we have a target, only return if the found type matches
                             if let Some(t) = target {
@@ -1408,7 +1624,12 @@ impl TypeChecker {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if let Some(def) = self.find_field_in_record_type(
-                child, field_name, uri, source, type_alias_name, type_alias_node_id
+                child,
+                field_name,
+                uri,
+                source,
+                type_alias_name,
+                type_alias_node_id,
             ) {
                 return Some(def);
             }
@@ -1510,7 +1731,13 @@ impl TypeChecker {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if let Some(def) = self.check_field_type_match(
-                child, field_name, field_type_name, uri, source, type_alias_name, type_alias_node_id
+                child,
+                field_name,
+                field_type_name,
+                uri,
+                source,
+                type_alias_name,
+                type_alias_node_id,
             ) {
                 return Some(def);
             }
@@ -1524,7 +1751,10 @@ impl TypeChecker {
         if node.kind() == "type_ref" {
             if let Some(child) = node.child(0) {
                 if child.kind() == "upper_case_qid" {
-                    return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                    return child
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .map(|s| s.to_string());
                 }
             }
         }
@@ -1583,11 +1813,10 @@ impl TypeChecker {
         // Check for record_expr with base identifier (like `{ a | name = ... }`)
         if node.kind() == "record_expr" {
             let mut cursor = node.walk();
-            let has_matching_base = node.children(&mut cursor)
-                .any(|c| {
-                    c.kind() == "record_base_identifier"
-                        && c.utf8_text(source.as_bytes()).unwrap_or("?") == variable_name
-                });
+            let has_matching_base = node.children(&mut cursor).any(|c| {
+                c.kind() == "record_base_identifier"
+                    && c.utf8_text(source.as_bytes()).unwrap_or("?") == variable_name
+            });
             if has_matching_base {
                 // Collect all field names from this record update
                 let record_fields = self.collect_record_expr_fields(node, source);
@@ -1652,11 +1881,7 @@ impl TypeChecker {
     }
 
     /// Get all field usages for a given field name
-    pub fn find_all_field_usages(
-        &self,
-        uri: &str,
-        field_name: &str,
-    ) -> Vec<(String, usize)> {
+    pub fn find_all_field_usages(&self, uri: &str, field_name: &str) -> Vec<(String, usize)> {
         let mut usages = Vec::new();
 
         if let Some(result) = self.inference_cache.get(uri) {
@@ -1719,10 +1944,13 @@ impl TypeChecker {
             for child in root.children(&mut cursor) {
                 if child.kind() == "type_alias_declaration" {
                     // Get alias name
-                    let alias_name = child.child_by_field_name("name")
+                    let alias_name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
 
-                    if alias_name.is_none() { continue; }
+                    if alias_name.is_none() {
+                        continue;
+                    }
                     let alias_name = alias_name.unwrap();
 
                     // Find the record_type within the type alias
@@ -1761,10 +1989,13 @@ impl TypeChecker {
                     }
                 } else if child.kind() == "type_declaration" {
                     // Also check custom types
-                    let type_name = child.child_by_field_name("name")
+                    let type_name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok());
 
-                    if type_name.is_none() { continue; }
+                    if type_name.is_none() {
+                        continue;
+                    }
                     let type_name = type_name.unwrap();
 
                     // Check if any variant has a record with the field
@@ -1776,8 +2007,11 @@ impl TypeChecker {
                                 let mut fc = record_type.walk();
                                 for field_child in record_type.children(&mut fc) {
                                     if field_child.kind() == "field_type" {
-                                        if let Some(name_node) = field_child.child_by_field_name("name") {
-                                            if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                                        if let Some(name_node) =
+                                            field_child.child_by_field_name("name")
+                                        {
+                                            if let Ok(name) = name_node.utf8_text(source.as_bytes())
+                                            {
                                                 if name == field_name {
                                                     has_field = true;
                                                     break;
@@ -1786,7 +2020,9 @@ impl TypeChecker {
                                         }
                                     }
                                 }
-                                if has_field { break; }
+                                if has_field {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1817,7 +2053,12 @@ impl TypeChecker {
         _current_uri: &str,
         target: Option<&TargetTypeAlias>,
     ) -> Option<FieldDefinition> {
-        tracing::debug!("find_type_alias_by_fields: looking for {:?} with target field {}, target={:?}", record_fields, target_field, target.map(|t| &t.name));
+        tracing::debug!(
+            "find_type_alias_by_fields: looking for {:?} with target field {}, target={:?}",
+            record_fields,
+            target_field,
+            target.map(|t| &t.name)
+        );
 
         // Collect all matching candidates with their field counts
         let mut candidates: Vec<(FieldDefinition, usize)> = Vec::new();
@@ -1826,7 +2067,7 @@ impl TypeChecker {
         for (uri, tree) in &self.tree_cache {
             let source = match self.source_cache.get(uri) {
                 Some(s) => s,
-                None => continue,  // Skip files without cached source
+                None => continue, // Skip files without cached source
             };
             let root = tree.root_node();
 
@@ -1835,7 +2076,11 @@ impl TypeChecker {
             for child in root.children(&mut cursor) {
                 if child.kind() == "type_alias_declaration" {
                     if let Some((def, field_count)) = self.check_type_alias_matches_with_count(
-                        child, record_fields, target_field, uri, source
+                        child,
+                        record_fields,
+                        target_field,
+                        uri,
+                        source,
                     ) {
                         // If target is specified, filter to only matching type aliases
                         if let Some(target) = target {
@@ -1848,7 +2093,11 @@ impl TypeChecker {
                 } else if child.kind() == "type_declaration" {
                     // Also search custom types that wrap records
                     if let Some((def, field_count)) = self.check_custom_type_matches_with_count(
-                        child, record_fields, target_field, uri, source
+                        child,
+                        record_fields,
+                        target_field,
+                        uri,
+                        source,
                     ) {
                         // If target is specified, filter to only matching types
                         if let Some(target) = target {
@@ -1882,7 +2131,8 @@ impl TypeChecker {
         source: &str,
     ) -> Option<(FieldDefinition, usize)> {
         // Get alias name
-        let alias_name = type_alias.child_by_field_name("name")
+        let alias_name = type_alias
+            .child_by_field_name("name")
             .and_then(|n| n.utf8_text(source.as_bytes()).ok())?;
 
         // Find the record_type within the type alias
@@ -1912,14 +2162,17 @@ impl TypeChecker {
 
         if all_fields_match {
             if let Some(field_node) = target_field_node {
-                return Some((FieldDefinition {
-                    name: target_field.to_string(),
-                    node_id: field_node.id(),
-                    type_alias_name: Some(alias_name.to_string()),
-                    type_alias_node_id: Some(type_alias.id()),
-                    module_name: self.get_module_name(uri, source),
-                    uri: uri.to_string(),
-                }, type_fields.len()));
+                return Some((
+                    FieldDefinition {
+                        name: target_field.to_string(),
+                        node_id: field_node.id(),
+                        type_alias_name: Some(alias_name.to_string()),
+                        type_alias_node_id: Some(type_alias.id()),
+                        module_name: self.get_module_name(uri, source),
+                        uri: uri.to_string(),
+                    },
+                    type_fields.len(),
+                ));
             }
         }
 
@@ -1936,7 +2189,8 @@ impl TypeChecker {
         source: &str,
     ) -> Option<(FieldDefinition, usize)> {
         // Get type name
-        let type_name = type_decl.child_by_field_name("name")
+        let type_name = type_decl
+            .child_by_field_name("name")
             .and_then(|n| n.utf8_text(source.as_bytes()).ok())?;
 
         // Find union variants within the type declaration
@@ -1968,14 +2222,17 @@ impl TypeChecker {
 
                     if all_fields_match {
                         if let Some(field_node) = target_field_node {
-                            return Some((FieldDefinition {
-                                name: target_field.to_string(),
-                                node_id: field_node.id(),
-                                type_alias_name: Some(type_name.to_string()),
-                                type_alias_node_id: Some(type_decl.id()),
-                                module_name: self.get_module_name(uri, source),
-                                uri: uri.to_string(),
-                            }, type_fields.len()));
+                            return Some((
+                                FieldDefinition {
+                                    name: target_field.to_string(),
+                                    node_id: field_node.id(),
+                                    type_alias_name: Some(type_name.to_string()),
+                                    type_alias_node_id: Some(type_decl.id()),
+                                    module_name: self.get_module_name(uri, source),
+                                    uri: uri.to_string(),
+                                },
+                                type_fields.len(),
+                            ));
                         }
                     }
                 }
@@ -2029,7 +2286,9 @@ mod tests {
 
     fn parse(source: &str) -> Tree {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_elm::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_elm::LANGUAGE.into())
+            .unwrap();
         parser.parse(source, None).unwrap()
     }
 
@@ -2076,7 +2335,11 @@ type alias User =
     }
 
     fn find_node_at_point(node: Node, point: tree_sitter::Point) -> Option<Node> {
-        fn point_in_range(point: tree_sitter::Point, start: tree_sitter::Point, end: tree_sitter::Point) -> bool {
+        fn point_in_range(
+            point: tree_sitter::Point,
+            start: tree_sitter::Point,
+            end: tree_sitter::Point,
+        ) -> bool {
             if point.row < start.row || point.row > end.row {
                 return false;
             }
@@ -2122,14 +2385,29 @@ type alias Person =
 
         println!("Found node kind: {}", node.kind());
         println!("Found node text: {:?}", node.utf8_text(source.as_bytes()));
-        println!("Found node position: {:?} - {:?}", node.start_position(), node.end_position());
+        println!(
+            "Found node position: {:?} - {:?}",
+            node.start_position(),
+            node.end_position()
+        );
         if let Some(parent) = node.parent() {
             println!("Parent kind: {}", parent.kind());
         }
 
-        assert_eq!(node.kind(), "lower_case_identifier", "Expected lower_case_identifier");
-        assert_eq!(node.utf8_text(source.as_bytes()).unwrap(), "name", "Expected 'name'");
-        assert_eq!(node.parent().map(|p| p.kind()), Some("field_type"), "Parent should be field_type");
+        assert_eq!(
+            node.kind(),
+            "lower_case_identifier",
+            "Expected lower_case_identifier"
+        );
+        assert_eq!(
+            node.utf8_text(source.as_bytes()).unwrap(),
+            "name",
+            "Expected 'name'"
+        );
+        assert_eq!(
+            node.parent().map(|p| p.kind()),
+            Some("field_type"),
+            "Parent should be field_type"
+        );
     }
-
 }

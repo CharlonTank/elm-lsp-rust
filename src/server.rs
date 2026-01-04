@@ -103,6 +103,20 @@ impl ElmLanguageServer {
     }
 
     fn extract_word_from_line(&self, line: &str, col: usize) -> Option<String> {
+        self.extract_word_from_line_impl(line, col, true)
+    }
+
+    /// Extract just the immediate word (no dots) from a line
+    fn extract_simple_word_from_line(&self, line: &str, col: usize) -> Option<String> {
+        self.extract_word_from_line_impl(line, col, false)
+    }
+
+    fn extract_word_from_line_impl(
+        &self,
+        line: &str,
+        col: usize,
+        include_dots: bool,
+    ) -> Option<String> {
         if col >= line.len() {
             return None;
         }
@@ -112,11 +126,14 @@ impl ElmLanguageServer {
         let mut start = col;
         let mut end = col;
 
-        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_' || chars[start - 1] == '.') {
+        let is_word_char =
+            |c: char| -> bool { c.is_alphanumeric() || c == '_' || (include_dots && c == '.') };
+
+        while start > 0 && is_word_char(chars[start - 1]) {
             start -= 1;
         }
 
-        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '.') {
+        while end < chars.len() && is_word_char(chars[end]) {
             end += 1;
         }
 
@@ -127,7 +144,11 @@ impl ElmLanguageServer {
         }
     }
 
-    fn get_variant_at_position(&self, uri: &Url, position: Position) -> Option<(String, VariantInfo, usize, usize, Vec<String>)> {
+    fn get_variant_at_position(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<(String, VariantInfo, usize, usize, Vec<String>)> {
         if let Some(doc) = self.documents.get(uri) {
             for symbol in &doc.symbols {
                 if symbol.kind == SymbolKind::ENUM {
@@ -136,9 +157,8 @@ impl ElmLanguageServer {
                             && position.character >= variant.range.start.character
                             && position.character <= variant.range.end.character
                         {
-                            let all_variants: Vec<String> = symbol.variants.iter()
-                                .map(|v| v.name.clone())
-                                .collect();
+                            let all_variants: Vec<String> =
+                                symbol.variants.iter().map(|v| v.name.clone()).collect();
                             return Some((
                                 symbol.name.clone(),
                                 variant.clone(),
@@ -212,7 +232,12 @@ impl ElmLanguageServer {
 
     /// Classify what kind of symbol is at a position
     /// Returns: "variant", "type", "function", "field", or "unknown"
-    fn get_symbol_kind_at_position(&self, uri: &Url, position: Position, text: &str) -> &'static str {
+    fn get_symbol_kind_at_position(
+        &self,
+        uri: &Url,
+        position: Position,
+        text: &str,
+    ) -> &'static str {
         // Check for variant first (most specific)
         if self.get_variant_at_position(uri, position).is_some() {
             return "variant";
@@ -221,7 +246,10 @@ impl ElmLanguageServer {
         // Check for field
         if let Ok(ws) = self.workspace.read() {
             if let Some(workspace) = ws.as_ref() {
-                if workspace.get_field_at_position(uri, position, text).is_some() {
+                if workspace
+                    .get_field_at_position(uri, position, text)
+                    .is_some()
+                {
                     return "field";
                 }
             }
@@ -270,7 +298,9 @@ impl ElmLanguageServer {
                         let line_num = content[..abs_pos].matches('\n').count() + 1;
                         tracing::info!(
                             "Shadowing detected: '{}' already exists in {} at line {}",
-                            new_name, file_path.display(), line_num
+                            new_name,
+                            file_path.display(),
+                            line_num
                         );
                         return Ok(None);
                     }
@@ -279,22 +309,28 @@ impl ElmLanguageServer {
             }
         }
 
-        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+            std::collections::HashMap::new();
 
         // Get cross-file references from workspace
         if let Ok(ws) = self.workspace.read() {
             if let Some(workspace) = ws.as_ref() {
                 // Add definition location - prefer definition in the current file, skip Evergreen
-                let definition = workspace.get_symbols(name)
+                let definition = workspace
+                    .get_symbols(name)
                     .into_iter()
-                    .find(|s| &s.definition_uri == uri && !s.definition_uri.path().contains("/Evergreen/"))
+                    .find(|s| {
+                        &s.definition_uri == uri && !s.definition_uri.path().contains("/Evergreen/")
+                    })
                     .or_else(|| {
-                        workspace.find_definition(name)
+                        workspace
+                            .find_definition(name)
                             .filter(|s| !s.definition_uri.path().contains("/Evergreen/"))
                     });
 
                 // Track ranges we've already added to avoid duplicates
-                let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> = std::collections::HashSet::new();
+                let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> =
+                    std::collections::HashSet::new();
 
                 if let Some(symbol) = definition {
                     let key = (
@@ -317,7 +353,8 @@ impl ElmLanguageServer {
                     // also add the constructor definition to the changes
                     if symbol.kind == SymbolKind::ENUM {
                         if let Some(module) = workspace.get_module(&symbol.module_name) {
-                            if let Some(elm_symbol) = module.symbols.iter().find(|s| s.name == name) {
+                            if let Some(elm_symbol) = module.symbols.iter().find(|s| s.name == name)
+                            {
                                 for variant in &elm_symbol.variants {
                                     if variant.name == name {
                                         let key = (
@@ -375,13 +412,10 @@ impl ElmLanguageServer {
                             continue;
                         }
                         seen_ranges.insert(key);
-                        changes
-                            .entry(r.uri)
-                            .or_default()
-                            .push(TextEdit {
-                                range: r.range,
-                                new_text: new_name.to_string(),
-                            });
+                        changes.entry(r.uri).or_default().push(TextEdit {
+                            range: r.range,
+                            new_text: new_name.to_string(),
+                        });
                     }
                 }
             }
@@ -428,11 +462,18 @@ impl ElmLanguageServer {
         variant_definition_range: Range,
         new_name: &str,
     ) -> Result<Option<WorkspaceEdit>> {
-        tracing::info!("Renaming variant {} to {} (range: {:?})", variant_name, new_name, variant_definition_range);
-        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+        tracing::info!(
+            "Renaming variant {} to {} (range: {:?})",
+            variant_name,
+            new_name,
+            variant_definition_range
+        );
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+            std::collections::HashMap::new();
 
         // Track ranges we've already added to avoid duplicates
-        let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> = std::collections::HashSet::new();
+        let mut seen_ranges: std::collections::HashSet<(String, u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
 
         // Add the definition edit using the provided range
         let def_key = (
@@ -443,13 +484,10 @@ impl ElmLanguageServer {
             variant_definition_range.end.character,
         );
         seen_ranges.insert(def_key);
-        changes
-            .entry(uri.clone())
-            .or_default()
-            .push(TextEdit {
-                range: variant_definition_range,
-                new_text: new_name.to_string(),
-            });
+        changes.entry(uri.clone()).or_default().push(TextEdit {
+            range: variant_definition_range,
+            new_text: new_name.to_string(),
+        });
 
         // Get all references from workspace
         if let Ok(ws) = self.workspace.read() {
@@ -472,13 +510,10 @@ impl ElmLanguageServer {
                         continue;
                     }
                     seen_ranges.insert(key);
-                    changes
-                        .entry(r.uri)
-                        .or_default()
-                        .push(TextEdit {
-                            range: r.range,
-                            new_text: new_name.to_string(),
-                        });
+                    changes.entry(r.uri).or_default().push(TextEdit {
+                        range: r.range,
+                        new_text: new_name.to_string(),
+                    });
                 }
             }
         }
@@ -492,6 +527,69 @@ impl ElmLanguageServer {
         }
 
         Ok(None)
+    }
+
+    /// Find a node at a specific point in the tree
+    fn find_node_at_point(
+        node: tree_sitter::Node,
+        point: tree_sitter::Point,
+    ) -> Option<tree_sitter::Node> {
+        if !Self::point_in_range(point, node.start_position(), node.end_position()) {
+            return None;
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = Self::find_node_at_point(child, point) {
+                return Some(found);
+            }
+        }
+
+        Some(node)
+    }
+
+    fn point_in_range(
+        point: tree_sitter::Point,
+        start: tree_sitter::Point,
+        end: tree_sitter::Point,
+    ) -> bool {
+        if point.row < start.row || point.row > end.row {
+            return false;
+        }
+        if point.row == start.row && point.column < start.column {
+            return false;
+        }
+        if point.row == end.row && point.column > end.column {
+            return false;
+        }
+        true
+    }
+
+    /// Check if parent node contains child node
+    fn node_contains(parent: tree_sitter::Node, child: tree_sitter::Node) -> bool {
+        let ps = parent.start_position();
+        let pe = parent.end_position();
+        let cs = child.start_position();
+        let ce = child.end_position();
+
+        (cs.row > ps.row || (cs.row == ps.row && cs.column >= ps.column))
+            && (ce.row < pe.row || (ce.row == pe.row && ce.column <= pe.column))
+    }
+
+    /// Find a node by its ID
+    fn find_node_by_id(node: tree_sitter::Node, target_id: usize) -> Option<tree_sitter::Node> {
+        if node.id() == target_id {
+            return Some(node);
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = Self::find_node_by_id(child, target_id) {
+                return Some(found);
+            }
+        }
+
+        None
     }
 }
 
@@ -516,7 +614,11 @@ impl LanguageServer for ElmLanguageServer {
                 } else {
                     let module_count = workspace.modules.len();
                     let symbol_count: usize = workspace.symbols.values().map(|v| v.len()).sum();
-                    tracing::info!("Workspace initialized: {} modules, {} symbols", module_count, symbol_count);
+                    tracing::info!(
+                        "Workspace initialized: {} modules, {} symbols",
+                        module_count,
+                        symbol_count
+                    );
 
                     if let Ok(mut ws) = self.workspace.write() {
                         *ws = Some(workspace);
@@ -576,7 +678,10 @@ impl LanguageServer for ElmLanguageServer {
         let message = {
             if let Ok(ws) = self.workspace.read() {
                 if let Some(workspace) = ws.as_ref() {
-                    format!("Elm LSP (Rust) initialized: {} modules indexed", workspace.modules.len())
+                    format!(
+                        "Elm LSP (Rust) initialized: {} modules indexed",
+                        workspace.modules.len()
+                    )
                 } else {
                     "Elm LSP (Rust) initialized (no workspace)".to_string()
                 }
@@ -697,7 +802,95 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        // First try local document
+        // Get document content for type-aware lookups
+        let content = if let Some(doc) = self.documents.get(uri) {
+            doc.text.clone()
+        } else {
+            String::new()
+        };
+
+        // First, check if we're on a field access expression (record.field)
+        // This needs special handling to go to the field definition in the type alias
+        if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                if let Some(tree) = workspace.type_checker.get_tree(uri.as_str()) {
+                    let point = tree_sitter::Point::new(
+                        position.line as usize,
+                        position.character as usize,
+                    );
+                    if let Some(node) = Self::find_node_at_point(tree.root_node(), point) {
+                        // Check if this is a field in a field_access_expr
+                        if let Some(parent) = node.parent() {
+                            if parent.kind() == "field_access_expr"
+                                && node.kind() == "lower_case_identifier"
+                            {
+                                // This is the field part of record.field
+                                // Check if we're clicking on the field (after the dot), not the record
+                                if let Some(target) = parent.child_by_field_name("target") {
+                                    // If node is NOT inside target, we're clicking on the field
+                                    if !Self::node_contains(target, node) {
+                                        tracing::info!("Field access detected, using type checker");
+                                        if let Some(field_def) = workspace
+                                            .type_checker
+                                            .find_field_definition(uri.as_str(), node, &content)
+                                        {
+                                            // Convert field definition URI to Url
+                                            if let Ok(def_uri) = Url::parse(&field_def.uri) {
+                                                // Find the actual range of the field in the type alias
+                                                if let Some(def_tree) =
+                                                    workspace.type_checker.get_tree(&field_def.uri)
+                                                {
+                                                    if workspace
+                                                        .type_checker
+                                                        .get_source(&field_def.uri)
+                                                        .is_some()
+                                                    {
+                                                        if let Some(field_node) =
+                                                            Self::find_node_by_id(
+                                                                def_tree.root_node(),
+                                                                field_def.node_id,
+                                                            )
+                                                        {
+                                                            let range = Range {
+                                                                start: Position::new(
+                                                                    field_node.start_position().row
+                                                                        as u32,
+                                                                    field_node
+                                                                        .start_position()
+                                                                        .column
+                                                                        as u32,
+                                                                ),
+                                                                end: Position::new(
+                                                                    field_node.end_position().row
+                                                                        as u32,
+                                                                    field_node.end_position().column
+                                                                        as u32,
+                                                                ),
+                                                            };
+                                                            tracing::info!("Found field definition in {} at {:?}", field_def.uri, range);
+                                                            return Ok(Some(
+                                                                GotoDefinitionResponse::Scalar(
+                                                                    Location {
+                                                                        uri: def_uri,
+                                                                        range,
+                                                                    },
+                                                                ),
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try local document symbols (top-level declarations)
         if let Some(doc) = self.documents.get(uri) {
             if let Some(symbol) = doc.get_symbol_at_position(position) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -708,16 +901,23 @@ impl LanguageServer for ElmLanguageServer {
         }
 
         // Try workspace lookup for cross-file definition
-        if let Some(word) = self.get_word_at_position(uri, position) {
-            tracing::info!("Looking up definition for: {}", word);
-            if let Ok(ws) = self.workspace.read() {
-                if let Some(workspace) = ws.as_ref() {
-                    if let Some(symbol) = workspace.find_definition(&word) {
-                        tracing::info!("Found definition in {}", symbol.module_name);
-                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: symbol.definition_uri.clone(),
-                            range: symbol.definition_range,
-                        })));
+        // Use simple word extraction (no dots) to avoid the pageConfig.width -> width issue
+        if let Some(doc) = self.documents.get(uri) {
+            if let Some(line) = doc.get_line(position.line) {
+                if let Some(word) =
+                    self.extract_simple_word_from_line(line, position.character as usize)
+                {
+                    tracing::info!("Looking up definition for: {}", word);
+                    if let Ok(ws) = self.workspace.read() {
+                        if let Some(workspace) = ws.as_ref() {
+                            if let Some(symbol) = workspace.find_definition(&word) {
+                                tracing::info!("Found definition in {}", symbol.module_name);
+                                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: symbol.definition_uri.clone(),
+                                    range: symbol.definition_range,
+                                })));
+                            }
+                        }
                     }
                 }
             }
@@ -771,9 +971,13 @@ impl LanguageServer for ElmLanguageServer {
                         crate::binder::BoundSymbolKind::Port => {
                             workspace.find_port_references_typed(sym)
                         }
-                        _ => {
-                            workspace.find_references(&sym.name, sym.module_name.as_deref())
+                        // Local variables: scope the search to their containing block
+                        crate::binder::BoundSymbolKind::FunctionParameter
+                        | crate::binder::BoundSymbolKind::CasePattern
+                        | crate::binder::BoundSymbolKind::AnonymousFunctionParameter => {
+                            workspace.find_local_references(sym, &content)
                         }
+                        _ => workspace.find_references(&sym.name, sym.module_name.as_deref()),
                     }
                 } else {
                     vec![]
@@ -997,7 +1201,9 @@ impl LanguageServer for ElmLanguageServer {
         if let Some(doc) = self.documents.get(uri) {
             if let Ok(ws) = self.workspace.read() {
                 if let Some(workspace) = ws.as_ref() {
-                    if let Some(field_info) = workspace.get_field_at_position(uri, position, &doc.text) {
+                    if let Some(field_info) =
+                        workspace.get_field_at_position(uri, position, &doc.text)
+                    {
                         return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
                             range: field_info.range,
                             placeholder: field_info.name.clone(),
@@ -1008,7 +1214,9 @@ impl LanguageServer for ElmLanguageServer {
         }
 
         // Check if this is a variant
-        if let Some((_type_name, variant_info, _, _, _)) = self.get_variant_at_position(uri, position) {
+        if let Some((_type_name, variant_info, _, _, _)) =
+            self.get_variant_at_position(uri, position)
+        {
             return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
                 range: variant_info.range,
                 placeholder: variant_info.name.clone(),
@@ -1022,9 +1230,10 @@ impl LanguageServer for ElmLanguageServer {
                 if let Ok(ws) = self.workspace.read() {
                     if let Some(workspace) = ws.as_ref() {
                         if workspace.is_protected_lamdera_type(&symbol.name) {
-                            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                                format!("Cannot rename '{}' - this type is required by Lamdera", symbol.name)
-                            ));
+                            return Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                                "Cannot rename '{}' - this type is required by Lamdera",
+                                symbol.name
+                            )));
                         }
                     }
                 }
@@ -1057,25 +1266,28 @@ impl LanguageServer for ElmLanguageServer {
                         );
 
                         // Find all field references using type inference
-                        let refs = workspace.find_field_references(&field_info.name, &field_info.definition);
+                        let refs = workspace
+                            .find_field_references(&field_info.name, &field_info.definition);
 
-                        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+                        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+                            std::collections::HashMap::new();
 
                         for r in refs {
                             // Note: For record pattern fields like `{ email }`, the bound variable
                             // usages in the function scope are automatically included by
                             // find_field_references via find_variable_usages_in_scope.
-                            changes
-                                .entry(r.uri)
-                                .or_default()
-                                .push(TextEdit {
-                                    range: r.range,
-                                    new_text: new_name.clone(),
-                                });
+                            changes.entry(r.uri).or_default().push(TextEdit {
+                                range: r.range,
+                                new_text: new_name.clone(),
+                            });
                         }
 
                         if !changes.is_empty() {
-                            tracing::info!("Field rename affects {} files, {} edits", changes.len(), changes.values().map(|v| v.len()).sum::<usize>());
+                            tracing::info!(
+                                "Field rename affects {} files, {} edits",
+                                changes.len(),
+                                changes.values().map(|v| v.len()).sum::<usize>()
+                            );
                             return Ok(Some(WorkspaceEdit {
                                 changes: Some(changes),
                                 ..Default::default()
@@ -1086,15 +1298,27 @@ impl LanguageServer for ElmLanguageServer {
             }
         }
         // Check if this is a variant rename
-        if let Some((_type_name, variant_info, _, _, _)) = self.get_variant_at_position(uri, position) {
+        if let Some((_type_name, variant_info, _, _, _)) =
+            self.get_variant_at_position(uri, position)
+        {
             // Validate that variant name starts with uppercase
-            if !new_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if !new_name
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+            {
                 return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                    "Variant names must start with an uppercase letter"
+                    "Variant names must start with an uppercase letter",
                 ));
             }
             tracing::info!("Renaming variant {} to {}", variant_info.name, new_name);
-            return self.rename_variant_by_range(uri, &variant_info.name, variant_info.range, &new_name);
+            return self.rename_variant_by_range(
+                uri,
+                &variant_info.name,
+                variant_info.range,
+                &new_name,
+            );
         }
 
         // Fall back to symbol rename
@@ -1136,12 +1360,19 @@ impl LanguageServer for ElmLanguageServer {
                     let symbols = workspace.get_symbols(&word);
                     for sym in symbols {
                         // Create "Add import" action
-                        let import_line = format!("import {} exposing ({})\n", sym.module_name, sym.name);
+                        let import_line =
+                            format!("import {} exposing ({})\n", sym.module_name, sym.name);
 
                         let edit = TextEdit {
                             range: Range {
-                                start: Position { line: 2, character: 0 },  // After module declaration
-                                end: Position { line: 2, character: 0 },
+                                start: Position {
+                                    line: 2,
+                                    character: 0,
+                                }, // After module declaration
+                                end: Position {
+                                    line: 2,
+                                    character: 0,
+                                },
                             },
                             new_text: import_line,
                         };
@@ -1183,7 +1414,10 @@ impl LanguageServer for ElmLanguageServer {
         }
     }
 
-    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
         tracing::info!("execute_command: {:?}", params.command);
 
         match params.command.as_str() {
@@ -1202,10 +1436,16 @@ impl LanguageServer for ElmLanguageServer {
                 let target_path: String = serde_json::from_value(params.arguments[2].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                tracing::info!("Moving {} from {} to {}", function_name, source_uri, target_path);
+                tracing::info!(
+                    "Moving {} from {} to {}",
+                    function_name,
+                    source_uri,
+                    target_path
+                );
 
-                let source_uri = Url::parse(&source_uri)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid source URI: {}", e)))?;
+                let source_uri = Url::parse(&source_uri).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid source URI: {}", e))
+                })?;
                 let target_path = PathBuf::from(&target_path);
 
                 // Execute the move - extract result before any awaits
@@ -1240,11 +1480,9 @@ impl LanguageServer for ElmLanguageServer {
                             "referencesUpdated": result.references_updated
                         })))
                     }
-                    Err(e) => {
-                        Ok(Some(serde_json::json!({
-                            "error": e.to_string()
-                        })))
-                    }
+                    Err(e) => Ok(Some(serde_json::json!({
+                        "error": e.to_string()
+                    }))),
                 }
             }
             CMD_GET_DIAGNOSTICS => {
@@ -1258,8 +1496,9 @@ impl LanguageServer for ElmLanguageServer {
                 let file_uri: String = serde_json::from_value(params.arguments[0].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&file_uri)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&file_uri).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 tracing::info!("Getting diagnostics for {}", uri);
 
@@ -1304,12 +1543,15 @@ impl LanguageServer for ElmLanguageServer {
                 let character: u32 = serde_json::from_value(params.arguments[2].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 let position = Position { line, character };
 
-                if let Some((type_name, variant, idx, total, all_variants)) = self.get_variant_at_position(&uri, position) {
+                if let Some((type_name, variant, idx, total, all_variants)) =
+                    self.get_variant_at_position(&uri, position)
+                {
                     // Get all usages
                     let all_usages = if let Ok(ws) = self.workspace.read() {
                         if let Some(workspace) = ws.as_ref() {
@@ -1323,13 +1565,15 @@ impl LanguageServer for ElmLanguageServer {
                     };
 
                     // Only constructor usages are truly blocking
-                    let blocking_usages: Vec<_> = all_usages.iter()
+                    let blocking_usages: Vec<_> = all_usages
+                        .iter()
                         .filter(|u| u.is_blocking)
                         .cloned()
                         .collect();
 
                     // Pattern match usages can be auto-removed
-                    let pattern_usages: Vec<_> = all_usages.iter()
+                    let pattern_usages: Vec<_> = all_usages
+                        .iter()
                         .filter(|u| !u.is_blocking)
                         .cloned()
                         .collect();
@@ -1340,7 +1584,8 @@ impl LanguageServer for ElmLanguageServer {
                     let can_remove = total > 1;
 
                     // Other variants (excluding the one being removed)
-                    let other_variants: Vec<&String> = all_variants.iter()
+                    let other_variants: Vec<&String> = all_variants
+                        .iter()
                         .filter(|v| *v != &variant.name)
                         .collect();
 
@@ -1383,14 +1628,18 @@ impl LanguageServer for ElmLanguageServer {
                 let character: u32 = serde_json::from_value(params.arguments[2].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 let position = Position { line, character };
 
-                if let Some((type_name, variant, idx, total, all_variants)) = self.get_variant_at_position(&uri, position) {
+                if let Some((type_name, variant, idx, total, all_variants)) =
+                    self.get_variant_at_position(&uri, position)
+                {
                     // Other variants (excluding the one being removed)
-                    let other_variants: Vec<&String> = all_variants.iter()
+                    let other_variants: Vec<&String> = all_variants
+                        .iter()
                         .filter(|v| *v != &variant.name)
                         .collect();
 
@@ -1398,7 +1647,13 @@ impl LanguageServer for ElmLanguageServer {
                     let remove_result = {
                         if let Ok(ws) = self.workspace.read() {
                             if let Some(workspace) = ws.as_ref() {
-                                workspace.remove_variant(&uri, &type_name, &variant.name, idx, total)
+                                workspace.remove_variant(
+                                    &uri,
+                                    &type_name,
+                                    &variant.name,
+                                    idx,
+                                    total,
+                                )
                             } else {
                                 Err(anyhow::anyhow!("Workspace not initialized"))
                             }
@@ -1424,7 +1679,8 @@ impl LanguageServer for ElmLanguageServer {
                                                 "newText": edit.new_text
                                             })
                                         }).collect();
-                                        changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                                        changes_map
+                                            .insert(uri.to_string(), serde_json::json!(edits_json));
                                     }
                                     Some(serde_json::Value::Object(changes_map))
                                 } else {
@@ -1449,12 +1705,10 @@ impl LanguageServer for ElmLanguageServer {
                                 })))
                             }
                         }
-                        Err(e) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "message": e.to_string()
-                            })))
-                        }
+                        Err(e) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "message": e.to_string()
+                        }))),
                     }
                 } else {
                     Ok(Some(serde_json::json!({
@@ -1477,8 +1731,9 @@ impl LanguageServer for ElmLanguageServer {
                 let new_name: String = serde_json::from_value(params.arguments[1].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&file_uri)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&file_uri).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 tracing::info!("Renaming file {} to {}", file_uri, new_name);
 
@@ -1524,12 +1779,10 @@ impl LanguageServer for ElmLanguageServer {
                             "changes": changes_json
                         })))
                     }
-                    Err(e) => {
-                        Ok(Some(serde_json::json!({
-                            "success": false,
-                            "error": e.to_string()
-                        })))
-                    }
+                    Err(e) => Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": e.to_string()
+                    }))),
                 }
             }
             CMD_MOVE_FILE => {
@@ -1546,8 +1799,9 @@ impl LanguageServer for ElmLanguageServer {
                 let target_path: String = serde_json::from_value(params.arguments[1].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&file_uri)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&file_uri).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 tracing::info!("Moving file {} to {}", file_uri, target_path);
 
@@ -1593,12 +1847,10 @@ impl LanguageServer for ElmLanguageServer {
                             "changes": changes_json
                         })))
                     }
-                    Err(e) => {
-                        Ok(Some(serde_json::json!({
-                            "success": false,
-                            "error": e.to_string()
-                        })))
-                    }
+                    Err(e) => Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": e.to_string()
+                    }))),
                 }
             }
             CMD_RENAME_VARIANT => {
@@ -1619,11 +1871,17 @@ impl LanguageServer for ElmLanguageServer {
                 let new_name: String = serde_json::from_value(params.arguments[3].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 // Validate that variant name starts with uppercase
-                if !new_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                if !new_name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false)
+                {
                     return Ok(Some(serde_json::json!({
                         "success": false,
                         "error": "Variant names must start with an uppercase letter"
@@ -1633,7 +1891,9 @@ impl LanguageServer for ElmLanguageServer {
                 let position = Position { line, character };
 
                 // First, verify this is a variant
-                if let Some((type_name, variant, _idx, _total, _all_variants)) = self.get_variant_at_position(&uri, position) {
+                if let Some((type_name, variant, _idx, _total, _all_variants)) =
+                    self.get_variant_at_position(&uri, position)
+                {
                     // This IS a variant - proceed with rename using the variant's definition range
                     let old_name = variant.name.clone();
                     let variant_range = variant.range;
@@ -1654,7 +1914,8 @@ impl LanguageServer for ElmLanguageServer {
                                             "newText": edit.new_text
                                         })
                                     }).collect();
-                                    changes_json.insert(uri.to_string(), serde_json::json!(edits_json));
+                                    changes_json
+                                        .insert(uri.to_string(), serde_json::json!(edits_json));
                                 }
                                 Ok(Some(serde_json::json!({
                                     "success": true,
@@ -1675,18 +1936,14 @@ impl LanguageServer for ElmLanguageServer {
                                 })))
                             }
                         }
-                        Ok(None) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "error": "Rename not possible for this variant"
-                            })))
-                        }
-                        Err(e) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "error": e.to_string()
-                            })))
-                        }
+                        Ok(None) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": "Rename not possible for this variant"
+                        }))),
+                        Err(e) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": e.to_string()
+                        }))),
                     }
                 } else {
                     // Not a variant - detect what it actually is and return error
@@ -1725,8 +1982,9 @@ impl LanguageServer for ElmLanguageServer {
                 let new_name: String = serde_json::from_value(params.arguments[3].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 let position = Position { line, character };
 
@@ -1761,7 +2019,8 @@ impl LanguageServer for ElmLanguageServer {
                                             "newText": edit.new_text
                                         })
                                     }).collect();
-                                    changes_json.insert(uri.to_string(), serde_json::json!(edits_json));
+                                    changes_json
+                                        .insert(uri.to_string(), serde_json::json!(edits_json));
                                 }
                                 Ok(Some(serde_json::json!({
                                     "success": true,
@@ -1780,18 +2039,14 @@ impl LanguageServer for ElmLanguageServer {
                                 })))
                             }
                         }
-                        Ok(None) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "error": "Rename not possible for this type"
-                            })))
-                        }
-                        Err(e) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "error": e.to_string()
-                            })))
-                        }
+                        Ok(None) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": "Rename not possible for this type"
+                        }))),
+                        Err(e) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": e.to_string()
+                        }))),
                     }
                 } else {
                     // Not a type - detect what it actually is and return error
@@ -1830,13 +2085,15 @@ impl LanguageServer for ElmLanguageServer {
                 let new_name: String = serde_json::from_value(params.arguments[3].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 let position = Position { line, character };
 
                 // First, verify this is a function
-                if let Some((func_name, _def_range)) = self.get_function_at_position(&uri, position) {
+                if let Some((func_name, _def_range)) = self.get_function_at_position(&uri, position)
+                {
                     let old_name = func_name.clone();
 
                     // Use rename_symbol_by_name with the function name directly
@@ -1855,7 +2112,8 @@ impl LanguageServer for ElmLanguageServer {
                                             "newText": edit.new_text
                                         })
                                     }).collect();
-                                    changes_json.insert(uri.to_string(), serde_json::json!(edits_json));
+                                    changes_json
+                                        .insert(uri.to_string(), serde_json::json!(edits_json));
                                 }
                                 Ok(Some(serde_json::json!({
                                     "success": true,
@@ -1874,18 +2132,14 @@ impl LanguageServer for ElmLanguageServer {
                                 })))
                             }
                         }
-                        Ok(None) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "error": "Rename not possible for this function"
-                            })))
-                        }
-                        Err(e) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "error": e.to_string()
-                            })))
-                        }
+                        Ok(None) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": "Rename not possible for this function"
+                        }))),
+                        Err(e) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "error": e.to_string()
+                        }))),
                     }
                 } else {
                     // Not a function - detect what it actually is and return error
@@ -1928,7 +2182,7 @@ impl LanguageServer for ElmLanguageServer {
                         if let Some(workspace) = ws.as_mut() {
                             workspace.notify_file_renamed(
                                 std::path::Path::new(&old_path),
-                                std::path::Path::new(&new_path)
+                                std::path::Path::new(&new_path),
                             )
                         } else {
                             Err(anyhow::anyhow!("Workspace not initialized"))
@@ -1939,18 +2193,14 @@ impl LanguageServer for ElmLanguageServer {
                 };
 
                 match result {
-                    Ok(()) => {
-                        Ok(Some(serde_json::json!({
-                            "success": true,
-                            "message": format!("Updated index: {} -> {}", old_path, new_path)
-                        })))
-                    }
-                    Err(e) => {
-                        Ok(Some(serde_json::json!({
-                            "success": false,
-                            "error": e.to_string()
-                        })))
-                    }
+                    Ok(()) => Ok(Some(serde_json::json!({
+                        "success": true,
+                        "message": format!("Updated index: {} -> {}", old_path, new_path)
+                    }))),
+                    Err(e) => Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": e.to_string()
+                    }))),
                 }
             }
             CMD_GENERATE_ERD => {
@@ -1967,8 +2217,9 @@ impl LanguageServer for ElmLanguageServer {
                 let type_name: String = serde_json::from_value(params.arguments[1].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&file_uri)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&file_uri).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 tracing::info!("Generating ERD for type {} in {}", type_name, uri);
 
@@ -1995,12 +2246,10 @@ impl LanguageServer for ElmLanguageServer {
                             "warnings": result.warnings
                         })))
                     }
-                    Err(e) => {
-                        Ok(Some(serde_json::json!({
-                            "success": false,
-                            "error": e
-                        })))
-                    }
+                    Err(e) => Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": e
+                    }))),
                 }
             }
             CMD_PREPARE_REMOVE_FIELD => {
@@ -2018,8 +2267,9 @@ impl LanguageServer for ElmLanguageServer {
                 let character: u32 = serde_json::from_value(params.arguments[2].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 let result = {
                     if let Ok(ws) = self.workspace.read() {
@@ -2034,19 +2284,36 @@ impl LanguageServer for ElmLanguageServer {
                 };
 
                 if let Some((type_name, field_name, all_fields, usages)) = result {
-                    let other_fields: Vec<&String> = all_fields.iter()
-                        .filter(|f| *f != &field_name)
-                        .collect();
+                    let other_fields: Vec<&String> =
+                        all_fields.iter().filter(|f| *f != &field_name).collect();
 
                     let can_remove = all_fields.len() > 1;
 
                     // Group usages by type
-                    let definition_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::Definition).count();
-                    let field_access_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::FieldAccess).count();
-                    let field_accessor_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::FieldAccessor).count();
-                    let record_pattern_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordPattern).count();
-                    let record_literal_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordLiteral).count();
-                    let record_update_count = usages.iter().filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordUpdate).count();
+                    let definition_count = usages
+                        .iter()
+                        .filter(|u| u.usage_type == crate::workspace::FieldUsageType::Definition)
+                        .count();
+                    let field_access_count = usages
+                        .iter()
+                        .filter(|u| u.usage_type == crate::workspace::FieldUsageType::FieldAccess)
+                        .count();
+                    let field_accessor_count = usages
+                        .iter()
+                        .filter(|u| u.usage_type == crate::workspace::FieldUsageType::FieldAccessor)
+                        .count();
+                    let record_pattern_count = usages
+                        .iter()
+                        .filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordPattern)
+                        .count();
+                    let record_literal_count = usages
+                        .iter()
+                        .filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordLiteral)
+                        .count();
+                    let record_update_count = usages
+                        .iter()
+                        .filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordUpdate)
+                        .count();
 
                     Ok(Some(serde_json::json!({
                         "success": true,
@@ -2086,8 +2353,9 @@ impl LanguageServer for ElmLanguageServer {
                 let character: u32 = serde_json::from_value(params.arguments[2].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 // First get the field info
                 let field_info = {
@@ -2103,15 +2371,19 @@ impl LanguageServer for ElmLanguageServer {
                 };
 
                 if let Some((type_name, field_name, all_fields, _)) = field_info {
-                    let other_fields: Vec<&String> = all_fields.iter()
-                        .filter(|f| *f != &field_name)
-                        .collect();
+                    let other_fields: Vec<&String> =
+                        all_fields.iter().filter(|f| *f != &field_name).collect();
 
                     // Execute removal
                     let remove_result = {
                         if let Ok(ws) = self.workspace.read() {
                             if let Some(workspace) = ws.as_ref() {
-                                workspace.remove_field(&uri, &type_name, &field_name, all_fields.len())
+                                workspace.remove_field(
+                                    &uri,
+                                    &type_name,
+                                    &field_name,
+                                    all_fields.len(),
+                                )
                             } else {
                                 Err(anyhow::anyhow!("Workspace not initialized"))
                             }
@@ -2136,7 +2408,8 @@ impl LanguageServer for ElmLanguageServer {
                                                 "newText": edit.new_text
                                             })
                                         }).collect();
-                                        changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                                        changes_map
+                                            .insert(uri.to_string(), serde_json::json!(edits_json));
                                     }
                                     Some(serde_json::Value::Object(changes_map))
                                 } else {
@@ -2161,15 +2434,13 @@ impl LanguageServer for ElmLanguageServer {
                                 })))
                             }
                         }
-                        Err(e) => {
-                            Ok(Some(serde_json::json!({
-                                "success": false,
-                                "typeName": type_name,
-                                "fieldName": field_name,
-                                "otherFields": other_fields,
-                                "error": e.to_string()
-                            })))
-                        }
+                        Err(e) => Ok(Some(serde_json::json!({
+                            "success": false,
+                            "typeName": type_name,
+                            "fieldName": field_name,
+                            "otherFields": other_fields,
+                            "error": e.to_string()
+                        }))),
                     }
                 } else {
                     Ok(Some(serde_json::json!({
@@ -2193,33 +2464,42 @@ impl LanguageServer for ElmLanguageServer {
                 let new_variant_name: String = serde_json::from_value(params.arguments[2].clone())
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 let result = {
                     if let Ok(ws) = self.workspace.read() {
                         if let Some(workspace) = ws.as_ref() {
                             workspace.prepare_add_variant(&uri, &type_name, &new_variant_name)
                         } else {
-                            crate::workspace::PrepareAddVariantResult::error("Workspace not initialized")
+                            crate::workspace::PrepareAddVariantResult::error(
+                                "Workspace not initialized",
+                            )
                         }
                     } else {
-                        crate::workspace::PrepareAddVariantResult::error("Could not acquire workspace lock")
+                        crate::workspace::PrepareAddVariantResult::error(
+                            "Could not acquire workspace lock",
+                        )
                     }
                 };
 
                 // Convert case_expressions to JSON
-                let case_expressions_json: Vec<serde_json::Value> = result.case_expressions.iter().map(|c| {
-                    serde_json::json!({
-                        "uri": c.uri,
-                        "line": c.line,
-                        "character": c.character,
-                        "context": c.context,
-                        "module_name": c.module_name,
-                        "has_wildcard": c.has_wildcard,
-                        "indentation": c.indentation
+                let case_expressions_json: Vec<serde_json::Value> = result
+                    .case_expressions
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "uri": c.uri,
+                            "line": c.line,
+                            "character": c.character,
+                            "context": c.context,
+                            "module_name": c.module_name,
+                            "has_wildcard": c.has_wildcard,
+                            "indentation": c.indentation
+                        })
                     })
-                }).collect();
+                    .collect();
 
                 Ok(Some(serde_json::json!({
                     "success": result.success,
@@ -2257,13 +2537,20 @@ impl LanguageServer for ElmLanguageServer {
                     None
                 };
 
-                let uri = Url::parse(&uri_str)
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e)))?;
+                let uri = Url::parse(&uri_str).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
 
                 let result = {
                     if let Ok(ws) = self.workspace.read() {
                         if let Some(workspace) = ws.as_ref() {
-                            workspace.add_variant(&uri, &type_name, &new_variant_name, variant_args.as_deref(), branches.as_deref())
+                            workspace.add_variant(
+                                &uri,
+                                &type_name,
+                                &new_variant_name,
+                                variant_args.as_deref(),
+                                branches.as_deref(),
+                            )
                         } else {
                             Err(anyhow::anyhow!("Workspace not initialized"))
                         }
@@ -2288,7 +2575,8 @@ impl LanguageServer for ElmLanguageServer {
                                             "newText": edit.new_text
                                         })
                                     }).collect();
-                                    changes_map.insert(uri.to_string(), serde_json::json!(edits_json));
+                                    changes_map
+                                        .insert(uri.to_string(), serde_json::json!(edits_json));
                                 }
                                 Some(serde_json::Value::Object(changes_map))
                             } else {
@@ -2328,19 +2616,15 @@ impl LanguageServer for ElmLanguageServer {
                             Ok(Some(response))
                         }
                     }
-                    Err(e) => {
-                        Ok(Some(serde_json::json!({
-                            "success": false,
-                            "message": e.to_string()
-                        })))
-                    }
+                    Err(e) => Ok(Some(serde_json::json!({
+                        "success": false,
+                        "message": e.to_string()
+                    }))),
                 }
             }
-            _ => {
-                Ok(Some(serde_json::json!({
-                    "error": format!("Unknown command: {}", params.command)
-                })))
-            }
+            _ => Ok(Some(serde_json::json!({
+                "error": format!("Unknown command: {}", params.command)
+            }))),
         }
     }
 }

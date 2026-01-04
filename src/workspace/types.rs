@@ -202,7 +202,10 @@ impl BranchConfig {
         match self {
             BranchConfig::Debug(_) => None,
             BranchConfig::Code(CodeVariant::AddCode(code)) => Some(code),
-            BranchConfig::CodeWithImports(CodeWithImportsVariant::AddCodeWithImports { code, .. }) => Some(code),
+            BranchConfig::CodeWithImports(CodeWithImportsVariant::AddCodeWithImports {
+                code,
+                ..
+            }) => Some(code),
         }
     }
 
@@ -211,7 +214,10 @@ impl BranchConfig {
         match self {
             BranchConfig::Debug(_) => &[],
             BranchConfig::Code(_) => &[],
-            BranchConfig::CodeWithImports(CodeWithImportsVariant::AddCodeWithImports { imports, .. }) => imports,
+            BranchConfig::CodeWithImports(CodeWithImportsVariant::AddCodeWithImports {
+                imports,
+                ..
+            }) => imports,
         }
     }
 }

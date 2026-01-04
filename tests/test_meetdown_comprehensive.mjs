@@ -3175,6 +3175,230 @@ async function main() {
     console.log();
   }
 
+  // ===== TEST 74: Move file round-trip (FrontendUser.elm → Users/FrontendUser.elm → FrontendUser.elm) =====
+  startTest(74, "Move file round-trip (FrontendUser.elm → Users/FrontendUser.elm → FrontendUser.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/FrontendUser.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import FrontendUser"));
+      console.log(`     → Files importing FrontendUser: ${beforeImporters.length}`);
+      logTest("Has importers", beforeImporters.length >= 1);
+
+      // STEP 1: Move to subdirectory
+      console.log(`     → STEP 1: Moving FrontendUser.elm → Users/FrontendUser.elm`);
+      const result1 = await client.moveFile(testFile, "src/Users/FrontendUser.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+      logTest("Step 1: New module is Users.FrontendUser", result1.newModuleName === "Users.FrontendUser");
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // STEP 2: Move back to root
+      const newFile = join(MEETDOWN, "src/Users/FrontendUser.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Users/FrontendUser.elm → FrontendUser.elm`);
+      const result2 = await client.moveFile(newFile, "src/FrontendUser.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+      logTest("Step 2: New module is FrontendUser", result2.newModuleName === "FrontendUser");
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      await restoreMeetdown(client);
+    }
+    console.log();
+  }
+
+  // ===== TEST 75: Move file round-trip (Description.elm → Core/Description.elm → Description.elm) =====
+  startTest(75, "Move file round-trip (Description.elm → Core/Description.elm → Description.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Description.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Description"));
+      console.log(`     → Files importing Description: ${beforeImporters.length}`);
+
+      // STEP 1: Move to subdirectory
+      console.log(`     → STEP 1: Moving Description.elm → Core/Description.elm`);
+      const result1 = await client.moveFile(testFile, "src/Core/Description.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+      logTest("Step 1: New module is Core.Description", result1.newModuleName === "Core.Description");
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // Verify imports changed
+      const backendContent = readFileSync(join(MEETDOWN, "src/Backend.elm"), "utf-8");
+      logTest("Step 1: Import updated in Backend.elm", backendContent.includes("import Core.Description"));
+
+      // STEP 2: Move back to root
+      const newFile = join(MEETDOWN, "src/Core/Description.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Core/Description.elm → Description.elm`);
+      const result2 = await client.moveFile(newFile, "src/Description.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+      logTest("Step 2: New module is Description", result2.newModuleName === "Description");
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+      // Verify imports restored
+      const backendAfter = readFileSync(join(MEETDOWN, "src/Backend.elm"), "utf-8");
+      logTest("Step 2: Import restored in Backend.elm", backendAfter.includes("import Description") && !backendAfter.includes("import Core.Description"));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      await restoreMeetdown(client);
+    }
+    console.log();
+  }
+
+  // ===== TEST 76: Move file round-trip (LoginForm.elm → Auth/LoginForm.elm → LoginForm.elm) =====
+  startTest(76, "Move file round-trip (LoginForm.elm → Auth/LoginForm.elm → LoginForm.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/LoginForm.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import LoginForm"));
+      console.log(`     → Files importing LoginForm: ${beforeImporters.length}`);
+
+      // STEP 1: Move to subdirectory
+      console.log(`     → STEP 1: Moving LoginForm.elm → Auth/LoginForm.elm`);
+      const result1 = await client.moveFile(testFile, "src/Auth/LoginForm.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+      logTest("Step 1: New module is Auth.LoginForm", result1.newModuleName === "Auth.LoginForm");
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // STEP 2: Move back to root
+      const newFile = join(MEETDOWN, "src/Auth/LoginForm.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Auth/LoginForm.elm → LoginForm.elm`);
+      const result2 = await client.moveFile(newFile, "src/LoginForm.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+      logTest("Step 2: New module is LoginForm", result2.newModuleName === "LoginForm");
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      await restoreMeetdown(client);
+    }
+    console.log();
+  }
+
+  // ===== TEST 77: Move file round-trip (Cache.elm → Utils/Cache.elm → Cache.elm) =====
+  startTest(77, "Move file round-trip (Cache.elm → Utils/Cache.elm → Cache.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/Cache.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import Cache"));
+      console.log(`     → Files importing Cache: ${beforeImporters.length}`);
+
+      // STEP 1: Move to subdirectory
+      console.log(`     → STEP 1: Moving Cache.elm → Utils/Cache.elm`);
+      const result1 = await client.moveFile(testFile, "src/Utils/Cache.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+      logTest("Step 1: New module is Utils.Cache", result1.newModuleName === "Utils.Cache");
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // STEP 2: Move back to root
+      const newFile = join(MEETDOWN, "src/Utils/Cache.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Utils/Cache.elm → Cache.elm`);
+      const result2 = await client.moveFile(newFile, "src/Cache.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+      logTest("Step 2: New module is Cache", result2.newModuleName === "Cache");
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      await restoreMeetdown(client);
+    }
+    console.log();
+  }
+
+  // ===== TEST 78: Move file round-trip deep nesting (AdminStatus.elm → Admin/Status/AdminStatus.elm → AdminStatus.elm) =====
+  startTest(78, "Move file round-trip deep (AdminStatus.elm → Admin/Status/AdminStatus.elm → AdminStatus.elm)");
+  {
+    backupMeetdown();
+    try {
+      const testFile = join(MEETDOWN, "src/AdminStatus.elm");
+      await client.openFile(testFile);
+
+      // Count importers before
+      const beforeImporters = readdirSync(join(MEETDOWN, "src"))
+        .filter(f => f.endsWith(".elm"))
+        .filter(f => readFileSync(join(MEETDOWN, "src", f), "utf-8").includes("import AdminStatus"));
+      console.log(`     → Files importing AdminStatus: ${beforeImporters.length}`);
+
+      // STEP 1: Move to deep subdirectory
+      console.log(`     → STEP 1: Moving AdminStatus.elm → Admin/Status/AdminStatus.elm`);
+      const result1 = await client.moveFile(testFile, "src/Admin/Status/AdminStatus.elm");
+      logTest("Step 1: Move succeeded", result1.success === true);
+      logTest("Step 1: New module is Admin.Status.AdminStatus", result1.newModuleName === "Admin.Status.AdminStatus");
+      console.log(`     → Step 1: ${result1.filesUpdated} files updated`);
+
+      const compile1 = compileMeetdown();
+      logTest("Step 1: Code compiles", compile1.success, compile1.error?.substring(0, 200));
+
+      // STEP 2: Move back to root
+      const newFile = join(MEETDOWN, "src/Admin/Status/AdminStatus.elm");
+      await client.openFile(newFile);
+      console.log(`     → STEP 2: Moving Admin/Status/AdminStatus.elm → AdminStatus.elm`);
+      const result2 = await client.moveFile(newFile, "src/AdminStatus.elm");
+      logTest("Step 2: Move succeeded", result2.success === true);
+      logTest("Step 2: New module is AdminStatus", result2.newModuleName === "AdminStatus");
+
+      const compile2 = compileMeetdown();
+      logTest("Step 2: Code compiles (round-trip)", compile2.success, compile2.error?.substring(0, 200));
+
+    } catch (e) {
+      logTest(`Error: ${e.message}`, false);
+    } finally {
+      await restoreMeetdown(client);
+    }
+    console.log();
+  }
+
   // ===== SUMMARY =====
   console.log(`${BOLD}${"=".repeat(70)}${RESET}`);
   console.log(`${BOLD}  Summary${RESET}`);

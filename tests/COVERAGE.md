@@ -22,7 +22,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 | elm_prepare_remove_variant | 3 | 22 | ✅ Excellent |
 | elm_remove_variant | 5 | 3 | ✅ Excellent |
 | elm_rename_file | 1 | 7 | ✅ Excellent |
-| elm_move_file | 1 | 7 | ✅ Excellent |
+| elm_move_file | 1 | 12 | ✅ Excellent |
 
 **Legend:**
 - ✅ Excellent: 4+ test cases with comprehensive coverage
@@ -32,7 +32,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 ---
 
-## All Tests (231 total)
+## All Tests (264 total)
 
 ### Fixture Tests (27 tests)
 
@@ -64,7 +64,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Rename Variant** → elm_rename_variant
 - **Symbols** → elm_symbols
 
-### Meetdown Tests (204 tests)
+### Meetdown Tests (237 tests)
 
 - **Test 1** → elm_prepare_remove_variant
 - **Test 2** → elm_prepare_remove_variant
@@ -138,6 +138,11 @@ This document maps all MCP tools (features) to their corresponding tests.
 - **Test 71** → elm_move_function
 - **Test 72** → elm_move_function
 - **Test 73** → elm_move_function
+- **Test 74** → elm_move_file
+- **Test 75** → elm_move_file
+- **Test 76** → elm_move_file
+- **Test 77** → elm_move_file
+- **Test 78** → elm_move_file
 
 ---
 
@@ -147,7 +152,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 # Run fixture tests (27 tests)
 node tests/run_tests.mjs
 
-# Run meetdown real-world tests (204 tests)
+# Run meetdown real-world tests (237 tests)
 node tests/test_meetdown_comprehensive.mjs
 
 # Run all tests
@@ -156,4 +161,4 @@ node tests/run_all_tests.mjs
 
 ---
 
-*Last updated: 2026-01-02 - All 231 tests passing ✅*
+*Last updated: 2026-01-04 - All 264 tests passing ✅*

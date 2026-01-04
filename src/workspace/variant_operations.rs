@@ -20,7 +20,9 @@ impl Workspace {
     ) -> anyhow::Result<RemoveVariantResult> {
         // 1. Validate: can't remove if only 1 variant
         if total_variants <= 1 {
-            return Ok(RemoveVariantResult::error("Cannot remove the only variant from a type"));
+            return Ok(RemoveVariantResult::error(
+                "Cannot remove the only variant from a type",
+            ));
         }
 
         // Get the source module name for proper filtering
@@ -42,7 +44,8 @@ impl Workspace {
             .collect();
 
         // 3. Read file and find the variant line
-        let path = uri.to_file_path()
+        let path = uri
+            .to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid URI"))?;
         let content = std::fs::read_to_string(&path)?;
         let lines: Vec<&str> = content.lines().collect();
@@ -55,7 +58,9 @@ impl Workspace {
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             // Look for the variant name in a type declaration context
-            if (trimmed.starts_with('=') || trimmed.starts_with('|')) && trimmed.contains(variant_name) {
+            if (trimmed.starts_with('=') || trimmed.starts_with('|'))
+                && trimmed.contains(variant_name)
+            {
                 // Check if this is actually our variant (not just containing the name)
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 2 && parts[1] == variant_name {
@@ -82,7 +87,8 @@ impl Workspace {
             }
         }
 
-        let variant_line = variant_line.ok_or_else(|| anyhow::anyhow!("Variant line not found in source"))?;
+        let variant_line =
+            variant_line.ok_or_else(|| anyhow::anyhow!("Variant line not found in source"))?;
 
         // 4. Create TextEdits to remove the variant from type definition
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
@@ -97,15 +103,27 @@ impl Workspace {
                 vec![
                     TextEdit {
                         range: Range {
-                            start: Position { line: variant_line as u32, character: 0 },
-                            end: Position { line: next_line as u32, character: 0 },
+                            start: Position {
+                                line: variant_line as u32,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: next_line as u32,
+                                character: 0,
+                            },
                         },
                         new_text: String::new(),
                     },
                     TextEdit {
                         range: Range {
-                            start: Position { line: next_line as u32, character: 0 },
-                            end: Position { line: next_line as u32, character: next_line_content.len() as u32 },
+                            start: Position {
+                                line: next_line as u32,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: next_line as u32,
+                                character: next_line_content.len() as u32,
+                            },
                         },
                         new_text: new_next_line,
                     },
@@ -118,8 +136,14 @@ impl Workspace {
             // Middle or last variant: just delete the line
             vec![TextEdit {
                 range: Range {
-                    start: Position { line: variant_line as u32, character: 0 },
-                    end: Position { line: (variant_line + 1) as u32, character: 0 },
+                    start: Position {
+                        line: variant_line as u32,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: (variant_line + 1) as u32,
+                        character: 0,
+                    },
                 },
                 new_text: String::new(),
             }]
@@ -130,18 +154,16 @@ impl Workspace {
         // 4b. Replace constructor usages with Debug.todo
         for usage in &constructor_usages {
             if let Some(range) = usage.constructor_usage_range {
-                let usage_uri = Url::parse(&usage.uri)
-                    .map_err(|_| anyhow::anyhow!("Invalid usage URI"))?;
+                let usage_uri =
+                    Url::parse(&usage.uri).map_err(|_| anyhow::anyhow!("Invalid usage URI"))?;
 
-                let replacement = format!("(Debug.todo \"FIXME: Variant Removal: {}\")", variant_name);
+                let replacement =
+                    format!("(Debug.todo \"FIXME: Variant Removal: {}\")", variant_name);
 
-                changes
-                    .entry(usage_uri)
-                    .or_default()
-                    .push(TextEdit {
-                        range,
-                        new_text: replacement,
-                    });
+                changes.entry(usage_uri).or_default().push(TextEdit {
+                    range,
+                    new_text: replacement,
+                });
             }
         }
 
@@ -151,18 +173,15 @@ impl Workspace {
 
         for usage in &pattern_usages {
             if let Some(range) = usage.pattern_branch_range {
-                let usage_uri = Url::parse(&usage.uri)
-                    .map_err(|_| anyhow::anyhow!("Invalid usage URI"))?;
+                let usage_uri =
+                    Url::parse(&usage.uri).map_err(|_| anyhow::anyhow!("Invalid usage URI"))?;
 
                 removed_pattern_lines.push(range.start.line);
 
-                changes
-                    .entry(usage_uri)
-                    .or_default()
-                    .push(TextEdit {
-                        range,
-                        new_text: String::new(),
-                    });
+                changes.entry(usage_uri).or_default().push(TextEdit {
+                    range,
+                    new_text: String::new(),
+                });
             }
         }
 
@@ -177,13 +196,10 @@ impl Workspace {
 
         let useless_wildcard_count = useless_wildcards.len();
         for wc_range in useless_wildcards {
-            changes
-                .entry(uri.clone())
-                .or_default()
-                .push(TextEdit {
-                    range: wc_range,
-                    new_text: String::new(),
-                });
+            changes.entry(uri.clone()).or_default().push(TextEdit {
+                range: wc_range,
+                new_text: String::new(),
+            });
         }
 
         // 6. Sort edits in reverse order within each file to avoid offset issues
@@ -200,13 +216,22 @@ impl Workspace {
             let mut parts = vec![format!("Removed variant '{}'", variant_name)];
 
             if replaced_constructors > 0 {
-                parts.push(format!("replaced {} constructor usage(s) with Debug.todo", replaced_constructors));
+                parts.push(format!(
+                    "replaced {} constructor usage(s) with Debug.todo",
+                    replaced_constructors
+                ));
             }
             if removed_branches > 0 {
-                parts.push(format!("removed {} pattern match branch(es)", removed_branches));
+                parts.push(format!(
+                    "removed {} pattern match branch(es)",
+                    removed_branches
+                ));
             }
             if useless_wildcard_count > 0 {
-                parts.push(format!("removed {} useless wildcard(s)", useless_wildcard_count));
+                parts.push(format!(
+                    "removed {} useless wildcard(s)",
+                    useless_wildcard_count
+                ));
             }
 
             if parts.len() == 1 {
@@ -245,7 +270,12 @@ impl Workspace {
 
     /// Get usages of a variant and determine if they are blocking
     /// source_module_name: The module where the variant is defined (e.g., "Router" for Router.RentReceipts)
-    pub fn get_variant_usages(&self, source_uri: &Url, variant_name: &str, source_module_name: Option<&str>) -> Vec<VariantUsage> {
+    pub fn get_variant_usages(
+        &self,
+        source_uri: &Url,
+        variant_name: &str,
+        source_module_name: Option<&str>,
+    ) -> Vec<VariantUsage> {
         let refs = self.find_references(variant_name, None);
         let mut usages = Vec::new();
 
@@ -256,7 +286,9 @@ impl Workspace {
 
         // Get the variant definition line to skip it
         let source_path = source_uri.to_file_path().ok();
-        let source_content = source_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        let source_content = source_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok());
 
         // Group references by file for efficient batch processing
         let mut refs_by_file: HashMap<String, Vec<&super::SymbolReference>> = HashMap::new();
@@ -286,10 +318,7 @@ impl Workspace {
                 }
             }
 
-            refs_by_file
-                .entry(r.uri.to_string())
-                .or_default()
-                .push(r);
+            refs_by_file.entry(r.uri.to_string()).or_default().push(r);
         }
 
         // Process each file once
@@ -315,7 +344,8 @@ impl Workspace {
 
             // Get imports for this file to check if variant is imported from source module
             let uri_path = uri.to_file_path().unwrap_or_default();
-            let file_imports = self.find_module_by_path(&uri_path)
+            let file_imports = self
+                .find_module_by_path(&uri_path)
                 .map(|m| m.imports.clone())
                 .unwrap_or_default();
 
@@ -326,9 +356,9 @@ impl Workspace {
                         ExposingInfo::All => true,
                         ExposingInfo::Explicit(exposed) => {
                             // Check if variant is exposed directly or via type(..)
-                            exposed.iter().any(|e| {
-                                e == variant_name || e.contains("(..)")
-                            })
+                            exposed
+                                .iter()
+                                .any(|e| e == variant_name || e.contains("(..)"))
                         }
                     }
                 } else {
@@ -338,17 +368,19 @@ impl Workspace {
 
             // Check if this file has a LOCAL type definition with the same variant name
             // This is important for shadowing: a local type shadows an imported type
-            let has_local_type_with_variant = self.find_module_by_path(&uri_path)
+            let has_local_type_with_variant = self
+                .find_module_by_path(&uri_path)
                 .map(|m| {
                     m.symbols.iter().any(|sym| {
-                        sym.kind == SymbolKind::ENUM &&
-                        sym.variants.iter().any(|v| v.name == variant_name)
+                        sym.kind == SymbolKind::ENUM
+                            && sym.variants.iter().any(|v| v.name == variant_name)
                     })
                 })
                 .unwrap_or(false);
 
             // Get the alias used for the source module (if any)
-            let source_module_alias = file_imports.iter()
+            let source_module_alias = file_imports
+                .iter()
                 .find(|import| import.module_name == source_module)
                 .and_then(|import| import.alias.clone());
 
@@ -362,14 +394,19 @@ impl Workspace {
                 // Check if this reference is actually from the source module
                 let line = content.lines().nth(position.line as usize).unwrap_or("");
                 let col = position.character as usize;
-                let before_pos = if col > 0 && col <= line.len() { &line[..col] } else { "" };
+                let before_pos = if col > 0 && col <= line.len() {
+                    &line[..col]
+                } else {
+                    ""
+                };
 
                 let is_from_source_module = if uri == *source_uri {
                     // Same file as definition - it's our variant
                     true
                 } else if before_pos.ends_with('.') {
                     // Qualified reference - extract the qualifier and check
-                    let qualifier = before_pos.trim_end_matches('.')
+                    let qualifier = before_pos
+                        .trim_end_matches('.')
                         .rsplit(|c: char| !c.is_alphanumeric() && c != '.')
                         .next()
                         .unwrap_or("");
@@ -377,7 +414,10 @@ impl Workspace {
                     // Check if qualifier matches source module or its alias
                     qualifier == source_module
                         || qualifier == source_module.rsplit('.').next().unwrap_or(&source_module)
-                        || source_module_alias.as_ref().map(|a| a == qualifier).unwrap_or(false)
+                        || source_module_alias
+                            .as_ref()
+                            .map(|a| a == qualifier)
+                            .unwrap_or(false)
                 } else {
                     // Unqualified reference - only valid if imported from source module
                     // BUT if this file has a local type with the same variant, the local shadows the import
@@ -424,8 +464,7 @@ impl Workspace {
 
             // Check if this module has a LOCAL type with the same variant name
             let module_has_local_variant = module.symbols.iter().any(|sym| {
-                sym.kind == SymbolKind::ENUM &&
-                sym.variants.iter().any(|v| v.name == variant_name)
+                sym.kind == SymbolKind::ENUM && sym.variants.iter().any(|v| v.name == variant_name)
             });
 
             // For modules with local shadowing types, only search for qualified references
@@ -483,7 +522,9 @@ impl Workspace {
                         // Check if it's actually our variant (word boundary check)
                         let after_match = col + pattern.len();
                         let char_after = line.chars().nth(after_match);
-                        let is_word_boundary = char_after.map(|c| !c.is_alphanumeric() && c != '_').unwrap_or(true);
+                        let is_word_boundary = char_after
+                            .map(|c| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(true);
 
                         if !is_word_boundary {
                             continue;
@@ -492,7 +533,9 @@ impl Workspace {
                         // Also check char before for word boundary (avoid matching inside another identifier)
                         if col > 0 {
                             let char_before = line.chars().nth(col - 1);
-                            let is_start_boundary = char_before.map(|c| !c.is_alphanumeric() && c != '_').unwrap_or(true);
+                            let is_start_boundary = char_before
+                                .map(|c| !c.is_alphanumeric() && c != '_')
+                                .unwrap_or(true);
                             if !is_start_boundary {
                                 continue;
                             }
@@ -544,8 +587,13 @@ impl Workspace {
         while let Some(n) = current {
             match n.kind() {
                 // String literals and comments - the match is inside a string/comment, not actual code
-                "string_constant_expr" | "regular_string_part" | "open_quote"
-                | "close_quote" | "string_escape" | "line_comment" | "block_comment" => {
+                "string_constant_expr"
+                | "regular_string_part"
+                | "open_quote"
+                | "close_quote"
+                | "string_escape"
+                | "line_comment"
+                | "block_comment" => {
                     return UsageType::StringLiteral;
                 }
                 "case_of_branch" | "pattern" | "union_pattern" => {
@@ -651,7 +699,8 @@ impl Workspace {
                 // Check if the function being called is our variant
                 if let Some(func_node) = n.child(0) {
                     if func_node.start_position().row == qualified_node.start_position().row
-                        && func_node.start_position().column == qualified_node.start_position().column
+                        && func_node.start_position().column
+                            == qualified_node.start_position().column
                     {
                         // This is a function call where our variant is the function
                         return Some(Range {
@@ -833,7 +882,10 @@ impl Workspace {
     }
 
     /// Recursively collect all case_of_expr nodes in the tree
-    fn collect_case_expressions<'a>(cursor: &mut tree_sitter::TreeCursor<'a>, cases: &mut Vec<tree_sitter::Node<'a>>) {
+    fn collect_case_expressions<'a>(
+        cursor: &mut tree_sitter::TreeCursor<'a>,
+        cases: &mut Vec<tree_sitter::Node<'a>>,
+    ) {
         let node = cursor.node();
         if node.kind() == "case_of_expr" {
             cases.push(node);
@@ -867,7 +919,11 @@ impl Workspace {
         }
 
         // Check if it's just a lowercase word
-        if trimmed.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+        if trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_lowercase())
+            .unwrap_or(false)
             && !trimmed.contains(' ')
             && !trimmed.contains('(')
         {
@@ -895,7 +951,12 @@ impl Workspace {
         new_variant_name: &str,
     ) -> super::PrepareAddVariantResult {
         // Validate variant name starts with uppercase
-        if !new_variant_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if !new_variant_name
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
+        {
             return super::PrepareAddVariantResult::error(
                 "Variant name must start with an uppercase letter",
             );
@@ -913,9 +974,10 @@ impl Workspace {
         };
 
         // Find the type definition
-        let type_symbol = module.symbols.iter().find(|s| {
-            s.kind == tower_lsp::lsp_types::SymbolKind::ENUM && s.name == type_name
-        });
+        let type_symbol = module
+            .symbols
+            .iter()
+            .find(|s| s.kind == tower_lsp::lsp_types::SymbolKind::ENUM && s.name == type_name);
 
         let type_symbol = match type_symbol {
             Some(s) => s,
@@ -928,7 +990,11 @@ impl Workspace {
         };
 
         // Get existing variants
-        let existing_variants: Vec<String> = type_symbol.variants.iter().map(|v| v.name.clone()).collect();
+        let existing_variants: Vec<String> = type_symbol
+            .variants
+            .iter()
+            .map(|v| v.name.clone())
+            .collect();
 
         // Check if variant already exists
         if existing_variants.contains(&new_variant_name.to_string()) {
@@ -952,11 +1018,14 @@ impl Workspace {
                     // Found a pattern match - find the parent case expression
                     if let Some(case_info) = self.get_case_expression_info(&usage) {
                         // Check if we already have this case expression
-                        let already_have = case_expressions.iter().any(|c: &super::CaseExpressionInfo| {
-                            c.uri == case_info.uri
-                                && c.line == case_info.line
-                                && c.character == case_info.character
-                        });
+                        let already_have =
+                            case_expressions
+                                .iter()
+                                .any(|c: &super::CaseExpressionInfo| {
+                                    c.uri == case_info.uri
+                                        && c.line == case_info.line
+                                        && c.character == case_info.character
+                                });
 
                         if !already_have {
                             case_expressions.push(case_info);
@@ -1199,7 +1268,9 @@ impl Workspace {
         }
 
         // Read the file content
-        let path = uri.to_file_path().map_err(|_| anyhow::anyhow!("Invalid URI"))?;
+        let path = uri
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("Invalid URI"))?;
         let content = std::fs::read_to_string(&path)?;
         let lines: Vec<&str> = content.lines().collect();
 
@@ -1277,8 +1348,8 @@ impl Workspace {
             }
 
             if let Some(insert_range) = case_info.insert_range {
-                let case_uri = Url::parse(&case_info.uri)
-                    .map_err(|_| anyhow::anyhow!("Invalid case URI"))?;
+                let case_uri =
+                    Url::parse(&case_info.uri).map_err(|_| anyhow::anyhow!("Invalid case URI"))?;
 
                 // Default Debug.todo with variant name
                 let default_todo = format!("Debug.todo \"Handle {}\"", new_variant_name);
@@ -1353,7 +1424,9 @@ impl Workspace {
         // Sort edits in reverse order
         Self::sort_edits_reverse(&mut changes);
 
-        let has_custom_code = branches.map(|b| b.iter().any(|c| c.code().is_some())).unwrap_or(false);
+        let has_custom_code = branches
+            .map(|b| b.iter().any(|c| c.code().is_some()))
+            .unwrap_or(false);
         let import_suffix = if imports_added > 0 {
             format!(", added imports to {} file(s)", imports_added)
         } else {

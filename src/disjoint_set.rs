@@ -3,8 +3,8 @@
 //! This data structure maps type variables to their unified types,
 //! with path compression for efficient lookups.
 
-use std::collections::{HashMap, HashSet};
 use crate::types::Type;
+use std::collections::{HashMap, HashSet};
 
 /// Disjoint set for type variable substitutions
 #[derive(Debug, Clone, Default)]
@@ -88,29 +88,25 @@ impl DisjointSet {
                 // Recursively apply in case the substitution contains more variables
                 self.apply(&resolved)
             }
-            Type::Function(f) => {
-                Type::Function(crate::types::FunctionType {
-                    params: f.params.iter().map(|p| self.apply(p)).collect(),
-                    ret: Box::new(self.apply(&f.ret)),
-                    alias: f.alias.clone(),
-                })
-            }
-            Type::Tuple(t) => {
-                Type::Tuple(crate::types::TupleType {
-                    types: t.types.iter().map(|t| self.apply(t)).collect(),
-                    alias: t.alias.clone(),
-                })
-            }
-            Type::Union(u) => {
-                Type::Union(crate::types::UnionType {
-                    module: u.module.clone(),
-                    name: u.name.clone(),
-                    params: u.params.iter().map(|p| self.apply(p)).collect(),
-                    alias: u.alias.clone(),
-                })
-            }
+            Type::Function(f) => Type::Function(crate::types::FunctionType {
+                params: f.params.iter().map(|p| self.apply(p)).collect(),
+                ret: Box::new(self.apply(&f.ret)),
+                alias: f.alias.clone(),
+            }),
+            Type::Tuple(t) => Type::Tuple(crate::types::TupleType {
+                types: t.types.iter().map(|t| self.apply(t)).collect(),
+                alias: t.alias.clone(),
+            }),
+            Type::Union(u) => Type::Union(crate::types::UnionType {
+                module: u.module.clone(),
+                name: u.name.clone(),
+                params: u.params.iter().map(|p| self.apply(p)).collect(),
+                alias: u.alias.clone(),
+            }),
             Type::Record(r) => {
-                let fields = r.fields.iter()
+                let fields = r
+                    .fields
+                    .iter()
                     .map(|(k, v)| (k.clone(), self.apply(v)))
                     .collect();
                 let base_type = r.base_type.as_ref().map(|b| Box::new(self.apply(b)));
@@ -122,7 +118,9 @@ impl DisjointSet {
                 })
             }
             Type::MutableRecord(mr) => {
-                let fields = mr.fields.iter()
+                let fields = mr
+                    .fields
+                    .iter()
                     .map(|(k, v)| (k.clone(), self.apply(v)))
                     .collect();
                 let base_type = mr.base_type.as_ref().map(|b| Box::new(self.apply(b)));

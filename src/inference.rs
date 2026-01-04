@@ -11,9 +11,11 @@
 use std::collections::HashMap;
 use tree_sitter::Node;
 
-use crate::binder::{SymbolLinks, bind_tree};
+use crate::binder::{bind_tree, SymbolLinks};
 use crate::disjoint_set::DisjointSet;
-use crate::types::{Type, TypeVar, RecordType, MutableRecordType, RecordFieldReferenceTable, FieldReference};
+use crate::types::{
+    FieldReference, MutableRecordType, RecordFieldReferenceTable, RecordType, Type, TypeVar,
+};
 
 /// Result of type inference
 #[derive(Debug, Clone)]
@@ -181,24 +183,33 @@ impl<'a> InferenceScope<'a> {
         }
     }
 
-    fn propagate_alias_to_record_recursive(&mut self, node: Node, alias_type: &crate::types::UnionType) {
+    fn propagate_alias_to_record_recursive(
+        &mut self,
+        node: Node,
+        alias_type: &crate::types::UnionType,
+    ) {
         if node.kind() == "record_expr" {
             // Check if this is a record literal (no base identifier)
-            let has_base = node.children(&mut node.walk())
+            let has_base = node
+                .children(&mut node.walk())
                 .any(|c| c.kind() == "record_base_identifier");
 
             if !has_base {
                 // This is a record construction - annotate it with the alias
-                if let Some(Type::Record(mut record_type)) = self.expression_types.get(&node.id()).cloned() {
+                if let Some(Type::Record(mut record_type)) =
+                    self.expression_types.get(&node.id()).cloned()
+                {
                     record_type.alias = Some(crate::types::Alias {
                         module: alias_type.module.clone(),
                         name: alias_type.name.clone(),
                         parameters: alias_type.params.clone(),
                     });
-                    self.expression_types.insert(node.id(), Type::Record(record_type));
+                    self.expression_types
+                        .insert(node.id(), Type::Record(record_type));
                     tracing::debug!(
                         "propagate_alias_to_record: annotated record at node {} with alias {}",
-                        node.id(), alias_type.name
+                        node.id(),
+                        alias_type.name
                     );
                 }
             }
@@ -212,14 +223,14 @@ impl<'a> InferenceScope<'a> {
     }
 
     fn parse_type_expression(&self, node: Node) -> Type {
-        let type_expr = node.child_by_field_name("typeExpression")
-            .or_else(|| {
-                // For direct type expressions
-                let mut cursor = node.walk();
-                let result = node.children(&mut cursor)
-                    .find(|child| child.kind().contains("type") || child.kind() == "type_ref");
-                result
-            });
+        let type_expr = node.child_by_field_name("typeExpression").or_else(|| {
+            // For direct type expressions
+            let mut cursor = node.walk();
+            let result = node
+                .children(&mut cursor)
+                .find(|child| child.kind().contains("type") || child.kind() == "type_ref");
+            result
+        });
 
         if let Some(te) = type_expr {
             self.parse_type_node(te)
@@ -238,7 +249,8 @@ impl<'a> InferenceScope<'a> {
                     if child.kind() == "upper_case_qid" {
                         let name = self.node_text(*child);
                         // Parse type arguments if any
-                        let args: Vec<Type> = children.iter()
+                        let args: Vec<Type> = children
+                            .iter()
                             .filter(|c| c.kind().contains("type"))
                             .map(|c| self.parse_type_node(*c))
                             .collect();
@@ -251,12 +263,11 @@ impl<'a> InferenceScope<'a> {
                 let name = self.node_text(node);
                 Type::rigid_var(name)
             }
-            "record_type" => {
-                self.parse_record_type(node)
-            }
+            "record_type" => self.parse_record_type(node),
             "tuple_type" => {
                 let mut cursor = node.walk();
-                let types: Vec<Type> = node.children(&mut cursor)
+                let types: Vec<Type> = node
+                    .children(&mut cursor)
                     .filter(|c| c.kind().contains("type") && c.kind() != "tuple_type")
                     .map(|c| self.parse_type_node(c))
                     .collect();
@@ -336,7 +347,7 @@ impl<'a> InferenceScope<'a> {
                 let parts: Vec<&str> = name.split('.').collect();
                 let simple_name = parts.last().unwrap_or(&name);
                 let module = if parts.len() > 1 {
-                    parts[..parts.len()-1].join(".")
+                    parts[..parts.len() - 1].join(".")
                 } else {
                     String::new()
                 };
@@ -357,8 +368,12 @@ impl<'a> InferenceScope<'a> {
         let mut cursor = func_decl_left.walk();
         let mut param_idx = 0;
         for child in func_decl_left.children(&mut cursor) {
-            if child.kind() == "pattern" || child.kind() == "lower_pattern" || child.kind() == "record_pattern" {
-                let param_type = param_types.get(param_idx)
+            if child.kind() == "pattern"
+                || child.kind() == "lower_pattern"
+                || child.kind() == "record_pattern"
+            {
+                let param_type = param_types
+                    .get(param_idx)
                     .cloned()
                     .unwrap_or_else(Type::fresh_var);
                 self.bind_pattern(child, &param_type);
@@ -371,7 +386,10 @@ impl<'a> InferenceScope<'a> {
         let mut types = Vec::new();
         let mut cursor = func_decl_left.walk();
         for child in func_decl_left.children(&mut cursor) {
-            if child.kind() == "pattern" || child.kind() == "lower_pattern" || child.kind() == "record_pattern" {
+            if child.kind() == "pattern"
+                || child.kind() == "lower_pattern"
+                || child.kind() == "record_pattern"
+            {
                 let name = self.node_text(child);
                 if let Some(ty) = self.bindings.get(name) {
                     types.push(ty.clone());
@@ -397,7 +415,8 @@ impl<'a> InferenceScope<'a> {
             "tuple_pattern" => {
                 if let Type::Tuple(tuple) = ty {
                     let mut cursor = pattern.walk();
-                    let patterns: Vec<Node> = pattern.children(&mut cursor)
+                    let patterns: Vec<Node> = pattern
+                        .children(&mut cursor)
                         .filter(|c| c.kind() == "pattern" || c.kind() == "lower_pattern")
                         .collect();
                     for (i, pat) in patterns.into_iter().enumerate() {
@@ -457,13 +476,17 @@ impl<'a> InferenceScope<'a> {
                 let field_name = self.node_text(child).to_string();
 
                 // Track the field reference
-                self.field_references.add(&field_name, FieldReference {
-                    node_id: child.id(),
-                    uri: self.uri.clone(),
-                });
+                self.field_references.add(
+                    &field_name,
+                    FieldReference {
+                        node_id: child.id(),
+                        uri: self.uri.clone(),
+                    },
+                );
 
                 // Bind the variable to the field type
-                let field_type = fields.get(&field_name)
+                let field_type = fields
+                    .get(&field_name)
                     .cloned()
                     .unwrap_or_else(Type::fresh_var);
                 self.set_binding(field_name, field_type.clone());
@@ -548,8 +571,7 @@ impl<'a> InferenceScope<'a> {
 
     fn infer_value_expr(&mut self, node: Node) -> Type {
         // Look up the referenced value
-        if let Some(qid) = node.child_by_field_name("name")
-            .or_else(|| node.child(0)) {
+        if let Some(qid) = node.child_by_field_name("name").or_else(|| node.child(0)) {
             let name = self.node_text(qid);
 
             // Check local bindings first
@@ -583,7 +605,8 @@ impl<'a> InferenceScope<'a> {
         };
 
         // Infer argument types, propagating expected type to record expressions
-        let arg_types: Vec<Type> = children[1..].iter()
+        let arg_types: Vec<Type> = children[1..]
+            .iter()
             .enumerate()
             .map(|(i, arg)| {
                 // Check if this argument is a record expression and we have an expected type
@@ -611,10 +634,7 @@ impl<'a> InferenceScope<'a> {
                 if arg_types.len() >= f.params.len() {
                     (*f.ret).clone()
                 } else {
-                    Type::function(
-                        f.params[arg_types.len()..].to_vec(),
-                        (*f.ret).clone(),
-                    )
+                    Type::function(f.params[arg_types.len()..].to_vec(), (*f.ret).clone())
                 }
             }
             Type::Var(_) => {
@@ -630,9 +650,9 @@ impl<'a> InferenceScope<'a> {
 
     fn infer_field_access(&mut self, node: Node) -> Type {
         // Get target and field
-        let target = node.child_by_field_name("target")
-            .or_else(|| node.child(0));
-        let field_node = node.children(&mut node.walk())
+        let target = node.child_by_field_name("target").or_else(|| node.child(0));
+        let field_node = node
+            .children(&mut node.walk())
             .find(|c| c.kind() == "lower_case_identifier");
 
         let (target_node, field_name) = match (target, field_node) {
@@ -646,20 +666,27 @@ impl<'a> InferenceScope<'a> {
 
         // Track the field reference
         if let Some(f) = field_node {
-            self.field_references.add(&field_name, FieldReference {
-                node_id: f.id(),
-                uri: self.uri.clone(),
-            });
+            self.field_references.add(
+                &field_name,
+                FieldReference {
+                    node_id: f.id(),
+                    uri: self.uri.clone(),
+                },
+            );
         }
 
         // Look up field in the record type
         match &resolved {
-            Type::Record(r) => {
-                r.fields.get(&field_name).cloned().unwrap_or(Type::fresh_var())
-            }
-            Type::MutableRecord(mr) => {
-                mr.fields.get(&field_name).cloned().unwrap_or(Type::fresh_var())
-            }
+            Type::Record(r) => r
+                .fields
+                .get(&field_name)
+                .cloned()
+                .unwrap_or(Type::fresh_var()),
+            Type::MutableRecord(mr) => mr
+                .fields
+                .get(&field_name)
+                .cloned()
+                .unwrap_or(Type::fresh_var()),
             Type::Var(v) => {
                 // Constrain the variable to be a record with this field
                 let field_type = Type::fresh_var();
@@ -678,18 +705,23 @@ impl<'a> InferenceScope<'a> {
 
     fn infer_field_accessor(&mut self, node: Node) -> Type {
         // .fieldName is a function that takes any record with that field
-        if let Some(field_node) = node.children(&mut node.walk())
-            .find(|c| c.kind() == "lower_case_identifier") {
+        if let Some(field_node) = node
+            .children(&mut node.walk())
+            .find(|c| c.kind() == "lower_case_identifier")
+        {
             let field_name = self.node_text(field_node).to_string();
             let field_type = Type::fresh_var();
             let mut fields = HashMap::new();
             fields.insert(field_name.clone(), field_type.clone());
 
             // Track as a field reference
-            self.field_references.add(&field_name, FieldReference {
-                node_id: field_node.id(),
-                uri: self.uri.clone(),
-            });
+            self.field_references.add(
+                &field_name,
+                FieldReference {
+                    node_id: field_node.id(),
+                    uri: self.uri.clone(),
+                },
+            );
 
             Type::function(
                 vec![Type::MutableRecord(MutableRecordType::new(
@@ -715,10 +747,13 @@ impl<'a> InferenceScope<'a> {
                         let name = self.node_text(name_node).to_string();
 
                         // Track field reference
-                        self.field_references.add(&name, FieldReference {
-                            node_id: name_node.id(),
-                            uri: self.uri.clone(),
-                        });
+                        self.field_references.add(
+                            &name,
+                            FieldReference {
+                                node_id: name_node.id(),
+                                uri: self.uri.clone(),
+                            },
+                        );
 
                         if let Some(expr) = child.child_by_field_name("expression") {
                             let ty = self.infer(expr);
@@ -751,7 +786,7 @@ impl<'a> InferenceScope<'a> {
                         field_references: r.field_references.merge(&self.field_references),
                     })
                 }
-                _ => Type::record(fields)
+                _ => Type::record(fields),
             }
         } else {
             Type::record(fields)
@@ -783,7 +818,8 @@ impl<'a> InferenceScope<'a> {
 
     fn infer_case(&mut self, node: Node) -> Type {
         // Get the expression being matched
-        let expr_node = node.child_by_field_name("expr")
+        let expr_node = node
+            .child_by_field_name("expr")
             .or_else(|| node.named_child(0));
 
         let expr_type = if let Some(e) = expr_node {
@@ -802,8 +838,10 @@ impl<'a> InferenceScope<'a> {
                     self.bind_pattern(pattern, &expr_type);
                 }
                 // Infer branch expression
-                if let Some(expr) = child.child_by_field_name("expr")
-                    .or_else(|| child.named_child(child.named_child_count().saturating_sub(1))) {
+                if let Some(expr) = child
+                    .child_by_field_name("expr")
+                    .or_else(|| child.named_child(child.named_child_count().saturating_sub(1)))
+                {
                     let ty = self.infer(expr);
                     if branch_type.is_none() {
                         branch_type = Some(ty);
@@ -834,8 +872,10 @@ impl<'a> InferenceScope<'a> {
         }
 
         // Infer the body (last expression)
-        if let Some(body) = node.child_by_field_name("body")
-            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1))) {
+        if let Some(body) = node
+            .child_by_field_name("body")
+            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
+        {
             self.infer(body)
         } else {
             Type::Unknown
@@ -856,8 +896,10 @@ impl<'a> InferenceScope<'a> {
         }
 
         // Infer body
-        let body_type = if let Some(body) = node.child_by_field_name("expr")
-            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1))) {
+        let body_type = if let Some(body) = node
+            .child_by_field_name("expr")
+            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
+        {
             self.infer(body)
         } else {
             Type::Unknown
@@ -871,7 +913,8 @@ impl<'a> InferenceScope<'a> {
         let mut cursor = node.walk();
 
         for child in node.children(&mut cursor) {
-            if child.is_named() && child.kind() != "[" && child.kind() != "]" && child.kind() != "," {
+            if child.is_named() && child.kind() != "[" && child.kind() != "]" && child.kind() != ","
+            {
                 let ty = self.infer(child);
                 self.unify(&ty, &elem_type);
             }
@@ -924,39 +967,48 @@ impl<'a> InferenceScope<'a> {
 
         match (&t1, &t2) {
             // Same type
-            _ if std::mem::discriminant(&t1) == std::mem::discriminant(&t2) => {
-                match (&t1, &t2) {
-                    (Type::Var(v1), Type::Var(v2)) if v1.id == v2.id => true,
-                    (Type::Union(u1), Type::Union(u2)) => {
-                        u1.module == u2.module && u1.name == u2.name &&
-                        u1.params.len() == u2.params.len() &&
-                        u1.params.iter().zip(&u2.params).all(|(p1, p2)| self.unify(p1, p2))
-                    }
-                    (Type::Function(f1), Type::Function(f2)) => {
-                        f1.params.len() == f2.params.len() &&
-                        f1.params.iter().zip(&f2.params).all(|(p1, p2)| self.unify(p1, p2)) &&
-                        self.unify(&f1.ret, &f2.ret)
-                    }
-                    (Type::Tuple(t1), Type::Tuple(t2)) => {
-                        t1.types.len() == t2.types.len() &&
-                        t1.types.iter().zip(&t2.types).all(|(e1, e2)| self.unify(e1, e2))
-                    }
-                    (Type::Record(r1), Type::Record(r2)) => {
-                        self.unify_records(&r1.fields, &r2.fields)
-                    }
-                    (Type::Unit(_), Type::Unit(_)) => true,
-                    (Type::Unknown, Type::Unknown) => true,
-                    _ => false,
+            _ if std::mem::discriminant(&t1) == std::mem::discriminant(&t2) => match (&t1, &t2) {
+                (Type::Var(v1), Type::Var(v2)) if v1.id == v2.id => true,
+                (Type::Union(u1), Type::Union(u2)) => {
+                    u1.module == u2.module
+                        && u1.name == u2.name
+                        && u1.params.len() == u2.params.len()
+                        && u1
+                            .params
+                            .iter()
+                            .zip(&u2.params)
+                            .all(|(p1, p2)| self.unify(p1, p2))
                 }
-            }
+                (Type::Function(f1), Type::Function(f2)) => {
+                    f1.params.len() == f2.params.len()
+                        && f1
+                            .params
+                            .iter()
+                            .zip(&f2.params)
+                            .all(|(p1, p2)| self.unify(p1, p2))
+                        && self.unify(&f1.ret, &f2.ret)
+                }
+                (Type::Tuple(t1), Type::Tuple(t2)) => {
+                    t1.types.len() == t2.types.len()
+                        && t1
+                            .types
+                            .iter()
+                            .zip(&t2.types)
+                            .all(|(e1, e2)| self.unify(e1, e2))
+                }
+                (Type::Record(r1), Type::Record(r2)) => self.unify_records(&r1.fields, &r2.fields),
+                (Type::Unit(_), Type::Unit(_)) => true,
+                (Type::Unknown, Type::Unknown) => true,
+                _ => false,
+            },
             // Variable unification
             (Type::Var(v), other) | (other, Type::Var(v)) if !v.rigid => {
                 self.substitutions.set(v.id, other.clone());
                 true
             }
             // Mutable record with concrete record
-            (Type::MutableRecord(mr), Type::Record(r)) |
-            (Type::Record(r), Type::MutableRecord(mr)) => {
+            (Type::MutableRecord(mr), Type::Record(r))
+            | (Type::Record(r), Type::MutableRecord(mr)) => {
                 self.unify_records(&mr.fields, &r.fields)
             }
             // Different types
@@ -964,7 +1016,11 @@ impl<'a> InferenceScope<'a> {
         }
     }
 
-    fn unify_records(&mut self, fields1: &HashMap<String, Type>, fields2: &HashMap<String, Type>) -> bool {
+    fn unify_records(
+        &mut self,
+        fields1: &HashMap<String, Type>,
+        fields2: &HashMap<String, Type>,
+    ) -> bool {
         for (name, ty1) in fields1 {
             if let Some(ty2) = fields2.get(name) {
                 if !self.unify(ty1, ty2) {
@@ -1018,7 +1074,9 @@ mod tests {
 
     fn parse(source: &str) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_elm::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_elm::LANGUAGE.into())
+            .unwrap();
         parser.parse(source, None).unwrap()
     }
 

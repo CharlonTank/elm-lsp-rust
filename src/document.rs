@@ -79,7 +79,9 @@ impl Document {
     }
 
     pub fn get_symbol_at_position(&self, position: Position) -> Option<&ElmSymbol> {
-        self.symbols.iter().find(|s| s.is_position_on_name(position))
+        self.symbols
+            .iter()
+            .find(|s| s.is_position_on_name(position))
     }
 
     pub fn get_line(&self, line: u32) -> Option<&str> {

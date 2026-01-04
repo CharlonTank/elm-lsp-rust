@@ -128,7 +128,9 @@ impl RecordFieldReferenceTable {
     }
 
     pub fn get(&self, field: &str) -> Vec<&FieldReference> {
-        self.refs_by_field.get(field).map_or(Vec::new(), |refs| refs.iter().collect())
+        self.refs_by_field
+            .get(field)
+            .map_or(Vec::new(), |refs| refs.iter().collect())
     }
 
     pub fn add(&mut self, field: &str, reference: FieldReference) {
@@ -381,8 +383,20 @@ mod tests {
     #[test]
     fn test_record_field_references() {
         let mut table = RecordFieldReferenceTable::new();
-        table.add("name", FieldReference { node_id: 1, uri: "test.elm".to_string() });
-        table.add("name", FieldReference { node_id: 2, uri: "test.elm".to_string() });
+        table.add(
+            "name",
+            FieldReference {
+                node_id: 1,
+                uri: "test.elm".to_string(),
+            },
+        );
+        table.add(
+            "name",
+            FieldReference {
+                node_id: 2,
+                uri: "test.elm".to_string(),
+            },
+        );
 
         let refs = table.get("name");
         assert_eq!(refs.len(), 2);
@@ -394,9 +408,21 @@ mod tests {
     #[test]
     fn test_frozen_table_rejects_additions() {
         let mut table = RecordFieldReferenceTable::new();
-        table.add("name", FieldReference { node_id: 1, uri: "test.elm".to_string() });
+        table.add(
+            "name",
+            FieldReference {
+                node_id: 1,
+                uri: "test.elm".to_string(),
+            },
+        );
         table.freeze();
-        table.add("name", FieldReference { node_id: 2, uri: "test.elm".to_string() });
+        table.add(
+            "name",
+            FieldReference {
+                node_id: 2,
+                uri: "test.elm".to_string(),
+            },
+        );
 
         let refs = table.get("name");
         assert_eq!(refs.len(), 1); // Second add was ignored

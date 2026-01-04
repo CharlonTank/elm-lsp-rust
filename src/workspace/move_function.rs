@@ -116,8 +116,8 @@ impl Workspace {
         let target_insert_line = find_insertion_point(&target_content);
 
         // Create target URI
-        let target_uri = Url::from_file_path(target_path)
-            .map_err(|_| anyhow::anyhow!("Invalid target path"))?;
+        let target_uri =
+            Url::from_file_path(target_path).map_err(|_| anyhow::anyhow!("Invalid target path"))?;
 
         // Find all references to this function
         let refs = self.find_references(function_name, Some(&source_module_name));
@@ -204,7 +204,11 @@ impl Workspace {
         if !source_symbols.is_empty() {
             // Check if target already imports source module
             let already_imports_source = target_module_ref
-                .map(|tm| tm.imports.iter().any(|i| i.module_name == source_module_name))
+                .map(|tm| {
+                    tm.imports
+                        .iter()
+                        .any(|i| i.module_name == source_module_name)
+                })
                 .unwrap_or(false);
 
             if !already_imports_source {

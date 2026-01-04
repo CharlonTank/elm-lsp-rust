@@ -9,6 +9,21 @@ use tower_lsp::lsp_types::*;
 
 use super::{FileOperationResult, Workspace, LAMDERA_PROTECTED_FILES};
 
+/// Check if a file is a protected Lamdera file (must be at root of src/)
+fn is_lamdera_protected_file(path: &Path) -> bool {
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        if LAMDERA_PROTECTED_FILES.contains(&file_name) {
+            // Check if parent directory is "src" (the file is at root of src/)
+            if let Some(parent) = path.parent() {
+                if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
+                    return parent_name == "src";
+                }
+            }
+        }
+    }
+    false
+}
+
 impl Workspace {
     /// Rename a file and update its module declaration + all imports
     pub fn rename_file(&self, uri: &Url, new_name: &str) -> anyhow::Result<FileOperationResult> {
@@ -16,15 +31,13 @@ impl Workspace {
             .to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid file URI"))?;
 
-        // Block renaming protected Lamdera files
-        if self.is_lamdera_project {
+        // Block renaming protected Lamdera files (only at root of src/)
+        if self.is_lamdera_project && is_lamdera_protected_file(&old_path) {
             if let Some(file_name) = old_path.file_name().and_then(|n| n.to_str()) {
-                if LAMDERA_PROTECTED_FILES.contains(&file_name) {
-                    return Err(anyhow::anyhow!(
-                        "Cannot rename {} in a Lamdera project - this file is required by Lamdera",
-                        file_name
-                    ));
-                }
+                return Err(anyhow::anyhow!(
+                    "Cannot rename {} in a Lamdera project - this file is required by Lamdera",
+                    file_name
+                ));
             }
         }
 
@@ -92,15 +105,13 @@ impl Workspace {
             .to_file_path()
             .map_err(|_| anyhow::anyhow!("Invalid file URI"))?;
 
-        // Block moving protected Lamdera files
-        if self.is_lamdera_project {
+        // Block moving protected Lamdera files (only at root of src/)
+        if self.is_lamdera_project && is_lamdera_protected_file(&old_path) {
             if let Some(file_name) = old_path.file_name().and_then(|n| n.to_str()) {
-                if LAMDERA_PROTECTED_FILES.contains(&file_name) {
-                    return Err(anyhow::anyhow!(
-                        "Cannot move {} in a Lamdera project - this file is required by Lamdera",
-                        file_name
-                    ));
-                }
+                return Err(anyhow::anyhow!(
+                    "Cannot move {} in a Lamdera project - this file is required by Lamdera",
+                    file_name
+                ));
             }
         }
 
@@ -162,8 +173,8 @@ impl Workspace {
         let mut files_updated = 0;
 
         for module in self.modules.values() {
-            let file_uri = Url::from_file_path(&module.path)
-                .map_err(|_| anyhow::anyhow!("Invalid path"))?;
+            let file_uri =
+                Url::from_file_path(&module.path).map_err(|_| anyhow::anyhow!("Invalid path"))?;
 
             // Skip Evergreen files
             if module.path.to_string_lossy().contains("/Evergreen/") {
@@ -223,9 +234,10 @@ impl Workspace {
 
                         // Make sure it's not part of a larger identifier
                         let before_ok = actual_pos == 0
-                            || !line.chars().nth(actual_pos - 1).is_some_and(|c| {
-                                c.is_alphanumeric() || c == '_' || c == '.'
-                            });
+                            || !line
+                                .chars()
+                                .nth(actual_pos - 1)
+                                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
 
                         if before_ok {
                             changes.entry(file_uri.clone()).or_default().push(TextEdit {

@@ -5,13 +5,11 @@ use std::time::Instant;
 use elm_lsp::workspace::Workspace;
 
 fn main() {
-    let project_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| {
-            // Default to meetdown test project relative to this crate
-            let manifest_dir = env!("CARGO_MANIFEST_DIR");
-            format!("{}/tests/meetdown", manifest_dir)
-        });
+    let project_path = std::env::args().nth(1).unwrap_or_else(|| {
+        // Default to meetdown test project relative to this crate
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        format!("{}/tests/meetdown", manifest_dir)
+    });
 
     let test_file = std::env::args()
         .nth(2)
@@ -29,16 +27,24 @@ fn main() {
     println!("--- WORKSPACE INITIALIZATION ---");
     let start = Instant::now();
     let mut workspace = Workspace::new(PathBuf::from(&project_path));
-    workspace.initialize().expect("Failed to initialize workspace");
+    workspace
+        .initialize()
+        .expect("Failed to initialize workspace");
     let init_time = start.elapsed();
-    println!("  Indexed {} modules in {:?}", workspace.modules.len(), init_time);
+    println!(
+        "  Indexed {} modules in {:?}",
+        workspace.modules.len(),
+        init_time
+    );
     println!();
 
     // Get the test file path
     let full_path = PathBuf::from(&project_path).join(&test_file);
 
     // Find the module for the test file
-    let module = workspace.modules.values()
+    let module = workspace
+        .modules
+        .values()
         .find(|m| m.path == full_path)
         .expect("Test file not found in workspace");
 
@@ -101,7 +107,11 @@ fn main() {
     println!("==================================================");
     println!("SUMMARY");
     println!("==================================================");
-    println!("  Initialization: {:?} ({} modules)", init_time, workspace.modules.len());
+    println!(
+        "  Initialization: {:?} ({} modules)",
+        init_time,
+        workspace.modules.len()
+    );
     println!("  After init, operations are sub-millisecond");
     println!();
 }

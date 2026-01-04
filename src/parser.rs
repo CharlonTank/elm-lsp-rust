@@ -140,11 +140,7 @@ impl ElmParser {
         Some(symbol)
     }
 
-    fn parse_type_declaration(
-        &self,
-        node: tree_sitter::Node,
-        source: &str,
-    ) -> Option<ElmSymbol> {
+    fn parse_type_declaration(&self, node: tree_sitter::Node, source: &str) -> Option<ElmSymbol> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "upper_case_identifier" {
@@ -208,11 +204,7 @@ impl ElmParser {
         None
     }
 
-    fn parse_port_annotation(
-        &self,
-        node: tree_sitter::Node,
-        source: &str,
-    ) -> Option<ElmSymbol> {
+    fn parse_port_annotation(&self, node: tree_sitter::Node, source: &str) -> Option<ElmSymbol> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "lower_case_identifier" {

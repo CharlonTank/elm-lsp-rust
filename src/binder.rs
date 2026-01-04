@@ -463,9 +463,12 @@ impl<'a> Binder<'a> {
     fn bind_import_clause(&mut self, node: Node) {
         // Get the module name or alias
         let name = if let Some(as_clause) = node.child_by_field_name("asClause") {
-            as_clause.child_by_field_name("name").map(|n| self.node_text(n).to_string())
+            as_clause
+                .child_by_field_name("name")
+                .map(|n| self.node_text(n).to_string())
         } else {
-            node.child_by_field_name("moduleName").map(|n| self.node_text(n).to_string())
+            node.child_by_field_name("moduleName")
+                .map(|n| self.node_text(n).to_string())
         };
 
         if let Some(name) = name {
@@ -482,8 +485,8 @@ impl<'a> Binder<'a> {
         // Elm has default imports for Basics, List, Maybe, etc.
         // We don't need to create real import nodes, just mark them as available
         let default_modules = [
-            "Basics", "List", "Maybe", "Result", "String", "Char",
-            "Tuple", "Debug", "Platform", "Cmd", "Sub",
+            "Basics", "List", "Maybe", "Result", "String", "Char", "Tuple", "Debug", "Platform",
+            "Cmd", "Sub",
         ];
 
         for module in default_modules {
@@ -523,7 +526,9 @@ impl<'a> Binder<'a> {
                                 | BoundSymbolKind::TypeAlias
                                 | BoundSymbolKind::Type
                                 | BoundSymbolKind::Port => {
-                                    self.symbol_links.exposing.insert(name.clone(), symbol.clone());
+                                    self.symbol_links
+                                        .exposing
+                                        .insert(name.clone(), symbol.clone());
                                 }
                                 _ => {}
                             }
@@ -569,7 +574,9 @@ mod tests {
 
     fn parse(source: &str) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_elm::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_elm::LANGUAGE.into())
+            .unwrap();
         parser.parse(source, None).unwrap()
     }
 

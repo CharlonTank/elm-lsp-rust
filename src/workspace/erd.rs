@@ -167,7 +167,10 @@ impl Workspace {
         );
 
         if entities.is_empty() {
-            return Err(format!("Could not find type '{}' in module '{}'", type_name, starting_module));
+            return Err(format!(
+                "Could not find type '{}' in module '{}'",
+                type_name, starting_module
+            ));
         }
 
         Ok(ErdResult {
@@ -235,9 +238,17 @@ impl Workspace {
     }
 
     /// Find a type (alias or custom type with record) and return its fields
-    fn find_type_alias_fields(&self, type_name: &str, module_hint: &str) -> Option<(String, Vec<(String, String)>)> {
+    fn find_type_alias_fields(
+        &self,
+        type_name: &str,
+        module_hint: &str,
+    ) -> Option<(String, Vec<(String, String)>)> {
         // Collect all URIs first to avoid borrowing issues
-        let uris: Vec<String> = self.type_checker.indexed_files().map(|s| s.to_string()).collect();
+        let uris: Vec<String> = self
+            .type_checker
+            .indexed_files()
+            .map(|s| s.to_string())
+            .collect();
 
         // First try to find in the hinted module
         for uri in &uris {
@@ -253,9 +264,9 @@ impl Workspace {
             let module_name = self.get_module_name_from_source(source, tree);
 
             // Check if this is the module we're looking for (or any module if no hint)
-            let is_target_module = module_name == module_hint ||
-                                   module_name.ends_with(&format!(".{}", module_hint)) ||
-                                   module_hint.is_empty();
+            let is_target_module = module_name == module_hint
+                || module_name.ends_with(&format!(".{}", module_hint))
+                || module_hint.is_empty();
 
             if !is_target_module {
                 continue;
@@ -288,14 +299,20 @@ impl Workspace {
     }
 
     /// Find fields for a type in a parsed tree - handles both type aliases and custom types with record constructors
-    fn find_type_fields_in_tree(&self, tree: &tree_sitter::Tree, source: &str, type_name: &str) -> Option<Vec<(String, String)>> {
+    fn find_type_fields_in_tree(
+        &self,
+        tree: &tree_sitter::Tree,
+        source: &str,
+        type_name: &str,
+    ) -> Option<Vec<(String, String)>> {
         let root = tree.root_node();
         let mut cursor = root.walk();
 
         for child in root.children(&mut cursor) {
             // Check type alias declarations: type alias Foo = { ... }
             if child.kind() == "type_alias_declaration" {
-                let alias_name = child.child_by_field_name("name")
+                let alias_name = child
+                    .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source.as_bytes()).ok());
 
                 if alias_name == Some(type_name) {
@@ -309,7 +326,8 @@ impl Workspace {
 
             // Check custom type declarations: type Foo = Foo { ... }
             if child.kind() == "type_declaration" {
-                let custom_type_name = child.child_by_field_name("name")
+                let custom_type_name = child
+                    .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source.as_bytes()).ok());
 
                 if custom_type_name == Some(type_name) {
@@ -326,7 +344,11 @@ impl Workspace {
 
     /// Extract record fields from a custom type with a single constructor containing a record
     /// e.g., type Group = Group { ownerId : Id UserId, name : GroupName, ... }
-    fn extract_custom_type_record_fields(&self, type_decl: tree_sitter::Node, source: &str) -> Option<Vec<(String, String)>> {
+    fn extract_custom_type_record_fields(
+        &self,
+        type_decl: tree_sitter::Node,
+        source: &str,
+    ) -> Option<Vec<(String, String)>> {
         let mut cursor = type_decl.walk();
         let mut variants: Vec<tree_sitter::Node> = Vec::new();
 
@@ -356,7 +378,10 @@ impl Workspace {
     }
 
     /// Find a record_type node within a type expression
-    fn find_record_type_node_erd<'a>(&self, node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+    fn find_record_type_node_erd<'a>(
+        &self,
+        node: tree_sitter::Node<'a>,
+    ) -> Option<tree_sitter::Node<'a>> {
         if node.kind() == "record_type" {
             return Some(node);
         }
@@ -370,17 +395,23 @@ impl Workspace {
     }
 
     /// Extract field names and types from a record_type node (ERD version)
-    fn extract_record_fields_erd(&self, record_type: tree_sitter::Node, source: &str) -> Vec<(String, String)> {
+    fn extract_record_fields_erd(
+        &self,
+        record_type: tree_sitter::Node,
+        source: &str,
+    ) -> Vec<(String, String)> {
         let mut fields = Vec::new();
         let mut cursor = record_type.walk();
 
         for child in record_type.children(&mut cursor) {
             if child.kind() == "field_type" {
-                let field_name = child.child_by_field_name("name")
+                let field_name = child
+                    .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source.as_bytes()).ok())
                     .map(|s| s.to_string());
 
-                let field_type = child.child_by_field_name("typeExpression")
+                let field_type = child
+                    .child_by_field_name("typeExpression")
                     .and_then(|n| n.utf8_text(source.as_bytes()).ok())
                     .map(|s| s.to_string());
 
@@ -398,9 +429,11 @@ impl Workspace {
         let mut cursor = tree.root_node().walk();
         for child in tree.root_node().children(&mut cursor) {
             if child.kind() == "module_declaration" {
-                if let Some(name) = child.child_by_field_name("name")
-                    .or_else(|| child.children(&mut child.walk())
-                        .find(|c| c.kind() == "upper_case_qid")) {
+                if let Some(name) = child.child_by_field_name("name").or_else(|| {
+                    child
+                        .children(&mut child.walk())
+                        .find(|c| c.kind() == "upper_case_qid")
+                }) {
                     if let Ok(text) = name.utf8_text(source.as_bytes()) {
                         return text.to_string();
                     }
@@ -489,7 +522,7 @@ impl Workspace {
 
         // Handle parenthesized: "(Id XxxId)"
         let inner = if trimmed.starts_with('(') && trimmed.ends_with(')') {
-            &trimmed[1..trimmed.len()-1]
+            &trimmed[1..trimmed.len() - 1]
         } else {
             trimmed
         };
@@ -518,15 +551,28 @@ impl Workspace {
 
         // One-to-many containers
         let one_to_many_prefixes = [
-            "List ", "Array ", "Set ", "SeqSet ", "Dict ", "SeqDict ",
-            "AssocList.Dict ", "AssocSet.Set ", "BiDict ", "BiDict.Assoc ",
-            "BiDict.Assoc2 ", "Cache ", "List.Nonempty.Nonempty ",
+            "List ",
+            "Array ",
+            "Set ",
+            "SeqSet ",
+            "Dict ",
+            "SeqDict ",
+            "AssocList.Dict ",
+            "AssocSet.Set ",
+            "BiDict ",
+            "BiDict.Assoc ",
+            "BiDict.Assoc2 ",
+            "Cache ",
+            "List.Nonempty.Nonempty ",
             "Nonempty ",
         ];
 
         for prefix in &one_to_many_prefixes {
             if let Some(inner) = trimmed.strip_prefix(prefix) {
-                return (ErdCardinality::OneToMany, self.extract_last_type_param(inner));
+                return (
+                    ErdCardinality::OneToMany,
+                    self.extract_last_type_param(inner),
+                );
             }
         }
 
@@ -537,7 +583,10 @@ impl Workspace {
                 let rest = trimmed[container.len()..].trim();
                 if rest.starts_with('(') {
                     // This is Dict/SeqDict with parenthesized key type
-                    return (ErdCardinality::OneToMany, self.extract_last_type_param(rest));
+                    return (
+                        ErdCardinality::OneToMany,
+                        self.extract_last_type_param(rest),
+                    );
                 }
             }
         }
@@ -574,7 +623,7 @@ impl Workspace {
 
         // No space found at depth 0, return as-is (might be parenthesized)
         if trimmed.starts_with('(') && trimmed.ends_with(')') {
-            return trimmed[1..trimmed.len()-1].to_string();
+            return trimmed[1..trimmed.len() - 1].to_string();
         }
 
         trimmed.to_string()
@@ -586,7 +635,7 @@ impl Workspace {
 
         // Handle parenthesized types
         if trimmed.starts_with('(') && trimmed.ends_with(')') {
-            return self.extract_erd_entity_type(&trimmed[1..trimmed.len()-1]);
+            return self.extract_erd_entity_type(&trimmed[1..trimmed.len() - 1]);
         }
 
         // Get the first identifier (type name)
@@ -607,15 +656,32 @@ impl Workspace {
     fn is_erd_primitive_type(&self, type_name: &str) -> bool {
         matches!(
             type_name,
-            "String" | "Int" | "Float" | "Bool" | "Char" |
-            "Posix" | "Zone" | "Time" |
-            "Key" | "Url" |
-            "ClientId" | "SessionId" |
-            "Cmd" | "Sub" | "Task" |
-            "Json" | "Value" | "Decoder" | "Encoder" |
-            "Never" | "Order" |
-            "Quantity" | "Pixels" |
-            "Result" | "Http" | "Error"
+            "String"
+                | "Int"
+                | "Float"
+                | "Bool"
+                | "Char"
+                | "Posix"
+                | "Zone"
+                | "Time"
+                | "Key"
+                | "Url"
+                | "ClientId"
+                | "SessionId"
+                | "Cmd"
+                | "Sub"
+                | "Task"
+                | "Json"
+                | "Value"
+                | "Decoder"
+                | "Encoder"
+                | "Never"
+                | "Order"
+                | "Quantity"
+                | "Pixels"
+                | "Result"
+                | "Http"
+                | "Error"
         )
     }
 
@@ -623,9 +689,16 @@ impl Workspace {
     fn is_erd_wrapper_type(&self, type_name: &str) -> bool {
         matches!(
             type_name,
-            "Id" | "Name" | "Description" | "EmailAddress" | "GroupName" |
-            "ProfileImage" | "Address" | "EventName" | "Link" | "MaxAttendees" |
-            "Untrusted"
+            "Id" | "Name"
+                | "Description"
+                | "EmailAddress"
+                | "GroupName"
+                | "ProfileImage"
+                | "Address"
+                | "EventName"
+                | "Link"
+                | "MaxAttendees"
+                | "Untrusted"
         )
     }
 }

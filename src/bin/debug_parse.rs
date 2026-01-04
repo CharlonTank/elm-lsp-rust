@@ -32,7 +32,9 @@ main =
 "#;
 
     let mut parser = Parser::new();
-    parser.set_language(&elm_language()).expect("Failed to load Elm grammar");
+    parser
+        .set_language(&elm_language())
+        .expect("Failed to load Elm grammar");
 
     match parser.parse(source, None) {
         Some(tree) => {
@@ -48,7 +50,8 @@ main =
 
 fn print_tree(node: &tree_sitter::Node, source: &str, indent: usize) {
     let kind = node.kind();
-    let range = format!("[{},{}]-[{},{}]",
+    let range = format!(
+        "[{},{}]-[{},{}]",
         node.start_position().row,
         node.start_position().column,
         node.end_position().row,
@@ -61,7 +64,13 @@ fn print_tree(node: &tree_sitter::Node, source: &str, indent: usize) {
         // Leaf node - show the text
         let text = &source[node.byte_range()];
         let text_preview = if text.len() > 30 { &text[..30] } else { text };
-        println!("{}{} {} \"{}\"", prefix, kind, range, text_preview.replace('\n', "\\n"));
+        println!(
+            "{}{} {} \"{}\"",
+            prefix,
+            kind,
+            range,
+            text_preview.replace('\n', "\\n")
+        );
     } else {
         println!("{}{} {}", prefix, kind, range);
     }

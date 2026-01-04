@@ -63,6 +63,8 @@ pub struct DefinitionSymbol {
     /// For fields: the type alias name; for constructors: the custom type name
     pub type_context: Option<String>,
     pub module_name: Option<String>,
+    /// For local variables: the start/end positions of their scope (function body, case branch, etc.)
+    pub scope_range: Option<Range>,
 }
 
 /// Global symbol entry in the index
@@ -80,7 +82,22 @@ pub struct GlobalSymbol {
 const LAMDERA_PROTECTED_FILES: &[&str] = &["Env.elm", "Types.elm", "Frontend.elm", "Backend.elm"];
 
 /// Protected type names in Lamdera projects that should not be renamed
-const LAMDERA_PROTECTED_TYPES: &[&str] = &["FrontendMsg", "BackendMsg", "ToBackend", "ToFrontend", "FrontendModel", "BackendModel"];
+const LAMDERA_PROTECTED_TYPES: &[&str] = &[
+    "FrontendMsg",
+    "BackendMsg",
+    "ToBackend",
+    "ToFrontend",
+    "FrontendModel",
+    "BackendModel",
+];
+
+/// Represents an external package dependency
+#[derive(Debug, Clone)]
+pub struct ExternalPackage {
+    pub name: String,    // e.g., "elm/core"
+    pub version: String, // e.g., "1.0.5"
+    pub path: PathBuf,   // Path to package source
+}
 
 /// The workspace index - tracks all symbols across all files
 pub struct Workspace {
@@ -92,6 +109,10 @@ pub struct Workspace {
     pub parser: ElmParser,
     pub type_checker: TypeChecker,
     pub is_lamdera_project: bool,
+    /// External packages (from ~/.elm or elm-stuff)
+    pub external_packages: Vec<ExternalPackage>,
+    /// Symbols from external packages (indexed separately)
+    pub external_symbols: HashMap<String, Vec<GlobalSymbol>>,
 }
 
 impl Workspace {
@@ -105,6 +126,8 @@ impl Workspace {
             parser: ElmParser::new(),
             type_checker: TypeChecker::new(),
             is_lamdera_project: false,
+            external_packages: Vec::new(),
+            external_symbols: HashMap::new(),
         }
     }
 
@@ -116,8 +139,11 @@ impl Workspace {
     /// Deduplicate references by (uri, range) - sorts and removes duplicates
     fn deduplicate_references(results: &mut Vec<SymbolReference>) {
         results.sort_by(|a, b| {
-            (&a.uri, a.range.start.line, a.range.start.character)
-                .cmp(&(&b.uri, b.range.start.line, b.range.start.character))
+            (&a.uri, a.range.start.line, a.range.start.character).cmp(&(
+                &b.uri,
+                b.range.start.line,
+                b.range.start.character,
+            ))
         });
         results.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
     }
@@ -137,7 +163,9 @@ impl Workspace {
             if module.path.to_string_lossy().contains("/Evergreen/") {
                 return None;
             }
-            Url::from_file_path(&module.path).ok().map(|uri| (module, uri))
+            Url::from_file_path(&module.path)
+                .ok()
+                .map(|uri| (module, uri))
         })
     }
 
@@ -146,7 +174,10 @@ impl Workspace {
     pub(super) fn sort_edits_reverse(changes: &mut HashMap<Url, Vec<TextEdit>>) {
         for edits in changes.values_mut() {
             edits.sort_by(|a, b| {
-                b.range.start.line.cmp(&a.range.start.line)
+                b.range
+                    .start
+                    .line
+                    .cmp(&a.range.start.line)
                     .then_with(|| b.range.start.character.cmp(&a.range.start.character))
             });
         }
@@ -169,6 +200,9 @@ impl Workspace {
 
         // Index all .elm files
         self.index_all_files()?;
+
+        // Index external packages for go-to-definition support
+        self.index_external_packages()?;
 
         Ok(())
     }
@@ -201,6 +235,136 @@ impl Workspace {
             let src_dir = self.root_path.join("src");
             if src_dir.exists() {
                 self.source_dirs.push(src_dir);
+            }
+        }
+
+        // Parse dependencies for external package support
+        self.parse_dependencies(&json);
+
+        Ok(())
+    }
+
+    /// Parse dependencies from elm.json and locate package sources
+    fn parse_dependencies(&mut self, json: &serde_json::Value) {
+        let elm_home = Self::get_elm_home();
+
+        if let Some(deps) = json.get("dependencies") {
+            // Parse direct dependencies
+            if let Some(direct) = deps.get("direct") {
+                self.collect_packages(direct, &elm_home);
+            }
+            // Parse indirect dependencies
+            if let Some(indirect) = deps.get("indirect") {
+                self.collect_packages(indirect, &elm_home);
+            }
+        }
+
+        tracing::info!("Found {} external packages", self.external_packages.len());
+    }
+
+    /// Collect packages from a dependencies object
+    fn collect_packages(&mut self, deps: &serde_json::Value, elm_home: &Path) {
+        if let Some(obj) = deps.as_object() {
+            for (name, version) in obj {
+                if let Some(version_str) = version.as_str() {
+                    // Try to find package in elm home
+                    let package_path = elm_home
+                        .join("0.19.1")
+                        .join("packages")
+                        .join(name.replace('/', std::path::MAIN_SEPARATOR_STR))
+                        .join(version_str)
+                        .join("src");
+
+                    if package_path.exists() {
+                        self.external_packages.push(ExternalPackage {
+                            name: name.clone(),
+                            version: version_str.to_string(),
+                            path: package_path,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get the Elm home directory (~/.elm or ELM_HOME)
+    fn get_elm_home() -> PathBuf {
+        if let Ok(elm_home) = std::env::var("ELM_HOME") {
+            PathBuf::from(elm_home)
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".elm")
+        } else {
+            PathBuf::from(".elm")
+        }
+    }
+
+    /// Index external packages for go-to-definition support
+    fn index_external_packages(&mut self) -> anyhow::Result<()> {
+        let packages: Vec<_> = self.external_packages.clone();
+
+        for package in &packages {
+            if let Err(e) = self.index_external_package(package) {
+                tracing::warn!("Failed to index package {}: {}", package.name, e);
+            }
+        }
+
+        tracing::info!("Indexed {} external symbols", self.external_symbols.len());
+        Ok(())
+    }
+
+    /// Index a single external package
+    fn index_external_package(&mut self, package: &ExternalPackage) -> anyhow::Result<()> {
+        for entry in WalkDir::new(&package.path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "elm") {
+                self.index_external_file(path, &package.name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Index a single external file (only extracts symbols, no references)
+    fn index_external_file(&mut self, path: &Path, _package_name: &str) -> anyhow::Result<()> {
+        let content = std::fs::read_to_string(path)?;
+        let uri = Url::from_file_path(path).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+
+        if let Some(tree) = self.parser.parse(&content) {
+            let symbols = self.parser.extract_symbols(&tree, &content);
+            let module_name = self
+                .extract_module_name(&tree, &content)
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string()
+                });
+
+            // Add symbols to external index (not the main symbols index)
+            for symbol in &symbols {
+                let global_symbol = GlobalSymbol {
+                    name: symbol.name.clone(),
+                    module_name: module_name.clone(),
+                    kind: symbol.kind,
+                    definition_uri: uri.clone(),
+                    definition_range: symbol.definition_range.unwrap_or(symbol.range),
+                    signature: symbol.signature.clone(),
+                };
+
+                // Index by unqualified name
+                self.external_symbols
+                    .entry(symbol.name.clone())
+                    .or_default()
+                    .push(global_symbol.clone());
+
+                // Index by qualified name
+                let qualified_name = format!("{}.{}", module_name, symbol.name);
+                self.external_symbols
+                    .entry(qualified_name)
+                    .or_default()
+                    .push(global_symbol);
             }
         }
 
@@ -240,10 +404,7 @@ impl Workspace {
         let is_lamdera = self.is_lamdera_project;
 
         for source_dir in &self.source_dirs {
-            for entry in WalkDir::new(source_dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
+            for entry in WalkDir::new(source_dir).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
 
                 // Skip Evergreen directory in Lamdera projects
@@ -289,13 +450,15 @@ impl Workspace {
 
         if let Some(tree) = self.parser.parse(&content) {
             let symbols = self.parser.extract_symbols(&tree, &content);
-            let module_name = self.extract_module_name(&tree, &content)
+            let module_name = self
+                .extract_module_name(&tree, &content)
                 .unwrap_or_else(|| self.path_to_module_name(path));
             let imports = self.extract_imports(&tree, &content);
             let exposing = self.extract_exposing(&tree, &content);
 
             // Index for type checking
-            self.type_checker.index_file(uri.as_str(), &content, tree.clone());
+            self.type_checker
+                .index_file(uri.as_str(), &content, tree.clone());
 
             // Index references from this file
             self.find_references_in_tree(&tree, &content, &uri, &module_name, &imports);
@@ -347,7 +510,9 @@ impl Workspace {
         };
 
         // Remove old symbols for this file
-        let old_module_name = self.modules.iter()
+        let old_module_name = self
+            .modules
+            .iter()
             .find(|(_, m)| m.path == path)
             .map(|(name, _)| name.clone());
 
@@ -372,13 +537,15 @@ impl Workspace {
         // Re-index the file
         if let Some(tree) = self.parser.parse(content) {
             let symbols = self.parser.extract_symbols(&tree, content);
-            let module_name = self.extract_module_name(&tree, content)
+            let module_name = self
+                .extract_module_name(&tree, content)
                 .unwrap_or_else(|| self.path_to_module_name(&path));
             let imports = self.extract_imports(&tree, content);
             let exposing = self.extract_exposing(&tree, content);
 
             // Re-index for type checking
-            self.type_checker.index_file(uri.as_str(), content, tree.clone());
+            self.type_checker
+                .index_file(uri.as_str(), content, tree.clone());
 
             // Re-index references for this file
             self.find_references_in_tree(&tree, content, uri, &module_name, &imports);
@@ -419,7 +586,9 @@ impl Workspace {
         };
 
         // Find and remove the module by path
-        let module_name = self.modules.iter()
+        let module_name = self
+            .modules
+            .iter()
             .find(|(_, m)| m.path == path)
             .map(|(name, _)| name.clone());
 
@@ -605,7 +774,9 @@ impl Workspace {
     /// Build the reference index by scanning all files for symbol usages
     fn build_reference_index(&mut self) {
         // Collect module info first to avoid borrow issues
-        let module_info: Vec<_> = self.modules.iter()
+        let module_info: Vec<_> = self
+            .modules
+            .iter()
             .map(|(name, m)| (name.clone(), m.path.clone(), m.imports.clone()))
             .collect();
 
@@ -658,8 +829,14 @@ impl Workspace {
                         let symbol_start_col = node.end_position().column - symbol_name.len();
 
                         let range = Range {
-                            start: Position::new(node.end_position().row as u32, symbol_start_col as u32),
-                            end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+                            start: Position::new(
+                                node.end_position().row as u32,
+                                symbol_start_col as u32,
+                            ),
+                            end: Position::new(
+                                node.end_position().row as u32,
+                                node.end_position().column as u32,
+                            ),
                         };
 
                         let resolved_name = self.resolve_reference(text, imports);
@@ -676,8 +853,14 @@ impl Workspace {
                             });
                     } else {
                         let range = Range {
-                            start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
-                            end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+                            start: Position::new(
+                                node.start_position().row as u32,
+                                node.start_position().column as u32,
+                            ),
+                            end: Position::new(
+                                node.end_position().row as u32,
+                                node.end_position().column as u32,
+                            ),
                         };
 
                         let resolved_name = self.resolve_reference(text, imports);
@@ -702,8 +885,14 @@ impl Workspace {
                 if !in_decl {
                     let kind = self.classify_reference_kind(node, text);
                     let range = Range {
-                        start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
-                        end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+                        start: Position::new(
+                            node.start_position().row as u32,
+                            node.start_position().column as u32,
+                        ),
+                        end: Position::new(
+                            node.end_position().row as u32,
+                            node.end_position().column as u32,
+                        ),
                     };
 
                     let resolved_name = self.resolve_reference(text, imports);
@@ -729,7 +918,11 @@ impl Workspace {
         }
     }
 
-    fn classify_reference_kind(&self, node: tree_sitter::Node, text: &str) -> Option<BoundSymbolKind> {
+    fn classify_reference_kind(
+        &self,
+        node: tree_sitter::Node,
+        text: &str,
+    ) -> Option<BoundSymbolKind> {
         let is_uppercase = text.chars().next().is_some_and(|c| c.is_uppercase());
 
         let mut current = node;
@@ -817,8 +1010,10 @@ impl Workspace {
         let mut current = node.parent();
         while let Some(parent) = current {
             match parent.kind() {
-                "function_declaration_left" | "type_declaration" |
-                "type_alias_declaration" | "port_annotation" => return true,
+                "function_declaration_left"
+                | "type_declaration"
+                | "type_alias_declaration"
+                | "port_annotation" => return true,
                 // If inside a qualified identifier AND we're the first child (module prefix), skip
                 // But if we're the last child of a qualified identifier, we ARE the symbol reference
                 "value_qid" | "upper_case_qid" => {
@@ -833,13 +1028,16 @@ impl Workspace {
                             return true;
                         }
                     }
-                },
+                }
                 // For module declarations and import clauses, skip the module name but allow exposed items
                 "module_declaration" | "import_clause" => {
                     // Check if we're in an exposing_list - those ARE valid references
                     let mut check = node.parent();
                     while let Some(p) = check {
-                        if p.kind() == "exposing_list" || p.kind() == "exposed_type" || p.kind() == "exposed_value" {
+                        if p.kind() == "exposing_list"
+                            || p.kind() == "exposed_type"
+                            || p.kind() == "exposed_value"
+                        {
                             return false; // This is an exposed item, not a declaration
                         }
                         if p.kind() == "module_declaration" || p.kind() == "import_clause" {
@@ -904,7 +1102,11 @@ impl Workspace {
     }
 
     /// Find all references to a symbol
-    pub fn find_references(&self, symbol_name: &str, module_name: Option<&str>) -> Vec<SymbolReference> {
+    pub fn find_references(
+        &self,
+        symbol_name: &str,
+        module_name: Option<&str>,
+    ) -> Vec<SymbolReference> {
         let mut results = Vec::new();
 
         let base_name = Self::extract_base_name(symbol_name);
@@ -939,7 +1141,10 @@ impl Workspace {
 
     /// Find references to a function using the DefinitionSymbol
     /// Filters references by Function kind to avoid matching types/constructors
-    pub fn find_function_references_typed(&self, symbol: &DefinitionSymbol) -> Vec<SymbolReference> {
+    pub fn find_function_references_typed(
+        &self,
+        symbol: &DefinitionSymbol,
+    ) -> Vec<SymbolReference> {
         let all_refs = self.find_references(&symbol.name, symbol.module_name.as_deref());
         all_refs
             .into_iter()
@@ -952,7 +1157,12 @@ impl Workspace {
                     None => {
                         // If kind is unknown, include by default (legacy behavior)
                         // but only if it's lowercase (functions are lowercase)
-                        symbol.name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                        symbol
+                            .name
+                            .chars()
+                            .next()
+                            .map(|c| c.is_lowercase())
+                            .unwrap_or(false)
                     }
                     _ => false,
                 }
@@ -973,7 +1183,12 @@ impl Workspace {
                     Some(BoundSymbolKind::TypeVariable) => true,
                     None => {
                         // If kind is unknown, include by default for uppercase identifiers
-                        symbol.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        symbol
+                            .name
+                            .chars()
+                            .next()
+                            .map(|c| c.is_uppercase())
+                            .unwrap_or(false)
                     }
                     _ => false,
                 }
@@ -983,24 +1198,35 @@ impl Workspace {
 
     /// Find references to a union constructor using the DefinitionSymbol
     /// Filters references by UnionConstructor kind to avoid matching type definitions
-    pub fn find_constructor_references_typed(&self, symbol: &DefinitionSymbol) -> Vec<SymbolReference> {
+    pub fn find_constructor_references_typed(
+        &self,
+        symbol: &DefinitionSymbol,
+    ) -> Vec<SymbolReference> {
         let all_refs = self.find_references(&symbol.name, symbol.module_name.as_deref());
         all_refs
             .into_iter()
-            .filter(|r| {
-                matches!(r.kind, Some(BoundSymbolKind::UnionConstructor) | None)
-            })
+            .filter(|r| matches!(r.kind, Some(BoundSymbolKind::UnionConstructor) | None))
             .collect()
     }
 
     /// Find references to a record field using the DefinitionSymbol
     /// This uses the existing type-aware field reference finder
-    pub fn find_field_references_typed(&self, symbol: &DefinitionSymbol, content: &str) -> Vec<SymbolReference> {
+    pub fn find_field_references_typed(
+        &self,
+        symbol: &DefinitionSymbol,
+        content: &str,
+    ) -> Vec<SymbolReference> {
         // Get the field definition from the type checker
         if let Some(tree) = self.type_checker.get_tree(symbol.uri.as_str()) {
-            let point = tree_sitter::Point::new(symbol.range.start.line as usize, symbol.range.start.character as usize);
+            let point = tree_sitter::Point::new(
+                symbol.range.start.line as usize,
+                symbol.range.start.character as usize,
+            );
             if let Some(node) = Self::find_node_at_point(tree.root_node(), point) {
-                if let Some(field_def) = self.type_checker.find_field_definition(symbol.uri.as_str(), node, content) {
+                if let Some(field_def) =
+                    self.type_checker
+                        .find_field_definition(symbol.uri.as_str(), node, content)
+                {
                     return self.find_field_references(&symbol.name, &field_def);
                 }
             }
@@ -1032,10 +1258,162 @@ impl Workspace {
         let all_refs = self.find_references(&symbol.name, symbol.module_name.as_deref());
         all_refs
             .into_iter()
-            .filter(|r| {
-                matches!(r.kind, Some(BoundSymbolKind::Port) | None)
-            })
+            .filter(|r| matches!(r.kind, Some(BoundSymbolKind::Port) | None))
             .collect()
+    }
+
+    /// Find references to a local variable (function parameter, case pattern, let binding)
+    /// Only searches within the scope of the variable
+    pub fn find_local_references(
+        &self,
+        symbol: &DefinitionSymbol,
+        _content: &str,
+    ) -> Vec<SymbolReference> {
+        let mut references = Vec::new();
+
+        // Add the definition itself
+        references.push(SymbolReference {
+            uri: symbol.uri.clone(),
+            range: symbol.range,
+            kind: Some(symbol.kind),
+            is_definition: true,
+            type_context: None,
+        });
+
+        // If there's no scope range, we can't do scoped searching
+        let scope_range = match &symbol.scope_range {
+            Some(range) => range,
+            None => return references,
+        };
+
+        // Get the tree and source for the file
+        let source = match self.type_checker.get_source(symbol.uri.as_str()) {
+            Some(s) => s.to_string(),
+            None => return references,
+        };
+        let tree = match self.type_checker.get_tree(symbol.uri.as_str()) {
+            Some(t) => t,
+            None => return references,
+        };
+
+        // Find all value_expr nodes that match our symbol name within the scope
+        let root = tree.root_node();
+        self.find_local_usages_in_scope(
+            root,
+            &symbol.name,
+            scope_range,
+            &source,
+            &symbol.uri,
+            &mut references,
+        );
+
+        references
+    }
+
+    /// Recursively find usages of a local variable within a scope
+    fn find_local_usages_in_scope(
+        &self,
+        node: tree_sitter::Node,
+        name: &str,
+        scope_range: &Range,
+        source: &str,
+        uri: &Url,
+        references: &mut Vec<SymbolReference>,
+    ) {
+        // Check if this node is within the scope
+        let node_range = self.node_to_lsp_range(node);
+        if !self.ranges_overlap(node_range, *scope_range) {
+            return;
+        }
+
+        // Check if this is a value_expr or value_qid that matches our name
+        if node.kind() == "value_expr" || node.kind() == "value_qid" {
+            // Get the identifier name
+            let text = &source[node.byte_range()];
+            // For value_qid, the text might be qualified (e.g., "Module.name"), we want just the last part
+            let simple_name = text.rsplit('.').next().unwrap_or(text);
+
+            if simple_name == name {
+                // Make sure this is not a qualified reference (which would be a different symbol)
+                if !text.contains('.') {
+                    references.push(SymbolReference {
+                        uri: uri.clone(),
+                        range: node_range,
+                        kind: None,
+                        is_definition: false,
+                        type_context: None,
+                    });
+                }
+            }
+        }
+        // Also check for record_base_identifier (for record updates like { record | field = value })
+        else if node.kind() == "record_base_identifier" {
+            let text = &source[node.byte_range()];
+            if text == name {
+                references.push(SymbolReference {
+                    uri: uri.clone(),
+                    range: node_range,
+                    kind: None,
+                    is_definition: false,
+                    type_context: None,
+                });
+            }
+        }
+        // Check lower_case_identifier directly (used in various contexts)
+        else if node.kind() == "lower_case_identifier" {
+            let text = &source[node.byte_range()];
+            if text == name {
+                // Check parent to determine context
+                if let Some(parent) = node.parent() {
+                    // Skip if this is a field access (the field part, not the record part)
+                    if parent.kind() == "field_access_expr" {
+                        // Only include if this is the target (record), not the field
+                        if let Some(target) = parent.child_by_field_name("target") {
+                            if target.id() != node.id() {
+                                return; // This is the field name, not the record
+                            }
+                        }
+                    }
+                    // Skip if this is a field in a record literal or pattern
+                    if parent.kind() == "field" || parent.kind() == "field_type" {
+                        return;
+                    }
+                    // Include if it's part of value_expr
+                    if parent.kind() == "value_qid" || parent.kind() == "value_expr" {
+                        references.push(SymbolReference {
+                            uri: uri.clone(),
+                            range: node_range,
+                            kind: None,
+                            is_definition: false,
+                            type_context: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Recurse into children
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.find_local_usages_in_scope(child, name, scope_range, source, uri, references);
+        }
+    }
+
+    /// Check if two ranges overlap
+    fn ranges_overlap(&self, a: Range, b: Range) -> bool {
+        // a ends before b starts
+        if a.end.line < b.start.line
+            || (a.end.line == b.start.line && a.end.character < b.start.character)
+        {
+            return false;
+        }
+        // b ends before a starts
+        if b.end.line < a.start.line
+            || (b.end.line == a.start.line && b.end.character < a.start.character)
+        {
+            return false;
+        }
+        true
     }
 
     /// Find type-aware references at a position
@@ -1054,8 +1432,8 @@ impl Workspace {
             BoundSymbolKind::FunctionParameter
             | BoundSymbolKind::CasePattern
             | BoundSymbolKind::AnonymousFunctionParameter => {
-                // For local bindings, use existing find_references (scoped search would be future work)
-                self.find_references(&symbol.name, symbol.module_name.as_deref())
+                // For local bindings, use scoped search
+                self.find_local_references(&symbol, content)
             }
             BoundSymbolKind::Type | BoundSymbolKind::TypeAlias => {
                 self.find_type_references_typed(&symbol)
@@ -1092,7 +1470,9 @@ impl Workspace {
 
         tracing::debug!(
             "find_module_aware_references: symbol={}, defining_module={}, defining_uri={}",
-            base_name, defining_module, defining_uri.as_str()
+            base_name,
+            defining_module,
+            defining_uri.as_str()
         );
 
         // 1. Get refs stored under the qualified key "DefiningModule.symbol"
@@ -1101,7 +1481,9 @@ impl Workspace {
             for r in refs {
                 tracing::debug!(
                     "  Including qualified ref (key={}): {} {:?}",
-                    qualified_key, r.uri.as_str(), r.range
+                    qualified_key,
+                    r.uri.as_str(),
+                    r.range
                 );
                 results.push(r.clone());
             }
@@ -1129,31 +1511,34 @@ impl Workspace {
                         // This ref might be from a local definition or different import
                         // Only include if the file imports this symbol from the defining module
                         let symbol_is_exposed = module.imports.iter().any(|imp| {
-                            if imp.module_name != defining_module && imp.alias.as_deref() != Some(defining_module) {
+                            if imp.module_name != defining_module
+                                && imp.alias.as_deref() != Some(defining_module)
+                            {
                                 return false;
                             }
                             match &imp.exposing {
                                 ExposingInfo::All => true,
-                                ExposingInfo::Explicit(names) => {
-                                    names.iter().any(|n| {
-                                        n == base_name ||
-                                        n.starts_with(&format!("{}(", base_name)) ||
-                                        n == &format!("{}(..)", base_name)
-                                    })
-                                }
+                                ExposingInfo::Explicit(names) => names.iter().any(|n| {
+                                    n == base_name
+                                        || n.starts_with(&format!("{}(", base_name))
+                                        || n == &format!("{}(..)", base_name)
+                                }),
                             }
                         });
 
                         if symbol_is_exposed {
                             tracing::debug!(
                                 "  Including exposed unqualified ref from {}: {:?}",
-                                r.uri.as_str(), r.range
+                                r.uri.as_str(),
+                                r.range
                             );
                             results.push(r.clone());
                         } else {
                             tracing::debug!(
                                 "  Excluding unqualified ref from {} (not exposed from {}): {:?}",
-                                r.uri.as_str(), defining_module, r.range
+                                r.uri.as_str(),
+                                defining_module,
+                                r.range
                             );
                         }
                     }
@@ -1167,14 +1552,14 @@ impl Workspace {
 
     /// Get module info for a URI
     fn get_module_at_uri(&self, uri: &Url) -> Option<&ElmModule> {
-        self.modules.values().find(|m| {
-            Url::from_file_path(&m.path).ok().as_ref() == Some(uri)
-        })
+        self.modules
+            .values()
+            .find(|m| Url::from_file_path(&m.path).ok().as_ref() == Some(uri))
     }
 
     /// Find definition of a symbol
     pub fn find_definition(&self, symbol_name: &str) -> Option<&GlobalSymbol> {
-        // Try exact match first
+        // Try exact match first in local symbols
         if let Some(symbols) = self.symbols.get(symbol_name) {
             if let Some(sym) = symbols.first() {
                 return Some(sym);
@@ -1183,8 +1568,22 @@ impl Workspace {
 
         let base_name = Self::extract_base_name(symbol_name);
 
-        // Try base name
+        // Try base name in local symbols
         if let Some(symbols) = self.symbols.get(base_name) {
+            if let Some(sym) = symbols.first() {
+                return Some(sym);
+            }
+        }
+
+        // Fall back to external packages
+        if let Some(symbols) = self.external_symbols.get(symbol_name) {
+            if let Some(sym) = symbols.first() {
+                return Some(sym);
+            }
+        }
+
+        // Try base name in external packages
+        if let Some(symbols) = self.external_symbols.get(base_name) {
             if let Some(sym) = symbols.first() {
                 return Some(sym);
             }
@@ -1259,7 +1658,10 @@ impl Workspace {
     }
 
     /// Find a node at a specific point in the tree
-    fn find_node_at_point(node: tree_sitter::Node, point: tree_sitter::Point) -> Option<tree_sitter::Node> {
+    fn find_node_at_point(
+        node: tree_sitter::Node,
+        point: tree_sitter::Point,
+    ) -> Option<tree_sitter::Node> {
         if !Self::point_in_range(point, node.start_position(), node.end_position()) {
             return None;
         }
@@ -1276,7 +1678,11 @@ impl Workspace {
         Some(node)
     }
 
-    fn point_in_range(point: tree_sitter::Point, start: tree_sitter::Point, end: tree_sitter::Point) -> bool {
+    fn point_in_range(
+        point: tree_sitter::Point,
+        start: tree_sitter::Point,
+        end: tree_sitter::Point,
+    ) -> bool {
         if point.row < start.row || point.row > end.row {
             return false;
         }
@@ -1376,12 +1782,18 @@ impl Workspace {
                     let is_function_call_target = if let Some(parent) = node.parent() {
                         if parent.kind() == "function_call_expr" {
                             // Check if this node is the first child (the function being called)
-                            parent.child(0).map(|c| c.id() == node.id()).unwrap_or(false)
+                            parent
+                                .child(0)
+                                .map(|c| c.id() == node.id())
+                                .unwrap_or(false)
                         } else if parent.kind() == "value_expr" {
                             // value_expr might wrap the identifier, check grandparent
                             if let Some(grandparent) = parent.parent() {
                                 if grandparent.kind() == "function_call_expr" {
-                                    grandparent.child(0).map(|c| c.id() == parent.id()).unwrap_or(false)
+                                    grandparent
+                                        .child(0)
+                                        .map(|c| c.id() == parent.id())
+                                        .unwrap_or(false)
                                 } else {
                                     false
                                 }
@@ -1395,7 +1807,10 @@ impl Workspace {
                                 if grandparent.kind() == "value_expr" {
                                     if let Some(great_grandparent) = grandparent.parent() {
                                         if great_grandparent.kind() == "function_call_expr" {
-                                            great_grandparent.child(0).map(|c| c.id() == grandparent.id()).unwrap_or(false)
+                                            great_grandparent
+                                                .child(0)
+                                                .map(|c| c.id() == grandparent.id())
+                                                .unwrap_or(false)
                                         } else {
                                             false
                                         }
@@ -1600,6 +2015,111 @@ impl Workspace {
 
         loop {
             match current.kind() {
+                // Function parameter: scope is the function body
+                "lower_pattern" => {
+                    // Check if we're inside a function_declaration_left (function parameter)
+                    if let Some(parent) = current.parent() {
+                        if parent.kind() == "function_declaration_left" {
+                            let name = self.node_text(source, current);
+                            let range = self.node_to_lsp_range(current);
+
+                            // Find the function body (= expr after function_declaration_left)
+                            // The structure is: value_declaration -> function_declaration_left -> ... -> expr
+                            if let Some(value_decl) = parent.parent() {
+                                // Find the expression (function body) which is the last named child
+                                let mut scope_range = None;
+                                let mut cursor = value_decl.walk();
+                                for child in value_decl.children(&mut cursor) {
+                                    // Skip function_declaration_left and "="
+                                    if child.kind() != "function_declaration_left"
+                                        && child.kind() != "="
+                                    {
+                                        scope_range = Some(self.node_to_lsp_range(child));
+                                        break;
+                                    }
+                                }
+
+                                return Some(DefinitionSymbol {
+                                    name,
+                                    kind: BoundSymbolKind::FunctionParameter,
+                                    uri: uri.clone(),
+                                    range,
+                                    type_context: None,
+                                    module_name,
+                                    scope_range,
+                                });
+                            }
+                        }
+                        // Check if we're in a case pattern
+                        else if parent.kind() == "pattern" {
+                            if let Some(case_branch) =
+                                self.find_ancestor_of_kind(parent, "case_of_branch")
+                            {
+                                let name = self.node_text(source, current);
+                                let range = self.node_to_lsp_range(current);
+
+                                // The scope is the case branch body (after the ->)
+                                let scope_range = case_branch
+                                    .child_by_field_name("expr")
+                                    .or_else(|| {
+                                        case_branch.named_children(&mut case_branch.walk()).last()
+                                    })
+                                    .map(|body| self.node_to_lsp_range(body));
+
+                                return Some(DefinitionSymbol {
+                                    name,
+                                    kind: BoundSymbolKind::CasePattern,
+                                    uri: uri.clone(),
+                                    range,
+                                    type_context: None,
+                                    module_name,
+                                    scope_range,
+                                });
+                            }
+                        }
+                        // Check if we're in an anonymous function parameter
+                        else if parent.kind() == "anonymous_function_expr" {
+                            let name = self.node_text(source, current);
+                            let range = self.node_to_lsp_range(current);
+
+                            // The scope is the entire anonymous function body
+                            let scope_range = Some(self.node_to_lsp_range(parent));
+
+                            return Some(DefinitionSymbol {
+                                name,
+                                kind: BoundSymbolKind::AnonymousFunctionParameter,
+                                uri: uri.clone(),
+                                range,
+                                type_context: None,
+                                module_name,
+                                scope_range,
+                            });
+                        }
+                        // Check if we're in a let binding
+                        else if parent.kind() == "value_declaration" {
+                            // Check if this is inside a let_in_expr
+                            if let Some(let_in) = self.find_ancestor_of_kind(parent, "let_in_expr")
+                            {
+                                let name = self.node_text(source, current);
+                                let range = self.node_to_lsp_range(current);
+
+                                // The scope is the entire let_in_expr (both bindings and body)
+                                let scope_range = Some(self.node_to_lsp_range(let_in));
+
+                                return Some(DefinitionSymbol {
+                                    name,
+                                    kind: BoundSymbolKind::FunctionParameter, // Use FunctionParameter for let bindings too
+                                    uri: uri.clone(),
+                                    range,
+                                    type_context: None,
+                                    module_name,
+                                    scope_range,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 "function_declaration_left" => {
                     let name_node = self.get_child_by_kind(current, "lower_case_identifier")?;
                     let name = self.node_text(source, name_node);
@@ -1611,6 +2131,7 @@ impl Workspace {
                         range,
                         type_context: None,
                         module_name,
+                        scope_range: None,
                     });
                 }
 
@@ -1625,16 +2146,21 @@ impl Workspace {
                         range,
                         type_context: None,
                         module_name,
+                        scope_range: None,
                     });
                 }
 
                 "type_declaration" => {
-                    let type_name_node = self.get_child_by_kind(current, "upper_case_identifier")?;
+                    let type_name_node =
+                        self.get_child_by_kind(current, "upper_case_identifier")?;
                     let type_name = self.node_text(source, type_name_node);
 
                     let type_name_range = self.node_to_lsp_range(type_name_node);
                     if self.position_in_range(
-                        Position::new(node.start_position().row as u32, node.start_position().column as u32),
+                        Position::new(
+                            node.start_position().row as u32,
+                            node.start_position().column as u32,
+                        ),
                         type_name_range,
                     ) {
                         return Some(DefinitionSymbol {
@@ -1644,16 +2170,21 @@ impl Workspace {
                             range: type_name_range,
                             type_context: None,
                             module_name,
+                            scope_range: None,
                         });
                     }
 
                     let mut cursor = current.walk();
                     for child in current.children(&mut cursor) {
                         if child.kind() == "union_variant" {
-                            let variant_name_node = self.get_child_by_kind(child, "upper_case_identifier")?;
+                            let variant_name_node =
+                                self.get_child_by_kind(child, "upper_case_identifier")?;
                             let variant_range = self.node_to_lsp_range(variant_name_node);
                             if self.position_in_range(
-                                Position::new(node.start_position().row as u32, node.start_position().column as u32),
+                                Position::new(
+                                    node.start_position().row as u32,
+                                    node.start_position().column as u32,
+                                ),
                                 variant_range,
                             ) {
                                 let variant_name = self.node_text(source, variant_name_node);
@@ -1664,6 +2195,7 @@ impl Workspace {
                                     range: variant_range,
                                     type_context: Some(type_name),
                                     module_name,
+                                    scope_range: None,
                                 });
                             }
                         }
@@ -1672,7 +2204,8 @@ impl Workspace {
                 }
 
                 "field_type" => {
-                    let field_name_node = self.get_child_by_kind(current, "lower_case_identifier")?;
+                    let field_name_node =
+                        self.get_child_by_kind(current, "lower_case_identifier")?;
                     let field_name = self.node_text(source, field_name_node);
                     let range = self.node_to_lsp_range(field_name_node);
 
@@ -1685,6 +2218,7 @@ impl Workspace {
                         range,
                         type_context: type_alias_name,
                         module_name,
+                        scope_range: None,
                     });
                 }
 
@@ -1699,17 +2233,21 @@ impl Workspace {
                         range,
                         type_context: None,
                         module_name,
+                        scope_range: None,
                     });
                 }
 
                 "union_variant" => {
-                    let variant_name_node = self.get_child_by_kind(current, "upper_case_identifier")?;
+                    let variant_name_node =
+                        self.get_child_by_kind(current, "upper_case_identifier")?;
                     let variant_name = self.node_text(source, variant_name_node);
                     let range = self.node_to_lsp_range(variant_name_node);
 
                     if let Some(type_decl) = current.parent() {
                         if type_decl.kind() == "type_declaration" {
-                            if let Some(type_name_node) = self.get_child_by_kind(type_decl, "upper_case_identifier") {
+                            if let Some(type_name_node) =
+                                self.get_child_by_kind(type_decl, "upper_case_identifier")
+                            {
                                 let type_name = self.node_text(source, type_name_node);
                                 return Some(DefinitionSymbol {
                                     name: variant_name,
@@ -1718,6 +2256,7 @@ impl Workspace {
                                     range,
                                     type_context: Some(type_name),
                                     module_name,
+                                    scope_range: None,
                                 });
                             }
                         }
@@ -1734,16 +2273,43 @@ impl Workspace {
         }
     }
 
-    fn get_child_by_kind<'a>(&self, node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    fn find_ancestor_of_kind<'a>(
+        &self,
+        node: tree_sitter::Node<'a>,
+        kind: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
+        let mut current = node.parent();
+        while let Some(parent) = current {
+            if parent.kind() == kind {
+                return Some(parent);
+            }
+            current = parent.parent();
+        }
+        None
+    }
+
+    fn get_child_by_kind<'a>(
+        &self,
+        node: tree_sitter::Node<'a>,
+        kind: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
         let mut cursor = node.walk();
-        let result = node.children(&mut cursor).find(|child| child.kind() == kind);
+        let result = node
+            .children(&mut cursor)
+            .find(|child| child.kind() == kind);
         result
     }
 
     fn node_to_lsp_range(&self, node: tree_sitter::Node) -> Range {
         Range {
-            start: Position::new(node.start_position().row as u32, node.start_position().column as u32),
-            end: Position::new(node.end_position().row as u32, node.end_position().column as u32),
+            start: Position::new(
+                node.start_position().row as u32,
+                node.start_position().column as u32,
+            ),
+            end: Position::new(
+                node.end_position().row as u32,
+                node.end_position().column as u32,
+            ),
         }
     }
 
@@ -1760,7 +2326,11 @@ impl Workspace {
         true
     }
 
-    fn find_ancestor_type_alias_name(&self, node: tree_sitter::Node, source: &str) -> Option<String> {
+    fn find_ancestor_type_alias_name(
+        &self,
+        node: tree_sitter::Node,
+        source: &str,
+    ) -> Option<String> {
         let mut current = node.parent();
         while let Some(parent) = current {
             if parent.kind() == "type_alias_declaration" {
@@ -1776,10 +2346,7 @@ impl Workspace {
     fn node_text(&self, source: &str, node: tree_sitter::Node) -> String {
         source[node.byte_range()].to_string()
     }
-
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1974,7 +2541,9 @@ value = help
         workspace.initialize().unwrap();
 
         let helper_uri = Url::from_file_path(src_dir.join("Helper.elm")).unwrap();
-        let result = workspace.move_file(&helper_uri, "src/Utils/Helper.elm").unwrap();
+        let result = workspace
+            .move_file(&helper_uri, "src/Utils/Helper.elm")
+            .unwrap();
 
         assert_eq!(result.old_module_name, "Helper");
         assert_eq!(result.new_module_name, "Utils.Helper");

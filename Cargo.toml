@@ -33,6 +33,7 @@ dashmap = "5"
 
 # Path handling
 walkdir = "2"
+dirs = "5"
 
 # Logging
 tracing = "0.1"
