@@ -1987,8 +1987,25 @@ function extractModuleName(content) {
   return match ? match[1] : "Unknown";
 }
 
+// Check if current directory or any parent has elm.json
+function isElmProject() {
+  let dir = process.cwd();
+  while (dir !== "/") {
+    if (existsSync(join(dir, "elm.json"))) {
+      return true;
+    }
+    dir = dirname(dir);
+  }
+  return false;
+}
+
 // Start the server
 async function main() {
+  // Skip loading for non-Elm projects
+  if (!isElmProject()) {
+    process.exit(0);
+  }
+
   // Check if Rust LSP binary exists
   if (!existsSync(RUST_LSP_PATH)) {
     console.error(`Rust LSP binary not found at ${RUST_LSP_PATH}`);

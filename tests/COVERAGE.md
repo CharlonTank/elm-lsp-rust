@@ -7,22 +7,22 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 | Feature | Fixture Tests | Meetdown Tests | Coverage |
 |---------|---------------|----------------|----------|
-| elm_definition | 1 | 2 | ✅ Good |
-| elm_references | 1 | 1 | ✅ Good |
-| elm_symbols | 1 | 2 | ✅ Good |
-| elm_format | 1 | 2 | ✅ Good |
-| elm_diagnostics | 2 | 2 | ✅ Excellent |
-| elm_code_actions | 1 | 1 | ✅ Good |
-| elm_apply_code_action | 1 | 0 | ⚠️ Basic |
-| elm_rename_function | 1 | 5 | ✅ Excellent |
-| elm_rename_type | 1 | 5 | ✅ Excellent |
-| elm_rename_variant | 1 | 5 | ✅ Excellent |
-| elm_rename_field | 1 | 5 | ✅ Excellent |
-| elm_move_function | 1 | 5 | ✅ Excellent |
-| elm_prepare_remove_variant | 3 | 22 | ✅ Excellent |
-| elm_remove_variant | 5 | 3 | ✅ Excellent |
-| elm_rename_file | 1 | 7 | ✅ Excellent |
-| elm_move_file | 1 | 12 | ✅ Excellent |
+| elm_definition | 0 | 2 | ✅ Good |
+| elm_references | 0 | 1 | ⚠️ Basic |
+| elm_symbols | 0 | 2 | ✅ Good |
+| elm_format | 0 | 2 | ✅ Good |
+| elm_diagnostics | 0 | 2 | ✅ Good |
+| elm_code_actions | 0 | 1 | ⚠️ Basic |
+| elm_apply_code_action | 0 | 0 | ❌ None |
+| elm_rename_function | 0 | 5 | ✅ Excellent |
+| elm_rename_type | 0 | 5 | ✅ Excellent |
+| elm_rename_variant | 0 | 5 | ✅ Excellent |
+| elm_rename_field | 0 | 5 | ✅ Excellent |
+| elm_move_function | 0 | 5 | ✅ Excellent |
+| elm_prepare_remove_variant | 0 | 22 | ✅ Excellent |
+| elm_remove_variant | 0 | 3 | ✅ Good |
+| elm_rename_file | 0 | 7 | ✅ Excellent |
+| elm_move_file | 0 | 12 | ✅ Excellent |
 
 **Legend:**
 - ✅ Excellent: 4+ test cases with comprehensive coverage
@@ -32,37 +32,10 @@ This document maps all MCP tools (features) to their corresponding tests.
 
 ---
 
-## All Tests (264 total)
+## All Tests (237 total)
 
-### Fixture Tests (27 tests)
+### Fixture Tests (0 tests)
 
-- **Add Variant** → elm_add_variant
-- **Add Variant (with case expression)** → elm_add_variant
-- **Apply Code Action** → elm_apply_code_action
-- **Code Actions** → elm_code_actions
-- **Definition** → elm_definition
-- **Diagnostics (no errors)** → elm_diagnostics
-- **Diagnostics (with error)** → elm_diagnostics
-- **Format** → elm_format
-- **Move File** → elm_move_file, elm_notify_file_changed
-- **Move Function** → elm_move_function
-- **Prepare Add Variant** → elm_prepare_add_variant
-- **Prepare Remove Variant** → elm_prepare_remove_variant
-- **Prepare Remove Variant (with usages)** → elm_prepare_remove_variant
-- **References** → elm_references
-- **Remove Field (first field)** → elm_prepare_remove_field, elm_remove_field
-- **Remove Variant** → elm_remove_variant
-- **Remove Variant (Debug.todo)** → elm_remove_variant
-- **Remove Variant (only variant)** → elm_prepare_remove_variant
-- **Remove Variant (pattern auto-remove)** → elm_remove_variant
-- **Remove Variant (useless wildcard)** → elm_remove_variant
-- **Remove Variant (variant with args)** → elm_remove_variant
-- **Rename Field** → elm_rename_field
-- **Rename File** → elm_rename_file, elm_notify_file_changed
-- **Rename Function** → elm_rename_function
-- **Rename Type Alias** → elm_rename_type
-- **Rename Variant** → elm_rename_variant
-- **Symbols** → elm_symbols
 
 ### Meetdown Tests (237 tests)
 
@@ -149,7 +122,7 @@ This document maps all MCP tools (features) to their corresponding tests.
 ## Test Execution
 
 ```bash
-# Run fixture tests (27 tests)
+# Run fixture tests (0 tests)
 node tests/run_tests.mjs
 
 # Run meetdown real-world tests (237 tests)
@@ -161,4 +134,4 @@ node tests/run_all_tests.mjs
 
 ---
 
-*Last updated: 2026-01-04 - All 264 tests passing ✅*
+*Last updated: 2026-01-04 - All 237 tests passing ✅*
