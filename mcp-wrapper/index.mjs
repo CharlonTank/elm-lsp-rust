@@ -1987,16 +1987,9 @@ function extractModuleName(content) {
   return match ? match[1] : "Unknown";
 }
 
-// Check if current directory or any parent has elm.json
+// Check if current directory has elm.json (strict check, no parent traversal)
 function isElmProject() {
-  let dir = process.cwd();
-  while (dir !== "/") {
-    if (existsSync(join(dir, "elm.json"))) {
-      return true;
-    }
-    dir = dirname(dir);
-  }
-  return false;
+  return existsSync(join(process.cwd(), "elm.json"));
 }
 
 // Start the server
