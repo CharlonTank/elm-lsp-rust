@@ -124,13 +124,18 @@ impl ElmParser {
 
         let name = name?;
         // Use the full node range so contains_position works for finding enclosing functions
-        let full_range = self.node_to_range(node);
+        let mut full_range = self.node_to_range(node);
 
         // Look up the type annotation from the pre-collected map
         let (signature, type_annotation_range) = match type_annotations.get(&name) {
             Some((sig, range)) => (Some(sig.clone()), Some(*range)),
             None => (None, None),
         };
+
+        // Extend range to include type annotation if present (for CodeLens positioning)
+        if let Some(ta_range) = type_annotation_range {
+            full_range.start = ta_range.start;
+        }
 
         let mut symbol = ElmSymbol::new(name, SymbolKind::FUNCTION, full_range);
         symbol.signature = signature;
