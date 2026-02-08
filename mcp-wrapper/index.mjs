@@ -1987,9 +1987,20 @@ function extractModuleName(content) {
   return match ? match[1] : "Unknown";
 }
 
-// Check if current directory has elm.json (strict check, no parent traversal)
+// Check if current directory or any immediate subdirectory has elm.json
+// This handles monorepo layouts where elm.json is in a subdirectory (e.g. project/client/elm.json)
 function isElmProject() {
-  return existsSync(join(process.cwd(), "elm.json"));
+  const cwd = process.cwd();
+  if (existsSync(join(cwd, "elm.json"))) return true;
+  try {
+    for (const entry of readdirSync(cwd)) {
+      const sub = join(cwd, entry);
+      if (statSync(sub).isDirectory() && existsSync(join(sub, "elm.json"))) {
+        return true;
+      }
+    }
+  } catch (_) {}
+  return false;
 }
 
 // Start the server
