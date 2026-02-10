@@ -8,7 +8,7 @@
     "elm-lsp-mcp": "./index.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "zod": "^3.23.0"
   }
 }
