@@ -646,6 +646,7 @@ impl LanguageServer for ElmLanguageServer {
                     work_done_progress_options: Default::default(),
                 })),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         CMD_MOVE_FUNCTION.to_string(),
@@ -2626,5 +2627,114 @@ impl LanguageServer for ElmLanguageServer {
                 "error": format!("Unknown command: {}", params.command)
             }))),
         }
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document.uri;
+        tracing::info!("formatting: uri={}", uri);
+
+        // Get the file path
+        let file_path = match uri.to_file_path() {
+            Ok(path) => path,
+            Err(_) => {
+                tracing::error!("Could not convert URI to file path: {}", uri);
+                return Ok(None);
+            }
+        };
+
+        // Run elm-format on the file
+        let output = match std::process::Command::new("elm-format")
+            .args(["--stdin", "--elm-version=0.19"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(mut child) => {
+                // Get current content from our document cache or read from file
+                let content = if let Some(doc) = self.documents.get(uri) {
+                    doc.text.clone()
+                } else {
+                    match std::fs::read_to_string(&file_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!("Could not read file: {}", e);
+                            return Ok(None);
+                        }
+                    }
+                };
+
+                // Write content to stdin
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    if let Err(e) = stdin.write_all(content.as_bytes()) {
+                        tracing::error!("Could not write to elm-format stdin: {}", e);
+                        return Ok(None);
+                    }
+                }
+
+                match child.wait_with_output() {
+                    Ok(out) => out,
+                    Err(e) => {
+                        tracing::error!("elm-format failed: {}", e);
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Could not spawn elm-format: {}", e);
+                return Ok(None);
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("elm-format exited with error: {}", stderr);
+            return Ok(None);
+        }
+
+        let formatted = match String::from_utf8(output.stdout) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("elm-format output was not valid UTF-8: {}", e);
+                return Ok(None);
+            }
+        };
+
+        // Get current content to compute line count
+        let current_content = if let Some(doc) = self.documents.get(uri) {
+            doc.text.clone()
+        } else {
+            match std::fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(_) => return Ok(None),
+            }
+        };
+
+        // If content is the same, no edits needed
+        if formatted == current_content {
+            return Ok(Some(vec![]));
+        }
+
+        // Return a single edit replacing the entire document
+        let line_count = current_content.lines().count() as u32;
+        let last_line_len = current_content.lines().last().map(|l| l.len()).unwrap_or(0) as u32;
+
+        Ok(Some(vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: line_count,
+                    character: last_line_len,
+                },
+            },
+            new_text: formatted,
+        }]))
     }
 }

@@ -1153,6 +1153,7 @@ async function runTests() {
   const transport = new StdioClientTransport({
     command: "node",
     args: [MCP_SERVER],
+    cwd: FIXTURE_DIR,
   });
 
   client = new Client(

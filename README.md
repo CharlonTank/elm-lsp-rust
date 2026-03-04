@@ -119,6 +119,37 @@ cargo build --release
 # Binary at: target/release/elm_lsp
 ```
 
+## Shared MCP Server (Manual HTTP)
+
+Run one MCP server yourself and point multiple Claude Code sessions to it.
+
+```bash
+cd /path/to/elm-lsp-rust
+cargo build --release
+cd mcp-wrapper && npm install
+
+cd /path/to/elm-project
+node /path/to/elm-lsp-rust/mcp-wrapper/index.mjs --http --host 127.0.0.1 --port 3333
+```
+
+Claude Code config example (in `~/.claude.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "elm-lsp-rust": {
+      "type": "http",
+      "url": "http://127.0.0.1:3333/mcp"
+    }
+  }
+}
+```
+
+Notes:
+- Start the server from your Elm project root so `elm.json` is present.
+- This shares one LSP per workspace; use the same repo across sessions.
+- Disable the stdio server entry to avoid duplicates.
+
 ## Architecture
 
 ```
