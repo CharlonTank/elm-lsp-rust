@@ -134,6 +134,62 @@ impl DisjointSet {
         }
     }
 
+    /// Check whether type variable `var_id` appears free in `ty`.
+    /// Follows substitution chains to catch transitive occurrences.
+    /// Used by `unify` to prevent creating cyclic/infinite types.
+    pub fn occurs_in(&self, var_id: u64, ty: &Type) -> bool {
+        self.occurs_in_seen(var_id, ty, &mut HashSet::new())
+    }
+
+    fn occurs_in_seen(&self, var_id: u64, ty: &Type, seen: &mut HashSet<u64>) -> bool {
+        match ty {
+            Type::Var(v) => {
+                if v.id == var_id {
+                    return true;
+                }
+                // Follow substitution chain, guarded by `seen` to stay terminating
+                if seen.insert(v.id) {
+                    if let Some(sub) = self.map.get(&v.id) {
+                        return self.occurs_in_seen(var_id, sub, seen);
+                    }
+                }
+                false
+            }
+            Type::Function(f) => {
+                f.params
+                    .iter()
+                    .any(|p| self.occurs_in_seen(var_id, p, seen))
+                    || self.occurs_in_seen(var_id, &f.ret, seen)
+            }
+            Type::MutableRecord(mr) => {
+                mr.fields
+                    .values()
+                    .any(|v| self.occurs_in_seen(var_id, v, seen))
+                    || mr
+                        .base_type
+                        .as_ref()
+                        .is_some_and(|b| self.occurs_in_seen(var_id, b, seen))
+            }
+            Type::Record(r) => {
+                r.fields
+                    .values()
+                    .any(|v| self.occurs_in_seen(var_id, v, seen))
+                    || r.base_type
+                        .as_ref()
+                        .is_some_and(|b| self.occurs_in_seen(var_id, b, seen))
+            }
+            Type::Tuple(t) => t
+                .types
+                .iter()
+                .any(|t| self.occurs_in_seen(var_id, t, seen)),
+            Type::Union(u) => u
+                .params
+                .iter()
+                .any(|p| self.occurs_in_seen(var_id, p, seen)),
+            _ => false,
+        }
+    }
+
     /// Get the internal map (for debugging/inspection)
     pub fn to_map(&self) -> &HashMap<u64, Type> {
         &self.map
