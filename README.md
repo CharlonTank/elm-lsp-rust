@@ -7,7 +7,6 @@ A fast Elm Language Server written in Rust, designed for Claude Code integration
 In Claude Code, run:
 
 ```bash
-/plugin add CharlonTank/elm-lsp-rust
 /plugin marketplace add CharlonTank/elm-lsp-plugin
 /plugin install elm-lsp-rust@CharlonTank/elm-lsp-plugin
 ```
