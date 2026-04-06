@@ -1003,6 +1003,11 @@ impl<'a> InferenceScope<'a> {
             },
             // Variable unification
             (Type::Var(v), other) | (other, Type::Var(v)) if !v.rigid => {
+                // Occurs check: setting t1 := T(t1) creates a cyclic type that
+                // makes DisjointSet::apply infinitely recurse (stack overflow).
+                if self.substitutions.occurs_in(v.id, other) {
+                    return false;
+                }
                 self.substitutions.set(v.id, other.clone());
                 true
             }
@@ -1106,5 +1111,16 @@ getName user = user.name
         let tree = parse(source);
         let result = infer_file(source, &tree, "test.elm");
         assert!(!result.field_references.is_empty());
+    }
+
+    #[test]
+    fn test_field_accessor_composition_no_crash() {
+        // Regression: .test >> (==) Nothing caused a stack overflow in apply()
+        // because unify created a cyclic substitution t1 → MutableRecord{test: t1}
+        // (infer_bin_op unified the return type of .test back into its own param type).
+        let source = "module Test exposing (..)\nx = .test >> (==) Nothing\n";
+        let tree = parse(source);
+        let _result = infer_file(source, &tree, "test://Test.elm");
+        // Reaching here without a stack overflow is the assertion
     }
 }
