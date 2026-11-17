@@ -13,6 +13,7 @@ import { join } from "path";
 import { existsSync, readdirSync, statSync } from "fs";
 import { RUST_LSP_PATH, stopClients } from "./lsp-client.mjs";
 import { tools } from "./tools.mjs";
+import { allowProjectTools } from "./workspace.mjs";
 
 const USAGE = `Usage: node index.mjs [options]
 
@@ -22,11 +23,14 @@ Serves the Elm tools over MCP.
   --http               Serve over streamable HTTP at /mcp
   --host <host>        HTTP bind address (default 127.0.0.1, or MCP_HOST)
   --port <port>        HTTP port (default 3333, or MCP_PORT)
-  --read-only          Offer only the tools that never change a file
+  --read-only          Offer only the tools that never edit a source file
+  --project-tools      Take the compiler and elm-format from a project's node_modules/.bin
+                       when they are there. Only for projects you trust: it lets a
+                       repository choose the program that diagnostics and formatting run
   --elm-projects-only  Exit at once unless the working directory holds an Elm project
   --help               Show this text`;
 
-const FLAGS = ["--stdio", "--http", "--read-only", "--elm-projects-only", "--help", "-h"];
+const FLAGS = ["--stdio", "--http", "--read-only", "--project-tools", "--elm-projects-only", "--help", "-h"];
 const OPTIONS_WITH_VALUE = ["--host", "--port"];
 
 // A command line the server does not understand
@@ -82,7 +86,7 @@ function createMcpServer({ readOnly }) {
         annotations: {
           readOnlyHint: tool.readOnly,
           destructiveHint: !tool.readOnly,
-          openWorldHint: false,
+          openWorldHint: tool.openWorld === true,
         },
       },
       // When run() throws, the SDK answers with the error message and isError set.
@@ -278,6 +282,9 @@ async function main() {
     process.exit(1);
   }
 
+  if (flags.has("--project-tools")) {
+    allowProjectTools();
+  }
   process.on("SIGTERM", shutDown);
   process.on("SIGINT", shutDown);
 

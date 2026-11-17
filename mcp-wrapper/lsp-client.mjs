@@ -8,7 +8,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { ToolError } from "./errors.mjs";
-import { pathWithLocalTools, toFileUri } from "./workspace.mjs";
+import { toFileUri, toolPath } from "./workspace.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -46,7 +46,7 @@ export class ElmLspClient {
       const child = spawn(RUST_LSP_PATH, [], {
         stdio: ["pipe", "pipe", "pipe"],
         // The server runs the Elm compiler for diagnostics and finds it on PATH
-        env: { ...process.env, RUST_LOG: "warn", PATH: pathWithLocalTools(this.workspaceRoot) },
+        env: { ...process.env, RUST_LOG: "warn", PATH: toolPath(this.workspaceRoot) },
       });
       this.process = child;
 

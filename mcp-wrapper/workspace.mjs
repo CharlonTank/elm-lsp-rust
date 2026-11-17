@@ -30,20 +30,28 @@ export function findWorkspaceRoot(filePath) {
   return null;
 }
 
-// PATH with every node_modules/.bin from dir up to the file system root put
-// first, nearest first. npm scripts find a project's own tools the same way,
-// so the Elm compiler and elm-format that a project pins win over global ones.
-export function pathWithLocalTools(dir) {
+// Whether the compiler and elm-format may come from a project's node_modules.
+// Off unless the person who starts the server or the CLI turns it on, because
+// it lets a repository choose the program that a tool runs.
+let projectToolsAllowed = false;
+
+export function allowProjectTools() {
+  projectToolsAllowed = true;
+}
+
+/**
+ * The PATH for programs that are run on behalf of the project in `dir`.
+ * After allowProjectTools(), every node_modules/.bin from `dir` up to the file
+ * system root comes first, nearest first. npm scripts find a project's own
+ * tools the same way, so the versions a project pins win over global ones.
+ */
+export function toolPath(dir) {
+  if (!projectToolsAllowed) return process.env.PATH;
+
   const bins = [];
-  let current = resolve(dir);
-  while (true) {
-    const bin = join(current, "node_modules", ".bin");
-    if (existsSync(bin)) {
-      bins.push(bin);
-    }
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
+  for (let current = resolve(dir); ; current = dirname(current)) {
+    bins.push(join(current, "node_modules", ".bin"));
+    if (dirname(current) === current) break;
   }
   return [...bins, process.env.PATH].filter(Boolean).join(delimiter);
 }

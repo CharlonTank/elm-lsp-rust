@@ -5,9 +5,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, cpSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
-import { copyFixture, REPO, runNode, tempDir } from "./support.mjs";
+import { copyFixture, installLocalTool, installTool, REPO, runNode, tempDir } from "./support.mjs";
 
 const CLI = join(REPO, "mcp-wrapper/cli.mjs");
 const cli = (args, options) => runNode(CLI, args, options);
@@ -127,6 +127,22 @@ test("a tool that fails exits 1 with one line on stderr", async (t) => {
   assert.deepEqual(mistyped, { code: 1, stdout: "", stderr: `Cannot read ${join(dir, "Starry.elm")}: it does not exist\n` });
   const directory = await cli(["symbols", "--file_path", dir]);
   assert.deepEqual(directory, { code: 1, stdout: "", stderr: `Cannot read ${dir}: it is not a file\n` });
+});
+
+test("--project-tools lets the CLI use the tools in the project's node_modules", async (t) => {
+  const project = copyFixture(t);
+  installLocalTool(project, "elm-format", 'echo formatted > "$(dirname "$0")/ran"');
+  const globalBin = tempDir(t);
+  installTool(globalBin, "elm-format", "exit 0");
+  const env = { ...process.env, PATH: `${globalBin}:/usr/bin:/bin` };
+  const ran = join(project, "node_modules/.bin/ran");
+  const format = ["elm_format", "--file_path", join(project, "src/Main.elm")];
+
+  assert.equal((await cli(format, { env })).code, 0);
+  assert.equal(existsSync(ran), false, "the global elm-format ran");
+  // The flag may stand before or after the command
+  assert.equal((await cli([...format, "--project-tools"], { env })).code, 0);
+  assert.equal(existsSync(ran), true, "the project's elm-format ran");
 });
 
 test("a wrong command line exits 2 and says what is wrong", async () => {

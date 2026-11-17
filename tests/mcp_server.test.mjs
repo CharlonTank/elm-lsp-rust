@@ -139,23 +139,43 @@ exit 1`;
 
 // Ask for diagnostics of the project's Main.elm and return the name of the compiler that answered.
 // `globalTools` maps tool names to scripts that are installed at the front of the server's PATH.
-async function compilerUsed(t, project, globalTools, restOfPath = process.env.PATH) {
+async function compilerUsed(t, project, globalTools, { restOfPath = process.env.PATH, args = [] } = {}) {
   const globalBin = tempDir(t);
   for (const [name, script] of Object.entries(globalTools)) {
     installTool(globalBin, name, script);
   }
-  const client = await connect(t, { cwd: tempDir(t), env: { PATH: `${globalBin}:${restOfPath}` } });
+  const client = await connect(t, { args, cwd: tempDir(t), env: { PATH: `${globalBin}:${restOfPath}` } });
   const diagnostics = await callTool(client, "elm_diagnostics", { file_path: join(project, "src/Main.elm") });
   return /^Line 3:1 - (.*)\n\nthis compiler ran$/.exec(diagnostics.text)?.[1] ?? diagnostics.text;
 }
 
 const globalCompilers = { elm: compilerNamed("GLOBAL ELM"), lamdera: compilerNamed("GLOBAL LAMDERA") };
 
-test("an Elm project is built with the elm in its node_modules, whatever is installed globally", async (t) => {
+test("with --project-tools an Elm project is built with the elm in its node_modules", async (t) => {
   const project = copyFixture(t);
   installLocalTool(project, "elm", compilerNamed("PROJECT ELM"));
 
-  assert.equal(await compilerUsed(t, project, globalCompilers), "PROJECT ELM");
+  assert.equal(await compilerUsed(t, project, globalCompilers, { args: ["--project-tools"] }), "PROJECT ELM");
+});
+
+test("without --project-tools nothing in a project's node_modules is run", async (t) => {
+  const project = copyFixture(t);
+  const ran = join(project, "project-tool-ran");
+  for (const tool of ["elm", "lamdera", "elm-format"]) {
+    installLocalTool(project, tool, `echo ${tool} >> "${ran}"`);
+  }
+  const globalBin = tempDir(t);
+  installTool(globalBin, "elm", "exit 0");
+  installTool(globalBin, "elm-format", "exit 0");
+  const file = join(project, "src/Main.elm");
+
+  // The read-only server is the one a harness may call without asking
+  const client = await connect(t, { args: ["--read-only"], cwd: project, env: { PATH: `${globalBin}:/usr/bin:/bin` } });
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: file }), { text: "No errors or warnings", isError: false });
+
+  const writing = await connect(t, { cwd: project, env: { PATH: `${globalBin}:/usr/bin:/bin` } });
+  assert.equal((await callTool(writing, "elm_format", { file_path: file })).isError, false);
+  assert.equal(existsSync(ran), false, "no program from the project's node_modules ran");
 });
 
 test("a Lamdera project is built with lamdera, not with the elm in its node_modules", async (t) => {
@@ -172,7 +192,8 @@ test("lamdera builds an Elm project on a machine without elm", async (t) => {
   const project = copyFixture(t);
 
   // A PATH with the system tools and no Elm compiler other than the stand-in
-  assert.equal(await compilerUsed(t, project, { lamdera: globalCompilers.lamdera }, "/usr/bin:/bin"), "GLOBAL LAMDERA");
+  const used = await compilerUsed(t, project, { lamdera: globalCompilers.lamdera }, { restOfPath: "/usr/bin:/bin" });
+  assert.equal(used, "GLOBAL LAMDERA");
 });
 
 test("only elm_diagnostics runs the compiler", async (t) => {
@@ -182,7 +203,7 @@ test("only elm_diagnostics runs the compiler", async (t) => {
   const recordingCompiler = `echo run >> "${runs}"`;
   installLocalTool(project, "lamdera", recordingCompiler);
   installLocalTool(project, "elm", recordingCompiler);
-  const client = await connect(t, { cwd: project });
+  const client = await connect(t, { args: ["--project-tools"], cwd: project });
   const utils = join(project, "src/Utils.elm");
 
   // Navigation and a refactoring open and change documents, which used to start a build each time
@@ -203,11 +224,11 @@ test("only elm_diagnostics runs the compiler", async (t) => {
   assert.equal(readFileSync(runs, "utf-8"), "run\n");
 });
 
-test("tools installed at the root of a monorepo are found from the Elm project inside it", async (t) => {
+test("with --project-tools, tools at the root of a monorepo are found from the Elm project inside it", async (t) => {
   const project = copyFixture(t, "client");
   const monorepo = dirname(project);
   installLocalTool(monorepo, "elm-format", 'echo "$@" > "$(dirname "$0")/elm-format.called"');
-  const client = await connect(t, { cwd: tempDir(t) });
+  const client = await connect(t, { args: ["--project-tools"], cwd: tempDir(t) });
 
   const file = join(project, "src/Main.elm");
   const formatted = await callTool(client, "elm_format", { file_path: file });
@@ -351,7 +372,8 @@ test("every tool tells the harness whether it writes", async (t) => {
   assert.equal(tools.length, 22);
   for (const tool of tools) {
     assert.ok(tool.title, `${tool.name} has a title`);
-    assert.equal(tool.annotations.openWorldHint, false, `${tool.name} stays on this machine`);
+    // Only the compiler reaches the network, to fetch packages it does not have yet
+    assert.equal(tool.annotations.openWorldHint, tool.name === "elm_diagnostics", `${tool.name} and the network`);
     assert.equal(
       tool.annotations.destructiveHint,
       !tool.annotations.readOnlyHint,

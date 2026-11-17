@@ -4,7 +4,8 @@
  * Each entry of `tools` has a name, a title, a description, a zod input shape
  * and a `run(args)` function that resolves with the result text. `run` throws
  * ToolError when the request cannot be carried out. `readOnly` is true for a
- * tool that never changes a file of the project.
+ * tool that never edits a source file. `openWorld` marks the one tool that
+ * can reach the network.
  */
 
 import { execFile } from "child_process";
@@ -17,7 +18,7 @@ import { z } from "zod";
 import { ToolError } from "./errors.mjs";
 import { ensureClient } from "./lsp-client.mjs";
 import { moveFunction } from "./move-function.mjs";
-import { applyWorkspaceEdit, assertInWorkspace, findWorkspaceRoot, pathWithLocalTools, toFileUri } from "./workspace.mjs";
+import { applyWorkspaceEdit, assertInWorkspace, findWorkspaceRoot, toFileUri, toolPath } from "./workspace.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -309,7 +310,7 @@ export const tools = [
     input: { file_path: elmFile() },
     async run({ file_path }) {
       // The server does not implement formatting. execFile keeps the path out of a shell.
-      const env = { ...process.env, PATH: pathWithLocalTools(dirname(resolve(file_path))) };
+      const env = { ...process.env, PATH: toolPath(dirname(resolve(file_path))) };
       try {
         await execFileAsync("elm-format", ["--yes", file_path], { env });
       } catch (error) {
@@ -323,6 +324,8 @@ export const tools = [
     name: "elm_diagnostics",
     title: "Compiler diagnostics",
     readOnly: true,
+    // The compiler downloads packages that are not in its cache yet
+    openWorld: true,
     description: "Get diagnostics (errors/warnings) for an Elm file",
     input: { file_path: elmFile() },
     async run({ file_path }) {

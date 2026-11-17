@@ -13,6 +13,7 @@ import { ToolError } from "./errors.mjs";
 import { findHarness, harnesses, installAt, renderMarkdown, renderText } from "./harnesses.mjs";
 import { stopClients } from "./lsp-client.mjs";
 import { tools } from "./tools.mjs";
+import { allowProjectTools } from "./workspace.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -28,6 +29,10 @@ const USAGE = `Usage: ${SELF} <command>
   <tool> --help                Describe one tool and its arguments
   config [<harness>]           Show how to register the MCP server with a harness
   doctor                       Check that the installation works
+
+  --project-tools              With any tool: take the compiler and elm-format from the
+                               project's node_modules/.bin when they are there. Only for
+                               projects you trust.
 
 The elm_ prefix of a tool name is optional. Lines and characters are 0-indexed.
 Exit status: 0 on success, 1 when the tool fails, 2 when the command line is wrong.`;
@@ -166,7 +171,11 @@ async function runTool(name, argv) {
   }
 }
 
-async function main([command, ...rest]) {
+async function main(argv) {
+  if (argv.includes("--project-tools")) {
+    allowProjectTools();
+  }
+  const [command, ...rest] = argv.filter((argument) => argument !== "--project-tools");
   switch (command) {
     case undefined:
     case "help":
