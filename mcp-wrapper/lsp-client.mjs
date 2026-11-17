@@ -16,6 +16,9 @@ export const RUST_LSP_PATH = join(__dirname, "..", "target", "release", "elm_lsp
 
 const REQUEST_TIMEOUT_MS = 30000;
 
+// Separates the headers of an LSP message from its body
+const HEADER_END = "\r\n\r\n";
+
 // One language server process, bound to one Elm project for its whole life.
 export class ElmLspClient {
   constructor(workspaceRoot) {
@@ -23,7 +26,7 @@ export class ElmLspClient {
     this.process = null;
     this.requestId = 0;
     this.pendingRequests = new Map(); // id -> { resolve, reject, timer }
-    this.buffer = "";
+    this.buffer = Buffer.alloc(0);
     this.documentVersions = {};
     // Called once the process is gone, however it ended
     this.onExit = () => {};
@@ -43,8 +46,8 @@ export class ElmLspClient {
       });
       this.process = child;
 
-      child.stdout.on("data", (data) => {
-        this.handleData(data.toString());
+      child.stdout.on("data", (chunk) => {
+        this.handleData(chunk);
       });
 
       child.stderr.on("data", (data) => {
@@ -80,22 +83,30 @@ export class ElmLspClient {
     });
   }
 
-  handleData(data) {
-    this.buffer += data;
+  // Take a chunk of the server's output and settle every request whose
+  // response is now complete. Content-Length counts bytes, and a chunk can end
+  // inside a multi-byte character, so the stream stays a Buffer until a whole
+  // message is in.
+  handleData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
 
     while (true) {
-      const headerMatch = this.buffer.match(
-        /Content-Length: (\d+)\r?\n\r?\n/
-      );
-      if (!headerMatch) break;
+      const headerEnd = this.buffer.indexOf(HEADER_END);
+      if (headerEnd === -1) break;
 
-      const length = parseInt(headerMatch[1]);
-      const headerEnd = headerMatch.index + headerMatch[0].length;
+      const bodyStart = headerEnd + HEADER_END.length;
+      const header = this.buffer.toString("ascii", 0, headerEnd);
+      const length = Number(/Content-Length: (\d+)/i.exec(header)?.[1]);
+      if (Number.isNaN(length)) {
+        // Not an LSP header. Skip it, or the loop would never get past it.
+        this.buffer = this.buffer.subarray(bodyStart);
+        continue;
+      }
 
-      if (this.buffer.length < headerEnd + length) break;
+      if (this.buffer.length < bodyStart + length) break;
 
-      const content = this.buffer.slice(headerEnd, headerEnd + length);
-      this.buffer = this.buffer.slice(headerEnd + length);
+      const content = this.buffer.toString("utf8", bodyStart, bodyStart + length);
+      this.buffer = this.buffer.subarray(bodyStart + length);
 
       try {
         const message = JSON.parse(content);

@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { ensureClient, stopClients } from "../mcp-wrapper/lsp-client.mjs";
+import { ElmLspClient, ensureClient, stopClients } from "../mcp-wrapper/lsp-client.mjs";
 import { copyFixture } from "./support.mjs";
 
 async function symbolNames(client, file) {
@@ -67,4 +67,45 @@ test("a request in flight fails when the language server dies", async (t) => {
   client.process.kill("SIGKILL");
   await assert.rejects(answer, /LSP process exited/);
   assert.equal(client.pendingRequests.size, 0);
+});
+
+// An LSP response as the server writes it: a byte count, a blank line, the JSON body.
+function frame(message) {
+  const body = JSON.stringify(message);
+  return Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+}
+
+// A client that is not attached to a process, with requests 1..count pending.
+function clientAwaiting(count) {
+  const client = new ElmLspClient("/unused");
+  const answers = [];
+  for (let id = 1; id <= count; id++) {
+    client.pendingRequests.set(id, { resolve: (result) => answers.push(result), reject: assert.fail });
+  }
+  return { client, answers };
+}
+
+test("a response with non-ASCII text arrives whole, however it is chunked", () => {
+  const { client, answers } = clientAwaiting(1);
+  const bytes = frame({ jsonrpc: "2.0", id: 1, result: "café ☕" });
+
+  // Cut inside the two-byte "é"
+  const cut = bytes.indexOf("é") + 1;
+  client.handleData(bytes.subarray(0, cut));
+  assert.deepEqual(answers, []);
+  client.handleData(bytes.subarray(cut));
+  assert.deepEqual(answers, ["café ☕"]);
+});
+
+test("responses that share a chunk are told apart", () => {
+  const { client, answers } = clientAwaiting(2);
+  const first = frame({ jsonrpc: "2.0", id: 1, result: "naïve" });
+  const second = frame({ jsonrpc: "2.0", id: 2, result: "plain" });
+  const stream = Buffer.concat([first, second]);
+
+  // The first chunk ends inside the header of the second response
+  client.handleData(stream.subarray(0, first.length + 5));
+  assert.deepEqual(answers, ["naïve"]);
+  client.handleData(stream.subarray(first.length + 5));
+  assert.deepEqual(answers, ["naïve", "plain"]);
 });

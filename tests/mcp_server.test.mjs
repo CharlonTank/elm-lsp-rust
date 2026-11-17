@@ -5,6 +5,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { callTool, connect, copyFixture, runNode, SERVER, tempDir } from "./support.mjs";
 
@@ -44,6 +45,35 @@ test("one server serves several projects in turn", async (t) => {
       isError: false,
     });
   }
+});
+
+test("an answer that quotes non-ASCII source text arrives", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Drinks.elm");
+  writeFileSync(
+    file,
+    [
+      "module Drinks exposing (Drink(..), favourite)",
+      "",
+      "",
+      "type Drink",
+      "    = Coffee",
+      "    | Tea",
+      "",
+      "",
+      "favourite : ( Drink, String )",
+      "favourite =",
+      '    ( Coffee, "café crème ☕" )',
+      "",
+    ].join("\n")
+  );
+  const client = await connect(t, { cwd: project });
+
+  // The preview quotes the line that constructs Coffee
+  const preview = await callTool(client, "elm_prepare_remove_variant", { file_path: file, line: 4, character: 6 });
+  assert.equal(preview.isError, false, preview.text);
+  assert.match(preview.text, /Variant: Coffee/);
+  assert.match(preview.text, /café crème ☕/);
 });
 
 test("the server tells the client how to address files", async (t) => {
