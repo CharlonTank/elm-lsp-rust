@@ -110,15 +110,23 @@ test("--args passes arguments that flags cannot express", async (t) => {
   assert.match(readFileSync(main, "utf-8"), /Clear ->\n\s+Debug\.todo/);
 });
 
-test("a tool that fails exits 1 with its message on stderr", async (t) => {
-  const stray = join(tempDir(t), "Stray.elm");
+test("a tool that fails exits 1 with one line on stderr", async (t) => {
+  const dir = tempDir(t);
+  const stray = join(dir, "Stray.elm");
+  writeFileSync(stray, "module Stray exposing (x)\n");
 
-  const failed = await cli(["definition", "--file_path", stray, "--line", "0", "--character", "0"]);
-  assert.deepEqual(failed, {
+  const outsideAnyProject = await cli(["definition", "--file_path", stray, "--line", "0", "--character", "0"]);
+  assert.deepEqual(outsideAnyProject, {
     code: 1,
     stdout: "",
     stderr: `No elm.json found in the parent directories of ${stray}\n`,
   });
+
+  // The most likely mistake from a shell is a mistyped path
+  const mistyped = await cli(["symbols", "--file_path", join(dir, "Starry.elm")]);
+  assert.deepEqual(mistyped, { code: 1, stdout: "", stderr: `Cannot read ${join(dir, "Starry.elm")}: it does not exist\n` });
+  const directory = await cli(["symbols", "--file_path", dir]);
+  assert.deepEqual(directory, { code: 1, stdout: "", stderr: `Cannot read ${dir}: it is not a file\n` });
 });
 
 test("a wrong command line exits 2 and says what is wrong", async () => {

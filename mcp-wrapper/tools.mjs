@@ -63,6 +63,10 @@ const noProject = (absPath) => `No elm.json found in the parent directories of $
 // Resolve a file to an absolute path and the Elm project that contains it.
 function locate(filePath) {
   const absPath = resolve(filePath);
+  const stats = statSync(absPath, { throwIfNoEntry: false });
+  if (!stats?.isFile()) {
+    throw new ToolError(`Cannot read ${absPath}: ${stats ? "it is not a file" : "it does not exist"}`);
+  }
   const workspaceRoot = findWorkspaceRoot(absPath);
   if (!workspaceRoot) {
     throw new ToolError(noProject(absPath));

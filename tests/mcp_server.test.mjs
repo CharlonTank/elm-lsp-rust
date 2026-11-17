@@ -324,13 +324,22 @@ test("a request that cannot be carried out is a tool error", async (t) => {
   const project = copyFixture(t);
   const client = await connect(t, { cwd: project });
 
-  const outsideAnyProject = await callTool(client, "elm_definition", {
-    file_path: join(tempDir(t), "Stray.elm"),
-    line: 0,
-    character: 0,
+  const stray = join(tempDir(t), "Stray.elm");
+  writeFileSync(stray, "module Stray exposing (x)\n");
+  const outsideAnyProject = await callTool(client, "elm_definition", { file_path: stray, line: 0, character: 0 });
+  assert.deepEqual(outsideAnyProject, { text: `No elm.json found in the parent directories of ${stray}`, isError: true });
+
+  const missing = join(project, "src/Missing.elm");
+  for (const tool of ["elm_symbols", "elm_diagnostics"]) {
+    assert.deepEqual(await callTool(client, tool, { file_path: missing }), {
+      text: `Cannot read ${missing}: it does not exist`,
+      isError: true,
+    });
+  }
+  assert.deepEqual(await callTool(client, "elm_symbols", { file_path: join(project, "src") }), {
+    text: `Cannot read ${join(project, "src")}: it is not a file`,
+    isError: true,
   });
-  assert.equal(outsideAnyProject.isError, true);
-  assert.match(outsideAnyProject.text, /No elm\.json found/);
 
   // Utils.elm line 16 defines `helper`, so the expected name does not match
   const staleName = await callTool(client, "elm_rename_function", {
