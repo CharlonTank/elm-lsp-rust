@@ -11,17 +11,26 @@ import { randomUUID } from "crypto";
 import { createServer as createHttpServer } from "http";
 import { join } from "path";
 import { existsSync, readdirSync, statSync } from "fs";
+import { ToolError } from "./errors.mjs";
 import { RUST_LSP_PATH } from "./lsp-client.mjs";
-import { registerTools } from "./tools.mjs";
+import { tools } from "./tools.mjs";
 
-// Create MCP server with new API
 // Short name to avoid 64-char limit on tool names
 function createMcpServer() {
   const server = new McpServer(
     { name: "elr", version: "0.3.0" },
     { capabilities: { tools: {} } }
   );
-  registerTools(server);
+  for (const tool of tools) {
+    server.tool(tool.name, tool.description, tool.input, async (args) => {
+      try {
+        return { content: [{ type: "text", text: await tool.run(args) }] };
+      } catch (error) {
+        if (!(error instanceof ToolError)) throw error;
+        return { content: [{ type: "text", text: error.message }] };
+      }
+    });
+  }
   return server;
 }
 
