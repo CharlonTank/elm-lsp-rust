@@ -19,8 +19,9 @@ needs_rebuild() {
     return 0
   fi
 
-  # Rebuild if Cargo.toml is newer than the binary
+  # Rebuild if the manifest or the locked dependency versions are newer than the binary
   [ "$ROOT/Cargo.toml" -nt "$BINARY" ] && return 0
+  [ "$ROOT/Cargo.lock" -nt "$BINARY" ] && return 0
 
   return 1
 }
