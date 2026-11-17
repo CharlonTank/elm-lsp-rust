@@ -4,7 +4,10 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { execFile } from "child_process";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { execFile, spawn } from "child_process";
+import { once } from "events";
+import { createServer } from "net";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
@@ -71,4 +74,29 @@ export function installTool(bin, name, script) {
 // Put an executable shell script into dir/node_modules/.bin, as npm does for a project's tools.
 export function installLocalTool(dir, name, script) {
   installTool(join(dir, "node_modules", ".bin"), name, script);
+}
+
+// A TCP port that was free a moment ago.
+async function freePort() {
+  const probe = createServer().listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const { port } = probe.address();
+  probe.close();
+  return port;
+}
+
+// Start the MCP server over HTTP and connect a client to it.
+export async function connectOverHttp(t, { args = [] } = {}) {
+  const port = await freePort();
+  const server = spawn(process.execPath, [SERVER, "--http", "--port", String(port), ...args], {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  t.after(() => server.kill());
+  // The server prints its address once it accepts connections
+  await once(server.stdout, "data");
+
+  const client = new Client({ name: "elm-lsp-rust-test", version: "1.0.0" }, { capabilities: {} });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  t.after(() => client.close());
+  return { client, server };
 }

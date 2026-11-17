@@ -7,7 +7,18 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { callTool, connect, copyFixture, installLocalTool, installTool, runNode, SERVER, tempDir } from "./support.mjs";
+import { once } from "node:events";
+import {
+  callTool,
+  connect,
+  connectOverHttp,
+  copyFixture,
+  installLocalTool,
+  installTool,
+  runNode,
+  SERVER,
+  tempDir,
+} from "./support.mjs";
 
 test("the server works from a directory that is not an Elm project", async (t) => {
   const project = copyFixture(t);
@@ -253,6 +264,55 @@ test("the server tells the client how to address files", async (t) => {
   const client = await connect(t, { cwd: tempDir(t) });
   assert.match(client.getInstructions(), /absolute file paths/);
   assert.match(client.getInstructions(), /0-indexed/);
+});
+
+test("an option the server does not know stops it with the usage text", async () => {
+  const cases = [
+    // A typo of --read-only must not start a server that offers every tool
+    [["--readonly"], /^Unknown option "--readonly"\n\nUsage: node index\.mjs \[options\]/],
+    [["--http", "--stdio"], /^Choose either --http or --stdio/],
+    [["--http", "--port"], /^--port needs a value/],
+    [["--http", "--port", "seventy"], /^Invalid port: seventy/],
+  ];
+  for (const [args, message] of cases) {
+    const result = await runNode(SERVER, args);
+    assert.equal(result.code, 2, args.join(" "));
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, message);
+  }
+
+  const help = await runNode(SERVER, ["--help"]);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /^Usage: node index\.mjs \[options\]/);
+});
+
+test("the server ends when the harness closes its input, language servers included", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  // Starts a language server, whose process would otherwise keep the server alive
+  await callTool(client, "elm_symbols", { file_path: join(project, "src/Types.elm") });
+  const server = client.transport._process;
+
+  const closed = once(server, "close");
+  server.stdin.end();
+  const [code, signal] = await closed;
+  assert.deepEqual({ code, signal }, { code: 0, signal: null });
+});
+
+test("the HTTP server offers the same tools and honours --read-only", async (t) => {
+  const project = copyFixture(t);
+  const { client, server } = await connectOverHttp(t, { args: ["--read-only"] });
+
+  const { tools } = await client.listTools();
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), READ_ONLY_TOOLS);
+  const symbols = await callTool(client, "elm_symbols", { file_path: join(project, "src/Types.elm") });
+  assert.match(symbols.text, /Found 4 symbols/);
+  assert.equal((await callTool(client, "elm_format", { file_path: join(project, "src/Types.elm") })).isError, true);
+
+  // SIGTERM ends it although a language server is running
+  const closed = once(server, "close");
+  server.kill("SIGTERM");
+  assert.deepEqual(await closed, [0, null]);
 });
 
 test("--elm-projects-only exits quietly outside an Elm project", async (t) => {

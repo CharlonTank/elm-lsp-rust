@@ -11,7 +11,7 @@ import { randomUUID } from "crypto";
 import { createServer as createHttpServer } from "http";
 import { join } from "path";
 import { existsSync, readdirSync, statSync } from "fs";
-import { RUST_LSP_PATH } from "./lsp-client.mjs";
+import { RUST_LSP_PATH, stopClients } from "./lsp-client.mjs";
 import { tools } from "./tools.mjs";
 
 const USAGE = `Usage: node index.mjs [options]
@@ -25,6 +25,36 @@ Serves the Elm tools over MCP.
   --read-only          Offer only the tools that never change a file
   --elm-projects-only  Exit at once unless the working directory holds an Elm project
   --help               Show this text`;
+
+const FLAGS = ["--stdio", "--http", "--read-only", "--elm-projects-only", "--help", "-h"];
+const OPTIONS_WITH_VALUE = ["--host", "--port"];
+
+// A command line the server does not understand
+class UsageError extends Error {}
+
+/**
+ * Read the command line into { flags, values }. An option the server does not
+ * know is an error: a mistyped --read-only must not start a server that writes.
+ */
+function parseArguments(argv) {
+  const flags = new Set();
+  const values = {};
+  for (let i = 0; i < argv.length; i++) {
+    const argument = argv[i];
+    if (FLAGS.includes(argument)) {
+      flags.add(argument);
+    } else if (OPTIONS_WITH_VALUE.includes(argument)) {
+      if (argv[i + 1] === undefined) throw new UsageError(`${argument} needs a value`);
+      values[argument] = argv[++i];
+    } else {
+      throw new UsageError(`Unknown option "${argument}"`);
+    }
+  }
+  if (flags.has("--http") && flags.has("--stdio")) {
+    throw new UsageError("Choose either --http or --stdio (not both).");
+  }
+  return { flags, values };
+}
 
 // Sent to the client when it connects. Harnesses show it to the model.
 const INSTRUCTIONS =
@@ -76,14 +106,6 @@ function isElmProject() {
     }
   } catch (_) {}
   return false;
-}
-
-function getArgValue(args, flag) {
-  const index = args.indexOf(flag);
-  if (index === -1 || index + 1 >= args.length) {
-    return null;
-  }
-  return args[index + 1];
 }
 
 function normalizeHeaderValue(value) {
@@ -219,26 +241,24 @@ async function startHttpServer({ host, port, serverOptions }) {
   });
 }
 
+// Stop the language servers and exit. Their processes would otherwise keep this one alive.
+function shutDown() {
+  stopClients();
+  process.exit(0);
+}
+
 // Start the server
 async function main() {
-  const args = process.argv.slice(2);
-  if (args.includes("--help") || args.includes("-h")) {
+  const { flags, values } = parseArguments(process.argv.slice(2));
+  if (flags.has("--help") || flags.has("-h")) {
     console.log(USAGE);
     return;
   }
 
-  const wantsHttp = args.includes("--http");
-  const wantsStdio = args.includes("--stdio");
-  const serverOptions = { readOnly: args.includes("--read-only") };
-
-  if (wantsHttp && wantsStdio) {
-    console.error("Choose either --http or --stdio (not both).");
-    process.exit(1);
-  }
-
-  const transportMode = wantsHttp
+  const serverOptions = { readOnly: flags.has("--read-only") };
+  const transportMode = flags.has("--http")
     ? "http"
-    : wantsStdio
+    : flags.has("--stdio")
       ? "stdio"
       : process.env.MCP_TRANSPORT === "http"
         ? "http"
@@ -247,24 +267,26 @@ async function main() {
   // Every tool finds its project from the file it is given, so the server can
   // start anywhere. The Claude Code plugin starts it in every project the user
   // opens, and passes this flag to keep the tools out of the ones without Elm.
-  if (args.includes("--elm-projects-only") && !isElmProject()) {
+  if (flags.has("--elm-projects-only") && !isElmProject()) {
     process.exit(0);
   }
 
   // Check if Rust LSP binary exists
   if (!existsSync(RUST_LSP_PATH)) {
     console.error(`Rust LSP binary not found at ${RUST_LSP_PATH}`);
-    console.error("Run 'cargo build --release' first");
+    console.error("Run scripts/setup.sh to build it");
     process.exit(1);
   }
 
+  process.on("SIGTERM", shutDown);
+  process.on("SIGINT", shutDown);
+
   if (transportMode === "http") {
-    const host = getArgValue(args, "--host") || process.env.MCP_HOST || "127.0.0.1";
-    const portRaw = getArgValue(args, "--port") || process.env.MCP_PORT || "3333";
+    const host = values["--host"] || process.env.MCP_HOST || "127.0.0.1";
+    const portRaw = values["--port"] || process.env.MCP_PORT || "3333";
     const port = Number.parseInt(portRaw, 10);
     if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-      console.error(`Invalid port: ${portRaw}`);
-      process.exit(1);
+      throw new UsageError(`Invalid port: ${portRaw}`);
     }
     await startHttpServer({ host, port, serverOptions });
     return;
@@ -273,9 +295,15 @@ async function main() {
   const server = createMcpServer(serverOptions);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // A harness ends a stdio server by closing its input
+  process.stdin.on("end", shutDown);
 }
 
 main().catch((err) => {
+  if (err instanceof UsageError) {
+    console.error(`${err.message}\n\n${USAGE}`);
+    process.exit(2);
+  }
   console.error(err);
   process.exit(1);
 });
