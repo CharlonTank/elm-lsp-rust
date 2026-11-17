@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { writeFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { callTool, connect, copyFixture, runNode, SERVER, tempDir } from "./support.mjs";
 
@@ -46,6 +46,46 @@ test("one server serves several projects in turn", async (t) => {
     });
   }
 });
+
+// The second name holds characters that URL libraries disagree about escaping
+for (const name of ["my élm project", "a~b [1] ^c|d #2 50%"]) {
+  test(`a project in a directory called "${name}" works end to end`, async (t) => {
+    const project = copyFixture(t, name);
+    const client = await connect(t, { cwd: tempDir(t) });
+    const utils = join(project, "src/Utils.elm");
+    const original = readFileSync(utils, "utf-8");
+
+    const definition = await callTool(client, "elm_definition", {
+      file_path: join(project, "src/Main.elm"),
+      line: 30,
+      character: 13,
+    });
+    assert.equal(definition.text, `Definition at ${join(project, "src/Types.elm")}:12:0`);
+
+    // formatName is defined in Utils.elm and used in Main.elm
+    const rename = await callTool(client, "elm_rename_function", {
+      file_path: utils,
+      line: 6,
+      character: 0,
+      old_name: "formatName",
+      newName: "shout",
+    });
+    assert.equal(rename.isError, false, rename.text);
+    assert.match(rename.text, /Applied 6 edit\(s\) in 2 file\(s\)/);
+    assert.match(readFileSync(utils, "utf-8"), /^shout name =$/m);
+    assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /shout model\.user\.name/);
+    // A second refactoring works on what the first one wrote
+    const back = await callTool(client, "elm_rename_function", {
+      file_path: utils,
+      line: 6,
+      character: 0,
+      old_name: "shout",
+      newName: "formatName",
+    });
+    assert.match(back.text, /Applied 6 edit\(s\) in 2 file\(s\)/);
+    assert.equal(readFileSync(utils, "utf-8"), original);
+  });
+}
 
 test("an answer that quotes non-ASCII source text arrives", async (t) => {
   const project = copyFixture(t);

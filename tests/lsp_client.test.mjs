@@ -9,10 +9,13 @@ import { test } from "node:test";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { ElmLspClient, ensureClient, stopClients } from "../mcp-wrapper/lsp-client.mjs";
+import { toFileUri } from "../mcp-wrapper/workspace.mjs";
 import { copyFixture } from "./support.mjs";
 
+const uriOf = (...segments) => toFileUri(join(...segments));
+
 async function symbolNames(client, file) {
-  const uri = `file://${file}`;
+  const uri = uriOf(file);
   await client.openDocument(uri, readFileSync(file, "utf-8"));
   return (await client.getSymbols(uri)).map((symbol) => symbol.name);
 }
@@ -50,7 +53,7 @@ test("a language server that died is replaced on the next call", async (t) => {
   const exited = once(first.process, "close");
   first.process.kill();
   await exited;
-  await assert.rejects(first.getSymbols(`file://${project}/src/Types.elm`), /language server has stopped/);
+  await assert.rejects(first.getSymbols(uriOf(project, "src/Types.elm")), /language server has stopped/);
 
   const second = await ensureClient(project);
   assert.notEqual(second, first);
@@ -63,7 +66,7 @@ test("a request in flight fails when the language server dies", async (t) => {
 
   // Freeze the server first, so it cannot answer before it is killed
   client.process.kill("SIGSTOP");
-  const answer = client.getSymbols(`file://${client.workspaceRoot}/src/Types.elm`);
+  const answer = client.getSymbols(uriOf(client.workspaceRoot, "src/Types.elm"));
   client.process.kill("SIGKILL");
   await assert.rejects(answer, /LSP process exited/);
   assert.equal(client.pendingRequests.size, 0);

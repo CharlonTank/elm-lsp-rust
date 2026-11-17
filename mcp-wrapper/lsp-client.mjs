@@ -7,6 +7,7 @@ import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
+import { toFileUri } from "./workspace.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -72,7 +73,7 @@ export class ElmLspClient {
 
       this.sendRequest("initialize", {
         processId: process.pid,
-        rootUri: `file://${this.workspaceRoot}`,
+        rootUri: toFileUri(this.workspaceRoot),
         capabilities: {},
       })
         .then(() => this.sendNotification("initialized", {}))

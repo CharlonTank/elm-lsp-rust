@@ -10,6 +10,7 @@
 import { join } from "path";
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "fs";
 import { ToolError } from "./errors.mjs";
+import { toFileUri } from "./workspace.mjs";
 
 function extractModuleName(content) {
   const match = content.match(/^module\s+([A-Za-z.]+)\s+exposing/m);
@@ -137,7 +138,7 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
   const sourceModuleName = extractModuleName(sourceContent);
   const targetModuleName = extractModuleName(targetContent);
 
-  const targetUri = `file://${absTargetModule}`;
+  const targetUri = toFileUri(absTargetModule);
   await client.openDocument(targetUri, targetContent);
   const targetSymbols = await client.getSymbols(targetUri);
   if (targetSymbols?.some((s) => s.name === functionName)) {
@@ -203,7 +204,7 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
   }
 
   for (const filePath of changedFiles) {
-    await client.notifyFileChanged(`file://${filePath}`, readFileSync(filePath, "utf-8"));
+    await client.notifyFileChanged(toFileUri(filePath), readFileSync(filePath, "utf-8"));
   }
 
   return (

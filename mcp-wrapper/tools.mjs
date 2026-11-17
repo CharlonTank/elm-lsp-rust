@@ -11,12 +11,13 @@ import { execFile } from "child_process";
 import { mkdir, rename } from "fs/promises";
 import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync, writeFileSync } from "fs";
+import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { z } from "zod";
 import { ToolError } from "./errors.mjs";
 import { ensureClient } from "./lsp-client.mjs";
 import { moveFunction } from "./move-function.mjs";
-import { applyWorkspaceEdit, assertInWorkspace, findWorkspaceRoot } from "./workspace.mjs";
+import { applyWorkspaceEdit, assertInWorkspace, findWorkspaceRoot, toFileUri } from "./workspace.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,7 +74,7 @@ function locate(filePath) {
 async function connect(filePath) {
   const { absPath, workspaceRoot } = locate(filePath);
   const client = await ensureClient(workspaceRoot);
-  return { client, uri: `file://${absPath}`, absPath, workspaceRoot };
+  return { client, uri: toFileUri(absPath), absPath, workspaceRoot };
 }
 
 // connect(), then send the file's current content to the language server.
@@ -88,7 +89,7 @@ async function openElmFile(filePath) {
 const symbolLine = (symbol) => symbol.location?.range?.start?.line ?? symbol.range?.start?.line;
 
 function formatLocation({ uri, range }) {
-  return `${new URL(uri).pathname}:${range.start.line + 1}:${range.start.character}`;
+  return `${fileURLToPath(uri)}:${range.start.line + 1}:${range.start.character}`;
 }
 
 // Refactoring tools take the symbol's current name next to its position, so a
