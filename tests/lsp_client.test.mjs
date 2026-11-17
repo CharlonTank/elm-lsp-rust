@@ -10,7 +10,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { ElmLspClient, ensureClient, stopClients } from "../mcp-wrapper/lsp-client.mjs";
 import { toFileUri } from "../mcp-wrapper/workspace.mjs";
-import { copyFixture } from "./support.mjs";
+import { copyFixture, tempDir } from "./support.mjs";
 
 const uriOf = (...segments) => toFileUri(join(...segments));
 
@@ -70,6 +70,22 @@ test("a request in flight fails when the language server dies", async (t) => {
   client.process.kill("SIGKILL");
   await assert.rejects(answer, /LSP process exited/);
   assert.equal(client.pendingRequests.size, 0);
+});
+
+test("the language server answers the handshake on every start", async (t) => {
+  // In an empty directory the server has nothing to index and answers at once.
+  // With tokio 1.52.0 such an answer stayed unwritten about once in a hundred
+  // starts, until the next message arrived (tokio-rs/tokio#8056).
+  const emptyDir = tempDir(t);
+  const start = async () => {
+    const client = new ElmLspClient(emptyDir);
+    await client.start();
+    client.stop();
+  };
+
+  for (let batch = 0; batch < 50; batch++) {
+    await Promise.all(Array.from({ length: 8 }, start));
+  }
 });
 
 // An LSP response as the server writes it: a byte count, a blank line, the JSON body.
