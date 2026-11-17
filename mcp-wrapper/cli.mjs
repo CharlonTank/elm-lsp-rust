@@ -5,11 +5,16 @@
  * tool and exits.
  */
 
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
 import { z } from "zod";
 import { runChecks } from "./doctor.mjs";
 import { ToolError } from "./errors.mjs";
+import { findHarness, harnesses, installAt, renderMarkdown, renderText } from "./harnesses.mjs";
 import { stopClients } from "./lsp-client.mjs";
 import { tools } from "./tools.mjs";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // How this script was started, so the usage text can be pasted as it is
 const SELF = `node ${process.argv[1]}`;
@@ -21,6 +26,7 @@ const USAGE = `Usage: ${SELF} <command>
                                  elm_references --file_path src/Main.elm --line 10 --character 4
   <tool> --args '<json>'       Run one tool with all arguments as a JSON object
   <tool> --help                Describe one tool and its arguments
+  config [<harness>]           Show how to register the MCP server with a harness
   doctor                       Check that the installation works
 
 The elm_ prefix of a tool name is optional. Lines and characters are 0-indexed.
@@ -129,6 +135,22 @@ function listTools(asJson) {
   return tools.map((tool) => `${tool.name.padEnd(width)}  ${tool.description}`).join("\n");
 }
 
+function showConfig([target]) {
+  if (target === "--markdown") {
+    return renderMarkdown().trimEnd();
+  }
+  if (target === undefined) {
+    const width = Math.max(...harnesses.map((harness) => harness.id.length));
+    const rows = harnesses.map((harness) => `  ${harness.id.padEnd(width)}  ${harness.name}`);
+    return [`Usage: ${SELF} config <harness>`, "", ...rows].join("\n");
+  }
+  const harness = findHarness(target);
+  if (!harness) {
+    throw new UsageError(`Unknown harness "${target}". Known: ${harnesses.map((h) => h.id).join(", ")}`);
+  }
+  return renderText(harness, installAt(REPO_ROOT));
+}
+
 async function runTool(name, argv) {
   const tool = findTool(name);
   if (!tool) {
@@ -153,6 +175,8 @@ async function main([command, ...rest]) {
       return USAGE;
     case "tools":
       return listTools(rest.includes("--json"));
+    case "config":
+      return showConfig(rest);
     case "doctor": {
       const { report, ok } = await runChecks();
       if (!ok) process.exitCode = 1;
