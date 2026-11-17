@@ -19,7 +19,7 @@ Fast Elm Language Server (Rust) for coding agents. **Not for text editors** - ag
 ## Commands
 
 ```bash
-cargo build --release
+cargo build --release --locked
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs  # tools and language server
 node --test tests/*.test.mjs                                            # MCP server, CLI, harness config
 node mcp-wrapper/cli.mjs config --markdown > docs/harnesses.md          # after editing harnesses.mjs

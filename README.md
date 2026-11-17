@@ -83,7 +83,7 @@ node mcp-wrapper/cli.mjs elm_references --file_path src/Main.elm --line 10 --cha
 node mcp-wrapper/cli.mjs elm_rename_function --help
 ```
 
-`--args '<json>'` passes all arguments as one JSON object. The exit status is 0 on success, 1 when the tool fails and 2 when the command line is wrong.
+`--args '<json>'` passes all arguments as one JSON object. `--project-tools` works as it does for the server, see below. The exit status is 0 on success, 1 when the tool fails and 2 when the command line is wrong.
 
 ## Server options
 
@@ -91,13 +91,18 @@ Append these to the arguments of `mcp-wrapper/index.mjs` in your harness's confi
 
 | Option | Effect |
 |--------|--------|
-| `--read-only` | Offers only the nine tools that never change a file |
+| `--read-only` | Offers only the nine tools that never edit a source file |
+| `--project-tools` | Takes the compiler and `elm-format` from a project's `node_modules/.bin` when they are there. Only for projects you trust |
 | `--elm-projects-only` | Exits at once unless the working directory, or a direct child of it, holds an `elm.json`. The harness then lists the server as not connected |
 | `--http`, `--host`, `--port` | Serves over HTTP instead of stdio, see [Shared MCP server](#shared-mcp-server-manual-http) |
 
-Every tool carries MCP annotations. Nine are marked read-only: `elm_definition`, `elm_references`, `elm_symbols`, `elm_diagnostics`, `elm_code_actions`, `elm_notify_file_changed` and the three `elm_prepare_*` previews. The rest are marked as writing to disk, so a harness that reads annotations asks before it runs them.
+Every tool carries MCP annotations. Nine are marked read-only: `elm_definition`, `elm_references`, `elm_symbols`, `elm_diagnostics`, `elm_code_actions`, `elm_notify_file_changed` and the three `elm_prepare_*` previews. The rest are marked as writing to disk, so a harness that reads annotations asks before it runs them. Read-only means that a tool edits no source file. `elm_diagnostics` still runs the compiler, which writes its cache to `elm-stuff/` and downloads packages it does not have yet.
 
-Diagnostics build a Lamdera project with `lamdera` and any other project with `elm`. That compiler and `elm-format` are taken from the project's `node_modules/.bin` when they are there, and from `PATH` otherwise.
+Diagnostics build a Lamdera project with `lamdera` and any other project with `elm`. The compiler and `elm-format` are found on `PATH`. With `--project-tools`, a copy in the project's `node_modules/.bin` wins, so a project gets the versions it pins. That also lets a repository choose the program these tools run, and a harness may call `elm_diagnostics` without asking first. Turn it on only for code you trust.
+
+The server starts one language server per Elm project on first use and stops it after ten idle minutes. Before each call the language server compares its index with the project on disk. It reads the source files that changed, and builds the index anew when `elm.json` did, so edits an agent made with its own tools are taken into account. While `elm.json`, a source file or a directory of source files cannot be read, every tool that asks the language server fails and says which one and why, because a refactoring would pass over what the index could not read. `elm_format` asks it nothing, and formats the file it is given all the same.
+
+The index covers the source directories that `elm.json` lists, also one outside the project root such as `../shared`. A file in none of them, such as a test, joins the index when a tool is called on that file. The language server then follows it like the rest, also when it builds its index anew. Such a file is gone from the index again once the language server restarts, which it does after ten idle minutes. Until a tool is called on the file again, a rename does not reach it. From the command line every call starts a new language server, so a rename there never reaches a file outside the source directories.
 
 ## Features
 
@@ -166,7 +171,7 @@ type Route = HomeRoute | AboutRoute | NewRoute
 
 ```bash
 cd elm-lsp-rust
-cargo build --release
+cargo build --release --locked
 
 # Binary at: target/release/elm_lsp
 ```

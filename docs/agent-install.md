@@ -53,5 +53,6 @@ Run every command from the root of the clone.
 
 Append these to the server's arguments in the config entry.
 
-- `--read-only` offers only the nine tools that never change a file. Use it when the harness approves every tool call without asking.
+- `--read-only` offers only the nine tools that never edit a source file. Use it when the harness approves every tool call without asking.
+- `--project-tools` takes the Elm compiler and `elm-format` from the project's `node_modules/.bin` when they are there, so the project gets the versions it pins. It lets a repository choose the program that `elm_diagnostics` and `elm_format` run. Add it only when the user trusts the projects the server will see, and ask first.
 - `--elm-projects-only` makes the server exit at once unless its working directory, or a direct child of it, holds an `elm.json`. Use it for a user-level registration when the Elm tools should stay out of other projects. In those projects the harness lists the server as not connected.
