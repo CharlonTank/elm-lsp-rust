@@ -116,12 +116,15 @@ impl ElmLanguageServer {
         col: usize,
         include_dots: bool,
     ) -> Option<String> {
-        if col >= line.len() {
+        // `col` counts characters, so compare it to the character count.
+        // `line.len()` is the byte length, which is larger on a line with
+        // non-ASCII text and let a column past the end index out of bounds.
+        let chars: Vec<char> = line.chars().collect();
+        if col >= chars.len() {
             return None;
         }
 
         // Find word boundaries
-        let chars: Vec<char> = line.chars().collect();
         let mut start = col;
         let mut end = col;
 

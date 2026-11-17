@@ -207,6 +207,20 @@ test("an answer that quotes non-ASCII source text arrives", async (t) => {
   assert.match(preview.text, /café crème ☕/);
 });
 
+test("a position past the end of a line with non-ASCII text gets an answer", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Accents.elm");
+  writeFileSync(
+    file,
+    ["module Accents exposing (label)", "", "", "label : String", "label =", '    "ééééééééé" ++ "x"', ""].join("\n")
+  );
+  const client = await connect(t, { cwd: project });
+
+  // Line 5 has 22 characters and 31 bytes. Character 25 is past its end but within its byte length.
+  const pastTheEnd = await callTool(client, "elm_definition", { file_path: file, line: 5, character: 25 });
+  assert.deepEqual(pastTheEnd, { text: "No definition found", isError: false });
+});
+
 test("the server tells the client how to address files", async (t) => {
   const client = await connect(t, { cwd: tempDir(t) });
   assert.match(client.getInstructions(), /absolute file paths/);
