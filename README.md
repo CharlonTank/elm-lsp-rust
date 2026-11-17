@@ -1,8 +1,31 @@
 # elm-lsp-rust
 
-A fast Elm Language Server written in Rust, designed for Claude Code integration via MCP.
+A fast Elm language server written in Rust, for coding agents. It gives an agent go to definition, find references, compiler diagnostics and project-wide refactorings as tools, over MCP or from the command line.
+
+It runs in Claude Code, OpenAI Codex, GitHub Copilot, Cursor, OpenCode, Gemini CLI, Google Antigravity, Cline, Goose, Pi and Oh My Pi as an MCP server. Aider, which has no MCP client, and any script can call the same tools through the command-line interface.
 
 ## Installation
+
+### Any harness
+
+```bash
+git clone https://github.com/CharlonTank/elm-lsp-rust
+cd elm-lsp-rust
+scripts/setup.sh                            # builds the language server (needs cargo and Node.js 18+)
+node mcp-wrapper/cli.mjs doctor             # checks the installation
+node mcp-wrapper/cli.mjs config             # lists the harnesses
+node mcp-wrapper/cli.mjs config <harness>   # prints where your harness keeps its MCP servers and the entry to add
+```
+
+[docs/harnesses.md](docs/harnesses.md) shows the entry for every harness. A harness that is not listed needs a stdio MCP server whose command is `node` and whose argument is the absolute path of `mcp-wrapper/index.mjs`.
+
+You can also hand the job to your agent. Tell it to read [docs/agent-install.md](docs/agent-install.md) in the clone and follow it.
+
+The server starts from any directory, and each tool finds the Elm project from the file it is given. One registration therefore serves every Elm project on the machine. Pass absolute file paths, because a relative path resolves against the directory the harness started the server in.
+
+The skill in `skills/elm-refactoring` tells an agent when and how to use the tools. Copy it into the project's `.agents/skills/` directory, or `.claude/skills/` for Claude Code.
+
+### Claude Code plugin
 
 In Claude Code, run:
 
@@ -13,7 +36,7 @@ In Claude Code, run:
 
 Then restart Claude Code.
 
-### How Plugin Distribution Works
+#### How plugin distribution works
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -48,6 +71,34 @@ When you install via the marketplace:
 3. Claude Code clones this repo and runs `scripts/setup.sh` to build the Rust binary
 4. The MCP wrapper (`mcp-wrapper/index.mjs`) becomes available as `elm-lsp-rust` MCP server
 
+The plugin starts the server with `--elm-projects-only`, so its tools appear only in sessions opened in an Elm project.
+
+## Command line
+
+`mcp-wrapper/cli.mjs` runs one tool per call and prints its result. Each argument of the tool is a flag.
+
+```bash
+node mcp-wrapper/cli.mjs tools                 # list the tools, add --json for their arguments
+node mcp-wrapper/cli.mjs elm_references --file_path src/Main.elm --line 10 --character 4
+node mcp-wrapper/cli.mjs elm_rename_function --help
+```
+
+`--args '<json>'` passes all arguments as one JSON object. The exit status is 0 on success, 1 when the tool fails and 2 when the command line is wrong.
+
+## Server options
+
+Append these to the arguments of `mcp-wrapper/index.mjs` in your harness's config.
+
+| Option | Effect |
+|--------|--------|
+| `--read-only` | Offers only the nine tools that never change a file |
+| `--elm-projects-only` | Exits at once unless the working directory, or a direct child of it, holds an `elm.json`. The harness then lists the server as not connected |
+| `--http`, `--host`, `--port` | Serves over HTTP instead of stdio, see [Shared MCP server](#shared-mcp-server-manual-http) |
+
+Every tool carries MCP annotations. Nine are marked read-only: `elm_definition`, `elm_references`, `elm_symbols`, `elm_diagnostics`, `elm_code_actions`, `elm_notify_file_changed` and the three `elm_prepare_*` previews. The rest are marked as writing to disk, so a harness that reads annotations asks before it runs them.
+
+The Elm compiler and `elm-format` are looked up in the project's `node_modules/.bin` first and on `PATH` second.
+
 ## Features
 
 | Feature | Description |
@@ -66,7 +117,7 @@ When you install via the marketplace:
 | **Remove Field** | Remove field from type alias with usage updates |
 | **ERD Generation** | Generate Mermaid diagrams from types |
 
-### Smart Type Operations
+### Smart type operations
 
 **Add Variant**: Adds a variant and automatically inserts branches in all case expressions:
 ```elm
@@ -84,7 +135,7 @@ type Route = HomeRoute | AboutRoute | NewRoute
 - Updates record literals, patterns, and field accesses
 - Replaces field access with `Debug.todo`
 
-## MCP Tools (22 total)
+## MCP tools (22 total)
 
 | Tool | Description |
 |------|-------------|
@@ -111,7 +162,7 @@ type Route = HomeRoute | AboutRoute | NewRoute
 | `elm_remove_field` | Remove field from type alias |
 | `elm_generate_erd` | Generate Mermaid ERD from type |
 
-## Building from Source
+## Building from source
 
 ```bash
 cd elm-lsp-rust
@@ -120,16 +171,12 @@ cargo build --release
 # Binary at: target/release/elm_lsp
 ```
 
-## Shared MCP Server (Manual HTTP)
+## Shared MCP server (manual HTTP)
 
-Run one MCP server yourself and point multiple Claude Code sessions to it.
+Run one MCP server yourself and point multiple sessions to it.
 
 ```bash
-cd /path/to/elm-lsp-rust
-cargo build --release
-cd mcp-wrapper && npm install
-
-cd /path/to/elm-project
+/path/to/elm-lsp-rust/scripts/setup.sh
 node /path/to/elm-lsp-rust/mcp-wrapper/index.mjs --http --host 127.0.0.1 --port 3333
 ```
 
@@ -147,8 +194,7 @@ Claude Code config example (in `~/.claude.json` or project `.mcp.json`):
 ```
 
 Notes:
-- Start the server from your Elm project root so `elm.json` is present.
-- This shares one LSP per workspace; use the same repo across sessions.
+- Sessions share one language server per Elm project.
 - Disable the stdio server entry to avoid duplicates.
 
 ## Architecture
@@ -160,19 +206,24 @@ elm-lsp-rust/
 ├── src/
 │   ├── main.rs          # Entry point
 │   ├── server.rs        # LSP protocol (tower-lsp)
-│   ├── workspace.rs     # Indexing, symbols, refactoring
+│   ├── workspace/       # Indexing, symbols, refactoring
 │   ├── document.rs      # Single file representation
 │   ├── parser.rs        # Tree-sitter parsing
 │   └── diagnostics.rs   # Elm compiler integration
-├── mcp-wrapper/         # MCP server (Node.js)
-│   └── index.mjs        # Translates MCP <-> LSP
+├── mcp-wrapper/         # Agent-facing layer (Node.js)
+│   ├── tools.mjs        # The tools, defined once
+│   ├── index.mjs        # MCP server over stdio or HTTP
+│   ├── cli.mjs          # Command-line interface
+│   ├── lsp-client.mjs   # Runs the Rust binary, one per Elm project
+│   └── harnesses.mjs    # Registration for each harness
+├── docs/                # Harness configuration, agent install guide
 ├── scripts/
-│   └── setup.sh         # Build script run on plugin install
-├── skills/              # Claude Code skills
-└── tests/               # Test suite (228 tests)
+│   └── setup.sh         # Builds the language server
+├── skills/              # Agent skill
+└── tests/               # Test suites
 ```
 
-### Key Design Decisions
+### Key design decisions
 
 1. **Workspace Indexing**: Indexes all `.elm` files at startup for immediate cross-file operations
 2. **Tree-sitter Parsing**: Fast, incremental, error-tolerant parsing
@@ -182,9 +233,14 @@ elm-lsp-rust/
 ## Testing
 
 ```bash
-# Run all tests (228 tests total)
+# Tools and language server, against the fixture and a real project
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
+
+# MCP server, command line and harness configuration
+node --test tests/*.test.mjs
 ```
+
+The suites need `elm` 0.19.1 and `elm-format` on `PATH`. The meetdown suite also needs `lamdera`.
 
 Tests cover: definition, references, symbols, rename (functions, types, variants, fields), diagnostics, code actions, move function, file rename/move, add/remove variant, add/remove field, and ERD generation.
 

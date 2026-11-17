@@ -1,11 +1,11 @@
 ---
 name: elm-refactoring
-description: Use elm-lsp-rust MCP tools for all Elm code operations. Provides navigation, refactoring, diagnostics, and smart variant removal - prefer these over manual text edits.
+description: Use the elm-lsp-rust tools (MCP server or command line) for all Elm code operations. Provides navigation, refactoring, diagnostics, and smart variant removal - prefer these over manual text edits.
 ---
 
 # Elm Language Server Tools (elm-lsp-rust)
 
-When working in an Elm project (has `elm.json`), use these MCP tools instead of manual text search/replace or file edits.
+When working in an Elm project (has `elm.json`), use these tools instead of manual text search/replace or file edits.
 
 ## When to Use This Skill
 
@@ -15,9 +15,15 @@ Activate automatically when the user works with Elm code and needs to:
 - **Maintain types**: Add/remove variants, add/remove fields
 - **Check code**: Get diagnostics, code actions, format
 
-## Available MCP Tools
+## Available Tools
 
-All tools use the `mcp__plugin_elm-lsp-rust_elr__` prefix.
+The names below are the tools' own names. Your harness adds a prefix of its own, for example `mcp__plugin_elm-lsp-rust_elr__elm_definition` for the Claude Code plugin or `mcp__elm-lsp__elm_definition` for a server registered as `elm-lsp`.
+
+If your harness has no MCP client, run the same tools from a shell. Each argument becomes a flag, and `tools` lists them all:
+
+```bash
+node /path/to/elm-lsp-rust/mcp-wrapper/cli.mjs elm_references --file_path /path/to/File.elm --line 28 --character 5
+```
 
 ---
 
@@ -254,8 +260,10 @@ type_name: "BackendModel"
 
 ## Important Notes
 
-- **Line/character positions are 0-indexed**
-- **Always verify compilation** after refactoring: `lamdera make src/Frontend.elm src/Backend.elm`
+- **Line/character positions are 0-indexed** in arguments. Locations in results have 1-indexed lines.
+- **Pass absolute file paths.** A relative path resolves against the directory the server was started in.
+- **Refactoring tools write to disk.** Read a file again before editing it further.
+- **Always verify compilation** after refactoring with `elm_diagnostics` or the project's build command
 - These tools understand Elm's scope and semantics - safer than text replace
 
 ## Why Use LSP Tools
