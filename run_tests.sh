@@ -15,3 +15,4 @@ fi
 # Run tests
 echo "Running elm-lsp-rust test suite..."
 node run_tests.mjs
+node --test *.test.mjs
