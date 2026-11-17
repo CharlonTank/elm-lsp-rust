@@ -18,6 +18,16 @@ mod variant_operations;
 pub use erd::*;
 pub use types::*;
 
+/// True when an elm.json lists a lamdera/* package, directly or indirectly.
+/// That makes the project a Lamdera project.
+pub fn depends_on_lamdera(elm_json: &serde_json::Value) -> bool {
+    ["direct", "indirect"].iter().any(|kind| {
+        elm_json["dependencies"][kind]
+            .as_object()
+            .is_some_and(|packages| packages.keys().any(|name| name.starts_with("lamdera/")))
+    })
+}
+
 /// Represents an Elm module with its symbols and metadata
 #[derive(Debug, Clone)]
 pub struct ElmModule {
@@ -211,7 +221,7 @@ impl Workspace {
         let json: serde_json::Value = serde_json::from_str(content)?;
 
         // Detect Lamdera project by checking for lamdera/* dependencies
-        self.is_lamdera_project = self.detect_lamdera_project(&json);
+        self.is_lamdera_project = depends_on_lamdera(&json);
         if self.is_lamdera_project {
             tracing::info!("Detected Lamdera project");
         }
@@ -369,33 +379,6 @@ impl Workspace {
         }
 
         Ok(())
-    }
-
-    /// Detect if this is a Lamdera project by checking for lamdera dependencies
-    fn detect_lamdera_project(&self, elm_json: &serde_json::Value) -> bool {
-        // Check direct dependencies for lamdera/* packages
-        if let Some(deps) = elm_json.get("dependencies") {
-            if let Some(direct) = deps.get("direct") {
-                if let Some(obj) = direct.as_object() {
-                    for key in obj.keys() {
-                        if key.starts_with("lamdera/") {
-                            return true;
-                        }
-                    }
-                }
-            }
-            // Also check indirect dependencies
-            if let Some(indirect) = deps.get("indirect") {
-                if let Some(obj) = indirect.as_object() {
-                    for key in obj.keys() {
-                        if key.starts_with("lamdera/") {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
     }
 
     /// Index all .elm files in the workspace

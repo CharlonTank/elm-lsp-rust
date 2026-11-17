@@ -3,6 +3,8 @@ use std::path::Path;
 use std::process::Command;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
+use crate::workspace::depends_on_lamdera;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum ElmMakeOutput {
@@ -97,6 +99,23 @@ impl DiagnosticsProvider {
         }
     }
 
+    /// The compilers to try for a project, in order. A Lamdera project needs
+    /// `lamdera`. Every other project is built with `elm`, the compiler its
+    /// elm.json names and its node_modules may pin. The other one is a
+    /// stand-in for a machine that has only one of them installed.
+    fn compilers_for(workspace_root: &str) -> [&'static str; 2] {
+        let is_lamdera = std::fs::read_to_string(Path::new(workspace_root).join("elm.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|elm_json| depends_on_lamdera(&elm_json));
+
+        if is_lamdera {
+            ["lamdera", "elm"]
+        } else {
+            ["elm", "lamdera"]
+        }
+    }
+
     /// Run elm/lamdera make and get diagnostics
     pub fn get_diagnostics(&self, file_uri: &Url) -> Vec<Diagnostic> {
         let file_path = match file_uri.to_file_path() {
@@ -114,22 +133,21 @@ impl DiagnosticsProvider {
             None => return vec![],
         };
 
-        // Try lamdera first, fall back to elm
-        let output = Command::new("lamdera")
-            .args(["make", &file_path, "--report=json", "--output=/dev/null"])
-            .current_dir(&workspace_root)
-            .output()
-            .or_else(|_| {
-                Command::new("elm")
+        // The first compiler that can be started does the build
+        let output = Self::compilers_for(&workspace_root)
+            .into_iter()
+            .find_map(|compiler| {
+                Command::new(compiler)
                     .args(["make", &file_path, "--report=json", "--output=/dev/null"])
                     .current_dir(&workspace_root)
                     .output()
+                    .ok()
             });
 
         let output = match output {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::error!("Failed to run elm/lamdera make: {}", e);
+            Some(o) => o,
+            None => {
+                tracing::error!("Failed to run elm/lamdera make: neither could be started");
                 return vec![];
             }
         };
@@ -237,5 +255,45 @@ mod tests {
         assert!(diagnostics[0].message.contains("NAMING ERROR"));
         assert_eq!(diagnostics[0].range.start.line, 2); // 0-indexed
         assert_eq!(diagnostics[0].range.start.character, 6); // 0-indexed
+    }
+
+    fn project_with(elm_json: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("elm.json"), elm_json).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_plain_elm_project_is_built_with_elm_first() {
+        let dir = project_with(
+            r#"{"dependencies":{"direct":{"elm/core":"1.0.5"},"indirect":{"elm/json":"1.1.3"}}}"#,
+        );
+        let root = dir.path().to_str().unwrap();
+
+        assert_eq!(DiagnosticsProvider::compilers_for(root), ["elm", "lamdera"]);
+    }
+
+    #[test]
+    fn test_lamdera_project_is_built_with_lamdera_first() {
+        let direct =
+            project_with(r#"{"dependencies":{"direct":{"lamdera/core":"1.0.0"},"indirect":{}}}"#);
+        let indirect =
+            project_with(r#"{"dependencies":{"direct":{},"indirect":{"lamdera/codecs":"1.0.0"}}}"#);
+
+        for dir in [&direct, &indirect] {
+            let root = dir.path().to_str().unwrap();
+            assert_eq!(DiagnosticsProvider::compilers_for(root), ["lamdera", "elm"]);
+        }
+    }
+
+    #[test]
+    fn test_unreadable_elm_json_falls_back_to_elm_first() {
+        let missing = tempfile::tempdir().unwrap();
+        let broken = project_with("not json");
+
+        for dir in [&missing, &broken] {
+            let root = dir.path().to_str().unwrap();
+            assert_eq!(DiagnosticsProvider::compilers_for(root), ["elm", "lamdera"]);
+        }
     }
 }

@@ -61,10 +61,14 @@ export function runNode(script, args = [], { cwd, env } = {}) {
   });
 }
 
-// Put an executable shell script into dir/node_modules/.bin, as npm does for a project's tools.
-export function installLocalTool(dir, name, script) {
-  const bin = join(dir, "node_modules", ".bin");
+// Put an executable shell script called `name` into the directory `bin`.
+export function installTool(bin, name, script) {
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
   chmodSync(join(bin, name), 0o755);
+}
+
+// Put an executable shell script into dir/node_modules/.bin, as npm does for a project's tools.
+export function installLocalTool(dir, name, script) {
+  installTool(join(dir, "node_modules", ".bin"), name, script);
 }

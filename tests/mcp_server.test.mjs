@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { callTool, connect, copyFixture, installLocalTool, runNode, SERVER, tempDir } from "./support.mjs";
+import { callTool, connect, copyFixture, installLocalTool, installTool, runNode, SERVER, tempDir } from "./support.mjs";
 
 test("the server works from a directory that is not an Elm project", async (t) => {
   const project = copyFixture(t);
@@ -119,21 +119,49 @@ test("a rename that only changes letter case goes through", async (t) => {
   assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /^import UTILS exposing/m);
 });
 
-// A compiler that rejects every build with one fixed error for the file it was given ($2).
-const FAILING_COMPILER = `cat >&2 <<JSON
-{"type":"compile-errors","errors":[{"path":"$2","name":"Main","problems":[{"title":"PINNED COMPILER","region":{"start":{"line":3,"column":1},"end":{"line":3,"column":7}},"message":["reported by the project's own compiler"]}]}]}
+// A compiler stand-in. It rejects every build with one error that carries its
+// own name as the title, for the file it was given ($2).
+const compilerNamed = (name) => `cat >&2 <<JSON
+{"type":"compile-errors","errors":[{"path":"$2","name":"Main","problems":[{"title":"${name}","region":{"start":{"line":3,"column":1},"end":{"line":3,"column":7}},"message":["this compiler ran"]}]}]}
 JSON
 exit 1`;
 
-test("diagnostics come from the compiler in the project's node_modules", async (t) => {
-  const project = copyFixture(t);
-  // The server asks for lamdera first and elm second, so stand in for both
-  installLocalTool(project, "lamdera", FAILING_COMPILER);
-  installLocalTool(project, "elm", FAILING_COMPILER);
-  const client = await connect(t, { cwd: tempDir(t) });
-
+// Ask for diagnostics of the project's Main.elm and return the name of the compiler that answered.
+// `globalTools` maps tool names to scripts that are installed at the front of the server's PATH.
+async function compilerUsed(t, project, globalTools, restOfPath = process.env.PATH) {
+  const globalBin = tempDir(t);
+  for (const [name, script] of Object.entries(globalTools)) {
+    installTool(globalBin, name, script);
+  }
+  const client = await connect(t, { cwd: tempDir(t), env: { PATH: `${globalBin}:${restOfPath}` } });
   const diagnostics = await callTool(client, "elm_diagnostics", { file_path: join(project, "src/Main.elm") });
-  assert.equal(diagnostics.text, "Line 3:1 - PINNED COMPILER\n\nreported by the project's own compiler");
+  return /^Line 3:1 - (.*)\n\nthis compiler ran$/.exec(diagnostics.text)?.[1] ?? diagnostics.text;
+}
+
+const globalCompilers = { elm: compilerNamed("GLOBAL ELM"), lamdera: compilerNamed("GLOBAL LAMDERA") };
+
+test("an Elm project is built with the elm in its node_modules, whatever is installed globally", async (t) => {
+  const project = copyFixture(t);
+  installLocalTool(project, "elm", compilerNamed("PROJECT ELM"));
+
+  assert.equal(await compilerUsed(t, project, globalCompilers), "PROJECT ELM");
+});
+
+test("a Lamdera project is built with lamdera, not with the elm in its node_modules", async (t) => {
+  const project = copyFixture(t);
+  const elmJson = JSON.parse(readFileSync(join(project, "elm.json"), "utf-8"));
+  elmJson.dependencies.direct["lamdera/core"] = "1.0.0";
+  writeFileSync(join(project, "elm.json"), JSON.stringify(elmJson));
+  installLocalTool(project, "elm", compilerNamed("PROJECT ELM"));
+
+  assert.equal(await compilerUsed(t, project, globalCompilers), "GLOBAL LAMDERA");
+});
+
+test("lamdera builds an Elm project on a machine without elm", async (t) => {
+  const project = copyFixture(t);
+
+  // A PATH with the system tools and no Elm compiler other than the stand-in
+  assert.equal(await compilerUsed(t, project, { lamdera: globalCompilers.lamdera }, "/usr/bin:/bin"), "GLOBAL LAMDERA");
 });
 
 test("only elm_diagnostics runs the compiler", async (t) => {

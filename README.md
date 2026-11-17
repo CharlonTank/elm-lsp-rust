@@ -97,7 +97,7 @@ Append these to the arguments of `mcp-wrapper/index.mjs` in your harness's confi
 
 Every tool carries MCP annotations. Nine are marked read-only: `elm_definition`, `elm_references`, `elm_symbols`, `elm_diagnostics`, `elm_code_actions`, `elm_notify_file_changed` and the three `elm_prepare_*` previews. The rest are marked as writing to disk, so a harness that reads annotations asks before it runs them.
 
-The Elm compiler and `elm-format` are looked up in the project's `node_modules/.bin` first and on `PATH` second.
+Diagnostics build a Lamdera project with `lamdera` and any other project with `elm`. That compiler and `elm-format` are taken from the project's `node_modules/.bin` when they are there, and from `PATH` otherwise.
 
 ## Features
 
