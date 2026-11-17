@@ -11,7 +11,6 @@ import { randomUUID } from "crypto";
 import { createServer as createHttpServer } from "http";
 import { join } from "path";
 import { existsSync, readdirSync, statSync } from "fs";
-import { ToolError } from "./errors.mjs";
 import { RUST_LSP_PATH } from "./lsp-client.mjs";
 import { tools } from "./tools.mjs";
 
@@ -22,14 +21,10 @@ function createMcpServer() {
     { capabilities: { tools: {} } }
   );
   for (const tool of tools) {
-    server.tool(tool.name, tool.description, tool.input, async (args) => {
-      try {
-        return { content: [{ type: "text", text: await tool.run(args) }] };
-      } catch (error) {
-        if (!(error instanceof ToolError)) throw error;
-        return { content: [{ type: "text", text: error.message }] };
-      }
-    });
+    // When run() throws, the SDK answers with the error message and isError set.
+    server.tool(tool.name, tool.description, tool.input, async (args) => ({
+      content: [{ type: "text", text: await tool.run(args) }],
+    }));
   }
   return server;
 }
