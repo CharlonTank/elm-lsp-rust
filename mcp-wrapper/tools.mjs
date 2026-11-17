@@ -10,7 +10,7 @@
 import { execFile } from "child_process";
 import { mkdir, rename } from "fs/promises";
 import { dirname, join, resolve } from "path";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { z } from "zod";
@@ -174,6 +174,15 @@ function renameTool({ kind, command, description, fileDescription, validateNewNa
   };
 }
 
+// True when path exists and is not the file at `original`. On a file system
+// that ignores case, Api.elm and API.elm name one file, and renaming it from
+// one spelling to the other must stay possible.
+function isAnotherFile(path, original) {
+  if (!existsSync(path)) return false;
+  const [found, own] = [statSync(path), statSync(original)];
+  return found.ino !== own.ino || found.dev !== own.dev;
+}
+
 // Shared by elm_rename_file and elm_move_file. The server returns the edits
 // for the module declaration and every import, then the file itself is moved
 // here. `verb` and `done` word the messages, as in "rename" and "Renamed".
@@ -189,6 +198,10 @@ async function relocateFile({ file_path, command, target, verb, done }) {
   }
   if (!result.changes) {
     return "No changes needed";
+  }
+  // rename() below would replace another file without a word
+  if (isAnotherFile(result.newPath, result.oldPath)) {
+    throw new ToolError(`Cannot ${verb} file: ${result.newPath} already exists`);
   }
 
   const { fileCount, totalEdits } = await applyEdits(result.changes, client, workspaceRoot);

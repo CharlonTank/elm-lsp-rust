@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { callTool, connect, copyFixture, installLocalTool, runNode, SERVER, tempDir } from "./support.mjs";
 
@@ -86,6 +86,38 @@ for (const name of ["my élm project", "a~b [1] ^c|d #2 50%"]) {
     assert.equal(readFileSync(utils, "utf-8"), original);
   });
 }
+
+test("a file is never renamed or moved onto an existing file", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const utils = join(project, "src/Utils.elm");
+  const types = join(project, "src/Types.elm");
+  const before = { utils: readFileSync(utils, "utf-8"), types: readFileSync(types, "utf-8") };
+
+  const renamed = await callTool(client, "elm_rename_file", { file_path: utils, new_name: "Types.elm" });
+  assert.deepEqual(renamed, { text: `Cannot rename file: ${types} already exists`, isError: true });
+
+  const moved = await callTool(client, "elm_move_file", { file_path: utils, target_path: "src/Types.elm" });
+  assert.deepEqual(moved, { text: `Cannot move file: ${types} already exists`, isError: true });
+
+  // Neither file was touched, not even by the import edits that precede the move
+  assert.deepEqual({ utils: readFileSync(utils, "utf-8"), types: readFileSync(types, "utf-8") }, before);
+});
+
+test("a rename that only changes letter case goes through", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+
+  // On a file system that ignores case, UTILS.elm already "exists" as Utils.elm
+  const renamed = await callTool(client, "elm_rename_file", {
+    file_path: join(project, "src/Utils.elm"),
+    new_name: "UTILS.elm",
+  });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.ok(readdirSync(join(project, "src")).includes("UTILS.elm"));
+  assert.match(readFileSync(join(project, "src/UTILS.elm"), "utf-8"), /^module UTILS exposing/);
+  assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /^import UTILS exposing/m);
+});
 
 // A compiler that rejects every build with one fixed error for the file it was given ($2).
 const FAILING_COMPILER = `cat >&2 <<JSON
