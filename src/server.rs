@@ -46,7 +46,7 @@ impl ElmLanguageServer {
         }
     }
 
-    async fn on_change(&self, uri: Url, text: String, version: i32) {
+    fn on_change(&self, uri: Url, text: String, version: i32) {
         tracing::info!("on_change: uri={}", uri);
         let doc = Document::new(uri.clone(), text.clone(), version);
 
@@ -67,10 +67,9 @@ impl ElmLanguageServer {
             self.documents.insert(uri.clone(), doc);
         }
 
-        let diagnostics = self.get_diagnostics(&uri);
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
+        // No diagnostics are published here. They come from the Elm compiler,
+        // which can take seconds, and every tool call opens its document
+        // first. Clients ask for them with the elm.getDiagnostics command.
     }
 
     fn get_diagnostics(&self, uri: &Url) -> Vec<Diagnostic> {
@@ -703,14 +702,14 @@ impl LanguageServer for ElmLanguageServer {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         let version = params.text_document.version;
-        self.on_change(uri, text, version).await;
+        self.on_change(uri, text, version);
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let version = params.text_document.version;
         if let Some(change) = params.content_changes.into_iter().next() {
-            self.on_change(uri, change.text, version).await;
+            self.on_change(uri, change.text, version);
         }
     }
 

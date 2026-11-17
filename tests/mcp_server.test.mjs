@@ -136,6 +136,34 @@ test("diagnostics come from the compiler in the project's node_modules", async (
   assert.equal(diagnostics.text, "Line 3:1 - PINNED COMPILER\n\nreported by the project's own compiler");
 });
 
+test("only elm_diagnostics runs the compiler", async (t) => {
+  const project = copyFixture(t);
+  const runs = join(project, "compiler-runs.log");
+  // A compiler that records each run and finds nothing wrong
+  const recordingCompiler = `echo run >> "${runs}"`;
+  installLocalTool(project, "lamdera", recordingCompiler);
+  installLocalTool(project, "elm", recordingCompiler);
+  const client = await connect(t, { cwd: project });
+  const utils = join(project, "src/Utils.elm");
+
+  // Navigation and a refactoring open and change documents, which used to start a build each time
+  await callTool(client, "elm_symbols", { file_path: utils });
+  await callTool(client, "elm_references", { file_path: utils, line: 6, character: 0 });
+  const rename = await callTool(client, "elm_rename_function", {
+    file_path: utils,
+    line: 16,
+    character: 0,
+    old_name: "helper",
+    newName: "assist",
+  });
+  assert.equal(rename.isError, false, rename.text);
+  assert.equal(existsSync(runs), false, "no tool has run the compiler yet");
+
+  const diagnostics = await callTool(client, "elm_diagnostics", { file_path: utils });
+  assert.deepEqual(diagnostics, { text: "No errors or warnings", isError: false });
+  assert.equal(readFileSync(runs, "utf-8"), "run\n");
+});
+
 test("tools installed at the root of a monorepo are found from the Elm project inside it", async (t) => {
   const project = copyFixture(t, "client");
   const monorepo = dirname(project);
