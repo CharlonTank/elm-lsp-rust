@@ -1,9 +1,10 @@
 /**
  * The Elm tools, defined once and independent of how they are served.
  *
- * Each entry of `tools` has a name, a description, a zod input shape and a
- * `run(args)` function that resolves with the result text. `run` throws
- * ToolError when the request cannot be carried out.
+ * Each entry of `tools` has a name, a title, a description, a zod input shape
+ * and a `run(args)` function that resolves with the result text. `run` throws
+ * ToolError when the request cannot be carried out. `readOnly` is true for a
+ * tool that never changes a file of the project.
  */
 
 import { execFile } from "child_process";
@@ -137,6 +138,8 @@ function formatConstructorUsages(usages) {
 function renameTool({ kind, command, description, fileDescription, validateNewName }) {
   return {
     name: `elm_rename_${kind}`,
+    title: `Rename ${kind}`,
+    readOnly: false,
     description,
     input: {
       file_path: elmFile(fileDescription),
@@ -208,6 +211,8 @@ async function relocateFile({ file_path, command, target, verb, done }) {
 export const tools = [
   {
     name: "elm_definition",
+    title: "Go to definition",
+    readOnly: true,
     description: "Go to the definition of a symbol",
     input: { file_path: elmFile(), ...position() },
     async run({ file_path, line, character }) {
@@ -221,6 +226,8 @@ export const tools = [
 
   {
     name: "elm_references",
+    title: "Find references",
+    readOnly: true,
     description: "Find all references to a symbol across the project",
     input: { file_path: elmFile(), ...position() },
     async run({ file_path, line, character }) {
@@ -239,6 +246,8 @@ export const tools = [
 
   {
     name: "elm_symbols",
+    title: "List file symbols",
+    readOnly: true,
     description: "Get all symbols in an Elm file with optional pagination",
     input: {
       file_path: elmFile(),
@@ -273,6 +282,8 @@ export const tools = [
 
   {
     name: "elm_format",
+    title: "Format file",
+    readOnly: false,
     description: "Format an Elm file using elm-format",
     input: { file_path: elmFile() },
     async run({ file_path }) {
@@ -288,6 +299,8 @@ export const tools = [
 
   {
     name: "elm_diagnostics",
+    title: "Compiler diagnostics",
+    readOnly: true,
     description: "Get diagnostics (errors/warnings) for an Elm file",
     input: { file_path: elmFile() },
     async run({ file_path }) {
@@ -310,6 +323,8 @@ export const tools = [
 
   {
     name: "elm_code_actions",
+    title: "List code actions",
+    readOnly: true,
     description: "Get available code actions for a range in an Elm file",
     input: { file_path: elmFile(), ...rangeFields },
     async run({ file_path, start_line, start_char, end_line, end_char }) {
@@ -325,6 +340,8 @@ export const tools = [
 
   {
     name: "elm_apply_code_action",
+    title: "Apply code action",
+    readOnly: false,
     description: "Apply a code action to an Elm file",
     input: {
       file_path: elmFile(),
@@ -384,6 +401,8 @@ export const tools = [
 
   {
     name: "elm_rename_field",
+    title: "Rename field",
+    readOnly: false,
     description: "Rename a record field across the entire project (type-aware). Fails if position is not on a field.",
     input: {
       file_path: elmFile(),
@@ -415,6 +434,8 @@ export const tools = [
 
   {
     name: "elm_move_function",
+    title: "Move function",
+    readOnly: false,
     description: "Move a function from one module to another, updating all imports and references",
     input: {
       file_path: elmFile("Path to the source file containing the function"),
@@ -458,6 +479,8 @@ export const tools = [
 
   {
     name: "elm_prepare_remove_variant",
+    title: "Preview variant removal",
+    readOnly: true,
     description:
       "Check if a variant can be removed from a custom type. Returns variant info, usage count, and other variants for reference. Constructor usages will be replaced with Debug.todo.",
     input: {
@@ -526,6 +549,8 @@ export const tools = [
 
   {
     name: "elm_remove_variant",
+    title: "Remove variant",
+    readOnly: false,
     description:
       "Remove a variant from a custom type. Constructor usages are replaced with Debug.todo, pattern matches are removed.",
     input: {
@@ -559,6 +584,8 @@ export const tools = [
 
   {
     name: "elm_rename_file",
+    title: "Rename file",
+    readOnly: false,
     description: "Rename an Elm file and update its module declaration + all imports across the project",
     input: {
       file_path: elmFile("Path to the Elm file to rename"),
@@ -574,6 +601,8 @@ export const tools = [
 
   {
     name: "elm_move_file",
+    title: "Move file",
+    readOnly: false,
     description:
       "Move an Elm file to a new location and update its module declaration + all imports across the project",
     input: {
@@ -598,6 +627,8 @@ export const tools = [
 
   {
     name: "elm_notify_file_changed",
+    title: "Notify of moved file",
+    readOnly: true,
     description: "Notify the LSP that a file was renamed/moved (updates internal index without restarting)",
     input: {
       old_path: z.string().describe("Original file path"),
@@ -619,6 +650,8 @@ export const tools = [
 
   {
     name: "elm_generate_erd",
+    title: "Generate ERD",
+    readOnly: false,
     description:
       "Generate a Mermaid ERD (Entity-Relationship Diagram) from an Elm type alias. " +
       "Recursively includes all referenced types with inferred cardinality relationships. " +
@@ -649,6 +682,8 @@ export const tools = [
 
   {
     name: "elm_prepare_remove_field",
+    title: "Preview field removal",
+    readOnly: true,
     description:
       "Check if a field can be removed from a type alias. Returns field info, usage count, and other fields for reference. " +
       "Field accesses will be replaced with Debug.todo, record patterns will have the field removed or become _ if it's the only field.",
@@ -694,6 +729,8 @@ export const tools = [
 
   {
     name: "elm_remove_field",
+    title: "Remove field",
+    readOnly: false,
     description:
       "Remove a field from a type alias. Field accesses are replaced with Debug.todo, record patterns have the field removed " +
       "(or become _ if it's the only field), and record literals/updates have the field removed.",
@@ -727,6 +764,8 @@ export const tools = [
 
   {
     name: "elm_prepare_add_variant",
+    title: "Preview variant addition",
+    readOnly: true,
     description:
       "Check what would happen when adding a variant to a custom type. Returns existing variants and case expressions that would need new branches.",
     input: {
@@ -772,6 +811,8 @@ export const tools = [
 
   {
     name: "elm_add_variant",
+    title: "Add variant",
+    readOnly: false,
     description:
       "Add a new variant to a custom type. Adds the variant to the type definition and inserts branches in case expressions. " +
       "Use branches to provide code and imports for each case expression (indexed by prepare_add_variant output). " +

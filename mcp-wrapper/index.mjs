@@ -15,16 +15,29 @@ import { RUST_LSP_PATH } from "./lsp-client.mjs";
 import { tools } from "./tools.mjs";
 
 // Short name to avoid 64-char limit on tool names
-function createMcpServer() {
+function createMcpServer({ readOnly }) {
   const server = new McpServer(
     { name: "elr", version: "0.3.0" },
     { capabilities: { tools: {} } }
   );
   for (const tool of tools) {
-    // When run() throws, the SDK answers with the error message and isError set.
-    server.tool(tool.name, tool.description, tool.input, async (args) => ({
-      content: [{ type: "text", text: await tool.run(args) }],
-    }));
+    if (readOnly && !tool.readOnly) continue;
+    server.registerTool(
+      tool.name,
+      {
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.input,
+        // Harnesses read these hints to decide which calls need the user's approval
+        annotations: {
+          readOnlyHint: tool.readOnly,
+          destructiveHint: !tool.readOnly,
+          openWorldHint: false,
+        },
+      },
+      // When run() throws, the SDK answers with the error message and isError set.
+      async (args) => ({ content: [{ type: "text", text: await tool.run(args) }] })
+    );
   }
   return server;
 }
@@ -94,7 +107,7 @@ function sendJsonError(res, status, code, message) {
   res.end(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }));
 }
 
-async function handleHttpRequest(req, res, transports) {
+async function handleHttpRequest(req, res, transports, serverOptions) {
   if (!req.url || !req.url.startsWith("/mcp")) {
     res.statusCode = 404;
     res.end("Not found");
@@ -135,7 +148,7 @@ async function handleHttpRequest(req, res, transports) {
         }
       };
 
-      const server = createMcpServer();
+      const server = createMcpServer(serverOptions);
       await server.connect(transport);
     } else {
       const sessionHeader = normalizeHeaderValue(req.headers["mcp-session-id"]);
@@ -166,10 +179,10 @@ async function handleHttpRequest(req, res, transports) {
   res.end("Method Not Allowed");
 }
 
-async function startHttpServer({ host, port }) {
+async function startHttpServer({ host, port, serverOptions }) {
   const transports = new Map();
   const server = createHttpServer((req, res) => {
-    handleHttpRequest(req, res, transports).catch((error) => {
+    handleHttpRequest(req, res, transports, serverOptions).catch((error) => {
       console.error("MCP HTTP server error:", error);
       if (!res.headersSent) {
         res.statusCode = 500;
@@ -191,6 +204,7 @@ async function main() {
   const args = process.argv.slice(2);
   const wantsHttp = args.includes("--http");
   const wantsStdio = args.includes("--stdio");
+  const serverOptions = { readOnly: args.includes("--read-only") };
 
   if (wantsHttp && wantsStdio) {
     console.error("Choose either --http or --stdio (not both).");
@@ -230,11 +244,11 @@ async function main() {
       console.error(`Invalid port: ${portRaw}`);
       process.exit(1);
     }
-    await startHttpServer({ host, port });
+    await startHttpServer({ host, port, serverOptions });
     return;
   }
 
-  const server = createMcpServer();
+  const server = createMcpServer(serverOptions);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
