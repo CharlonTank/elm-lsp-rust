@@ -32,6 +32,22 @@ test("a request that cannot be carried out is a tool error", async (t) => {
   assert.match(staleName.text, /Safety check failed: Expected function 'greet' but found 'helper'/);
 });
 
+test("a rename away from any symbol reports the server's reason", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+
+  // Line 3 of Utils.elm is blank
+  const blankLine = await callTool(client, "elm_rename_function", {
+    file_path: join(project, "src/Utils.elm"),
+    line: 3,
+    character: 0,
+    old_name: "helper",
+    newName: "assist",
+  });
+  assert.equal(blankLine.isError, true);
+  assert.match(blankLine.text, /Position is not on a function/);
+});
+
 test("an empty answer is a result, not an error", async (t) => {
   const project = copyFixture(t);
   const client = await connect(t, { cwd: project });

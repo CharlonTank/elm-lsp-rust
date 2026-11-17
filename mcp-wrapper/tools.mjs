@@ -89,10 +89,15 @@ function formatLocation({ uri, range }) {
 
 // Refactoring tools take the symbol's current name next to its position, so a
 // position that went stale after an earlier edit cannot hit another symbol.
-function assertExpectedName(kind, expected, actual, line) {
-  if (actual !== expected) {
+// `found` is the name the server saw at the position. It is undefined when the
+// server saw no such symbol there, and `reason` is then the server's explanation.
+function assertExpectedName(kind, expected, found, line, reason) {
+  if (found === undefined) {
+    throw new ToolError(reason ? `Error: ${reason}` : `No ${kind} found at line ${line + 1}. Expected: ${expected}`);
+  }
+  if (found !== expected) {
     throw new ToolError(
-      `Safety check failed: Expected ${kind} '${expected}' but found '${actual}' at line ${line + 1}.\n` +
+      `Safety check failed: Expected ${kind} '${expected}' but found '${found}' at line ${line + 1}.\n` +
         `The line number may have shifted. Please verify the correct line for '${expected}'.`
     );
   }
@@ -144,10 +149,7 @@ function renameTool({ kind, command, description, fileDescription, validateNewNa
       const { client, uri, workspaceRoot } = await openElmFile(file_path);
 
       const result = await client.executeCommand(command, [uri, line, character, newName]);
-      if (!result) {
-        throw new ToolError(`No ${kind} found at line ${line + 1}. Expected: ${old_name}`);
-      }
-      assertExpectedName(kind, old_name, result.oldName, line);
+      assertExpectedName(kind, old_name, result?.oldName, line, result?.error);
       if (!result.success) {
         throw new ToolError(`Error: ${result.error}`);
       }
@@ -535,10 +537,7 @@ export const tools = [
       const { client, uri, workspaceRoot } = await openElmFile(file_path);
 
       const result = await client.executeCommand("elm.removeVariant", [uri, line, character]);
-      if (!result) {
-        throw new ToolError(`No variant found at line ${line + 1}. Expected: ${variant_name}`);
-      }
-      assertExpectedName("variant", variant_name, result.variantName, line);
+      assertExpectedName("variant", variant_name, result?.variantName, line, result?.error);
 
       if (!result.success) {
         throw new ToolError(
@@ -707,10 +706,7 @@ export const tools = [
       const { client, uri, workspaceRoot } = await openElmFile(file_path);
 
       const result = await client.executeCommand("elm.removeField", [uri, line, character]);
-      if (!result) {
-        throw new ToolError(`No field found at line ${line + 1}. Expected: ${field_name}`);
-      }
-      assertExpectedName("field", field_name, result.fieldName, line);
+      assertExpectedName("field", field_name, result?.fieldName, line, result?.error);
 
       if (!result.success) {
         throw new ToolError(
