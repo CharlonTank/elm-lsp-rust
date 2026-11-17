@@ -2,7 +2,7 @@
  * Finding the Elm project a file belongs to, and writing edits into it.
  */
 
-import { dirname, join, resolve } from "path";
+import { delimiter, dirname, join, resolve } from "path";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { ToolError } from "./errors.mjs";
@@ -28,6 +28,24 @@ export function findWorkspaceRoot(filePath) {
     dir = dirname(dir);
   }
   return null;
+}
+
+// PATH with every node_modules/.bin from dir up to the file system root put
+// first, nearest first. npm scripts find a project's own tools the same way,
+// so the Elm compiler and elm-format that a project pins win over global ones.
+export function pathWithLocalTools(dir) {
+  const bins = [];
+  let current = resolve(dir);
+  while (true) {
+    const bin = join(current, "node_modules", ".bin");
+    if (existsSync(bin)) {
+      bins.push(bin);
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return [...bins, process.env.PATH].filter(Boolean).join(delimiter);
 }
 
 function isInWorkspace(absPath, workspaceRoot) {

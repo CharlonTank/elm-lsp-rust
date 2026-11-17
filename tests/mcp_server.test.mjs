@@ -5,9 +5,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { callTool, connect, copyFixture, runNode, SERVER, tempDir } from "./support.mjs";
+import { callTool, connect, copyFixture, installLocalTool, runNode, SERVER, tempDir } from "./support.mjs";
 
 test("the server works from a directory that is not an Elm project", async (t) => {
   const project = copyFixture(t);
@@ -86,6 +86,37 @@ for (const name of ["my élm project", "a~b [1] ^c|d #2 50%"]) {
     assert.equal(readFileSync(utils, "utf-8"), original);
   });
 }
+
+// A compiler that rejects every build with one fixed error for the file it was given ($2).
+const FAILING_COMPILER = `cat >&2 <<JSON
+{"type":"compile-errors","errors":[{"path":"$2","name":"Main","problems":[{"title":"PINNED COMPILER","region":{"start":{"line":3,"column":1},"end":{"line":3,"column":7}},"message":["reported by the project's own compiler"]}]}]}
+JSON
+exit 1`;
+
+test("diagnostics come from the compiler in the project's node_modules", async (t) => {
+  const project = copyFixture(t);
+  // The server asks for lamdera first and elm second, so stand in for both
+  installLocalTool(project, "lamdera", FAILING_COMPILER);
+  installLocalTool(project, "elm", FAILING_COMPILER);
+  const client = await connect(t, { cwd: tempDir(t) });
+
+  const diagnostics = await callTool(client, "elm_diagnostics", { file_path: join(project, "src/Main.elm") });
+  assert.equal(diagnostics.text, "Line 3:1 - PINNED COMPILER\n\nreported by the project's own compiler");
+});
+
+test("tools installed at the root of a monorepo are found from the Elm project inside it", async (t) => {
+  const project = copyFixture(t, "client");
+  const monorepo = dirname(project);
+  installLocalTool(monorepo, "elm-format", 'echo "$@" > "$(dirname "$0")/elm-format.called"');
+  const client = await connect(t, { cwd: tempDir(t) });
+
+  const file = join(project, "src/Main.elm");
+  const formatted = await callTool(client, "elm_format", { file_path: file });
+  assert.deepEqual(formatted, { text: `Successfully formatted ${file}`, isError: false });
+  const record = join(monorepo, "node_modules/.bin/elm-format.called");
+  assert.ok(existsSync(record), "the monorepo's elm-format ran");
+  assert.equal(readFileSync(record, "utf-8"), `--yes ${file}\n`);
+});
 
 test("an answer that quotes non-ASCII source text arrives", async (t) => {
   const project = copyFixture(t);

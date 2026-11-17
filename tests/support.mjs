@@ -5,7 +5,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execFile } from "child_process";
-import { cpSync, mkdtempSync, realpathSync, rmSync } from "fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -59,4 +59,12 @@ export function runNode(script, args = [], { cwd, env } = {}) {
     });
     child.stdin.end();
   });
+}
+
+// Put an executable shell script into dir/node_modules/.bin, as npm does for a project's tools.
+export function installLocalTool(dir, name, script) {
+  const bin = join(dir, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
+  chmodSync(join(bin, name), 0o755);
 }

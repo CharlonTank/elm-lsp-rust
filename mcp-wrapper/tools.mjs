@@ -17,7 +17,7 @@ import { z } from "zod";
 import { ToolError } from "./errors.mjs";
 import { ensureClient } from "./lsp-client.mjs";
 import { moveFunction } from "./move-function.mjs";
-import { applyWorkspaceEdit, assertInWorkspace, findWorkspaceRoot, toFileUri } from "./workspace.mjs";
+import { applyWorkspaceEdit, assertInWorkspace, findWorkspaceRoot, pathWithLocalTools, toFileUri } from "./workspace.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -292,8 +292,9 @@ export const tools = [
     input: { file_path: elmFile() },
     async run({ file_path }) {
       // The server does not implement formatting. execFile keeps the path out of a shell.
+      const env = { ...process.env, PATH: pathWithLocalTools(dirname(resolve(file_path))) };
       try {
-        await execFileAsync("elm-format", ["--yes", file_path]);
+        await execFileAsync("elm-format", ["--yes", file_path], { env });
       } catch (error) {
         throw new ToolError(`Error formatting: ${error.message}`);
       }
