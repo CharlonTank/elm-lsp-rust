@@ -5,12 +5,23 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cpSync, mkdirSync, readFileSync, symlinkSync } from "fs";
+import { chmodSync, cpSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { copyFixture, REPO, runNode, tempDir } from "./support.mjs";
 
 const CLI = join(REPO, "mcp-wrapper/cli.mjs");
 const cli = (args, options) => runNode(CLI, args, options);
+
+// A copy of the wrapper in a directory where the language server was never built.
+function unbuiltCopy(t) {
+  const root = tempDir(t);
+  cpSync(join(REPO, "mcp-wrapper"), join(root, "mcp-wrapper"), {
+    recursive: true,
+    filter: (source) => !source.endsWith("node_modules"),
+  });
+  symlinkSync(join(REPO, "mcp-wrapper/node_modules"), join(root, "mcp-wrapper/node_modules"));
+  return { cli: join(root, "mcp-wrapper/cli.mjs"), binary: join(root, "target/release/elm_lsp") };
+}
 
 test("tools lists every tool, and --json describes their arguments", async () => {
   const listing = await cli(["tools"]);
@@ -152,16 +163,34 @@ test("doctor passes on a built checkout", async (t) => {
 });
 
 test("doctor fails when the language server is not built", async (t) => {
-  // A copy of the wrapper next to no target/ directory
-  const unbuilt = tempDir(t);
-  mkdirSync(join(unbuilt, "mcp-wrapper"));
-  cpSync(join(REPO, "mcp-wrapper"), join(unbuilt, "mcp-wrapper"), {
-    recursive: true,
-    filter: (source) => !source.endsWith("node_modules"),
-  });
-  symlinkSync(join(REPO, "mcp-wrapper/node_modules"), join(unbuilt, "mcp-wrapper/node_modules"));
+  const { cli } = unbuiltCopy(t);
 
-  const { code, stdout } = await runNode(join(unbuilt, "mcp-wrapper/cli.mjs"), ["doctor"]);
+  const { code, stdout } = await runNode(cli, ["doctor"]);
   assert.equal(code, 1);
   assert.match(stdout, /^fail\s+language server\s+.*elm_lsp is missing\. Run scripts\/setup\.sh to build it\.$/m);
+});
+
+test("a tool says in one line why the language server did not start", async (t) => {
+  const { cli, binary } = unbuiltCopy(t);
+  const file = join(copyFixture(t), "src/Types.elm");
+
+  const missing = await runNode(cli, ["symbols", "--file_path", file]);
+  assert.deepEqual(missing, {
+    code: 1,
+    stdout: "",
+    stderr: `Rust LSP binary not found at ${binary}. Run scripts/setup.sh to build it.\n`,
+  });
+
+  // A file that is there but cannot be executed
+  mkdirSync(join(binary, ".."), { recursive: true });
+  writeFileSync(binary, "not a program\n");
+  const notExecutable = await runNode(cli, ["symbols", "--file_path", file]);
+  assert.equal(notExecutable.code, 1);
+  assert.match(notExecutable.stderr, new RegExp(`^Could not start ${binary}: spawn .*EACCES\\n$`));
+
+  // A program that exits before it answers
+  writeFileSync(binary, "#!/bin/sh\nexit 3\n");
+  chmodSync(binary, 0o755);
+  const exitsEarly = await runNode(cli, ["symbols", "--file_path", file]);
+  assert.deepEqual(exitsEarly, { code: 1, stdout: "", stderr: "LSP process exited with code 3\n" });
 });

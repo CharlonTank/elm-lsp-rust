@@ -7,6 +7,7 @@ import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
+import { ToolError } from "./errors.mjs";
 import { pathWithLocalTools, toFileUri } from "./workspace.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,6 +22,7 @@ const REQUEST_TIMEOUT_MS = 30000;
 const HEADER_END = "\r\n\r\n";
 
 // One language server process, bound to one Elm project for its whole life.
+// Its failures are ToolErrors: the caller can rebuild the binary or repeat the call.
 export class ElmLspClient {
   constructor(workspaceRoot) {
     this.workspaceRoot = workspaceRoot;
@@ -37,7 +39,7 @@ export class ElmLspClient {
   start() {
     return new Promise((resolve, reject) => {
       if (!existsSync(RUST_LSP_PATH)) {
-        reject(new Error(`Rust LSP binary not found at ${RUST_LSP_PATH}. Run scripts/setup.sh to build it.`));
+        reject(new ToolError(`Rust LSP binary not found at ${RUST_LSP_PATH}. Run scripts/setup.sh to build it.`));
         return;
       }
 
@@ -60,13 +62,15 @@ export class ElmLspClient {
       // A write to a server that just died fails here. The close handler reports the exit.
       child.stdin.on("error", () => {});
 
-      child.on("error", reject);
+      child.on("error", (error) => {
+        reject(new ToolError(`Could not start ${RUST_LSP_PATH}: ${error.message}`));
+      });
 
       child.on("close", (code) => {
         this.process = null;
         for (const { reject, timer } of this.pendingRequests.values()) {
           clearTimeout(timer);
-          reject(new Error(`LSP process exited with code ${code}`));
+          reject(new ToolError(`LSP process exited with code ${code}`));
         }
         this.pendingRequests.clear();
         this.onExit();
@@ -117,7 +121,7 @@ export class ElmLspClient {
           clearTimeout(pending.timer);
           this.pendingRequests.delete(message.id);
           if (message.error) {
-            pending.reject(new Error(message.error.message));
+            pending.reject(new ToolError(message.error.message));
           } else {
             pending.resolve(message.result);
           }
@@ -130,7 +134,7 @@ export class ElmLspClient {
 
   sendMessage(message) {
     if (!this.process) {
-      throw new Error("The Elm language server has stopped. Repeat the call to start it again.");
+      throw new ToolError("The Elm language server has stopped. Repeat the call to start it again.");
     }
     const content = JSON.stringify(message);
     const byteLength = Buffer.byteLength(content, 'utf8');
@@ -145,7 +149,7 @@ export class ElmLspClient {
 
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
-        reject(new Error(`Request ${method} timed out`));
+        reject(new ToolError(`Request ${method} timed out`));
       }, REQUEST_TIMEOUT_MS);
       this.pendingRequests.set(id, { resolve, reject, timer });
     });
