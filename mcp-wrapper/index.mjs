@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * MCP wrapper for Rust Elm LSP
- * Provides fast Elm language server capabilities to Claude Code
+ * Serves the Elm tools to any MCP client, over stdio or HTTP
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -14,11 +14,31 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { RUST_LSP_PATH } from "./lsp-client.mjs";
 import { tools } from "./tools.mjs";
 
+const USAGE = `Usage: node index.mjs [options]
+
+Serves the Elm tools over MCP.
+
+  --stdio              Serve over stdio (default)
+  --http               Serve over streamable HTTP at /mcp
+  --host <host>        HTTP bind address (default 127.0.0.1, or MCP_HOST)
+  --port <port>        HTTP port (default 3333, or MCP_PORT)
+  --read-only          Offer only the tools that never change a file
+  --elm-projects-only  Exit at once unless the working directory holds an Elm project
+  --help               Show this text`;
+
+// Sent to the client when it connects. Harnesses show it to the model.
+const INSTRUCTIONS =
+  "Code intelligence and refactoring for Elm projects. " +
+  "Pass absolute file paths, because a relative path resolves against the directory this server was started in, " +
+  "and that differs between harnesses. " +
+  "Lines and characters in arguments are 0-indexed. Locations in results have 1-indexed lines. " +
+  "Refactoring tools write their edits to disk, so read a file again before you edit it further.";
+
 // Short name to avoid 64-char limit on tool names
 function createMcpServer({ readOnly }) {
   const server = new McpServer(
     { name: "elr", version: "0.3.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {} }, instructions: INSTRUCTIONS }
   );
   for (const tool of tools) {
     if (readOnly && !tool.readOnly) continue;
@@ -202,6 +222,11 @@ async function startHttpServer({ host, port, serverOptions }) {
 // Start the server
 async function main() {
   const args = process.argv.slice(2);
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(USAGE);
+    return;
+  }
+
   const wantsHttp = args.includes("--http");
   const wantsStdio = args.includes("--stdio");
   const serverOptions = { readOnly: args.includes("--read-only") };
@@ -219,13 +244,10 @@ async function main() {
         ? "http"
         : "stdio";
 
-  // Skip loading for non-Elm projects
-  if (!isElmProject()) {
-    if (transportMode === "http") {
-      console.error("No elm.json found in the current directory.");
-      console.error("Start the MCP server from an Elm project root.");
-      process.exit(1);
-    }
+  // Every tool finds its project from the file it is given, so the server can
+  // start anywhere. The Claude Code plugin starts it in every project the user
+  // opens, and passes this flag to keep the tools out of the ones without Elm.
+  if (args.includes("--elm-projects-only") && !isElmProject()) {
     process.exit(0);
   }
 

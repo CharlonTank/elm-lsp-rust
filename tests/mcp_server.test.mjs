@@ -5,8 +5,55 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { join } from "path";
-import { callTool, connect, copyFixture, tempDir } from "./support.mjs";
+import { dirname, join } from "path";
+import { callTool, connect, copyFixture, runNode, SERVER, tempDir } from "./support.mjs";
+
+test("the server works from a directory that is not an Elm project", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: tempDir(t) });
+
+  const symbols = await callTool(client, "elm_symbols", { file_path: join(project, "src/Types.elm") });
+  assert.equal(symbols.isError, false);
+  assert.match(symbols.text, /defaultUser \(Function\) at line 11/);
+});
+
+test("a relative path resolves against the server's working directory", async (t) => {
+  const project = copyFixture(t);
+  const elsewhere = tempDir(t);
+
+  const inProject = await connect(t, { cwd: project });
+  const found = await callTool(inProject, "elm_symbols", { file_path: "src/Types.elm" });
+  assert.match(found.text, /Found 4 symbols/);
+
+  // From another directory the same path points nowhere, and the error shows where it pointed
+  const outside = await connect(t, { cwd: elsewhere });
+  const lost = await callTool(outside, "elm_symbols", { file_path: "src/Types.elm" });
+  assert.equal(lost.isError, true);
+  assert.ok(lost.text.includes(join(elsewhere, "src/Types.elm")), lost.text);
+});
+
+test("the server tells the client how to address files", async (t) => {
+  const client = await connect(t, { cwd: tempDir(t) });
+  assert.match(client.getInstructions(), /absolute file paths/);
+  assert.match(client.getInstructions(), /0-indexed/);
+});
+
+test("--elm-projects-only exits quietly outside an Elm project", async (t) => {
+  const { code, stdout } = await runNode(SERVER, ["--elm-projects-only"], { cwd: tempDir(t) });
+  assert.equal(code, 0);
+  assert.equal(stdout, "");
+});
+
+test("--elm-projects-only serves a project and a monorepo that holds one", async (t) => {
+  const project = copyFixture(t);
+  const inProject = await connect(t, { args: ["--elm-projects-only"], cwd: project });
+  assert.equal((await inProject.listTools()).tools.length, 22);
+
+  // elm.json one level down, as in repo/client/elm.json
+  const monorepo = dirname(copyFixture(t, "client"));
+  const inMonorepo = await connect(t, { args: ["--elm-projects-only"], cwd: monorepo });
+  assert.equal((await inMonorepo.listTools()).tools.length, 22);
+});
 
 const READ_ONLY_TOOLS = [
   "elm_code_actions",

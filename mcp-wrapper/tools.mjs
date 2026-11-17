@@ -56,12 +56,15 @@ const rangeFields = {
   end_char: z.number().describe("End character (0-indexed)"),
 };
 
+// The path in the message shows the caller how a relative path was resolved.
+const noProject = (absPath) => `No elm.json found in the parent directories of ${absPath}`;
+
 // Resolve a file to an absolute path and the Elm project that contains it.
 function locate(filePath) {
   const absPath = resolve(filePath);
   const workspaceRoot = findWorkspaceRoot(absPath);
   if (!workspaceRoot) {
-    throw new ToolError("No elm.json found in parent directories");
+    throw new ToolError(noProject(absPath));
   }
   return { absPath, workspaceRoot };
 }
@@ -639,7 +642,7 @@ export const tools = [
       const absNewPath = resolve(new_path);
       const workspaceRoot = findWorkspaceRoot(absNewPath) || findWorkspaceRoot(absOldPath);
       if (!workspaceRoot) {
-        throw new ToolError("No elm.json found in parent directories");
+        throw new ToolError(noProject(absNewPath));
       }
 
       const client = await ensureClient(workspaceRoot);

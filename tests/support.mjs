@@ -4,6 +4,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { execFile } from "child_process";
 import { cpSync, mkdtempSync, realpathSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
@@ -48,4 +49,14 @@ export async function connect(t, { args = [], cwd, env } = {}) {
 export async function callTool(client, name, args) {
   const result = await client.callTool({ name, arguments: args });
   return { text: result.content?.[0]?.text ?? "", isError: result.isError === true };
+}
+
+// Run a Node script to completion with stdin closed.
+export function runNode(script, args = [], { cwd, env } = {}) {
+  return new Promise((resolve) => {
+    const child = execFile(process.execPath, [script, ...args], { cwd, env }, (error, stdout, stderr) => {
+      resolve({ code: error ? error.code : 0, stdout, stderr });
+    });
+    child.stdin.end();
+  });
 }
