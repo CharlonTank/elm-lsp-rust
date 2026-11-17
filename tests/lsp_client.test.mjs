@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { ElmLspClient, ensureClient, stopClients } from "../mcp-wrapper/lsp-client.mjs";
+import { ElmLspClient, ensureClient, IDLE_TIMEOUT_MS, stopClients } from "../mcp-wrapper/lsp-client.mjs";
 import { toFileUri } from "../mcp-wrapper/workspace.mjs";
 import { copyFixture, tempDir } from "./support.mjs";
 
@@ -58,6 +58,30 @@ test("a language server that died is replaced on the next call", async (t) => {
   const second = await ensureClient(project);
   assert.notEqual(second, first);
   assert.equal((await symbolNames(second, join(project, "src/Types.elm"))).length, 4);
+});
+
+test("a language server nobody has used for a while is stopped, and the next call starts a new one", async (t) => {
+  t.after(stopClients);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const project = copyFixture(t);
+
+  const first = await ensureClient(project);
+  t.mock.timers.tick(IDLE_TIMEOUT_MS - 1);
+  // A use shortly before the limit starts the countdown again
+  assert.equal(await ensureClient(project), first);
+  t.mock.timers.tick(IDLE_TIMEOUT_MS - 1);
+  assert.notEqual(first.process, null);
+
+  const exited = once(first.process, "close");
+  t.mock.timers.tick(1);
+  // The old server has its signal and is not gone yet. A call that arrives now gets a new one.
+  const second = await ensureClient(project);
+  assert.notEqual(second, first);
+  assert.notEqual(second.process, null);
+
+  await exited;
+  // The old server's exit leaves the new one in its place
+  assert.equal(await ensureClient(project), second);
 });
 
 test("a request in flight fails when the language server dies", async (t) => {

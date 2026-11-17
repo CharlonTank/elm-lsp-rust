@@ -18,6 +18,9 @@ export const RUST_LSP_PATH = join(__dirname, "..", "target", "release", "elm_lsp
 
 const REQUEST_TIMEOUT_MS = 30000;
 
+// A language server that no call has used for this long is stopped. The next call starts it again.
+export const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
 // Separates the headers of an LSP message from its body
 const HEADER_END = "\r\n\r\n";
 
@@ -31,7 +34,8 @@ export class ElmLspClient {
     this.pendingRequests = new Map(); // id -> { resolve, reject, timer }
     this.buffer = Buffer.alloc(0);
     this.documentVersions = {};
-    // Called once the process is gone, however it ended
+    this.idleTimer = null;
+    // Called when the server is told to stop, and once its process is gone, however it ended
     this.onExit = () => {};
   }
 
@@ -68,6 +72,7 @@ export class ElmLspClient {
 
       child.on("close", (code) => {
         this.process = null;
+        clearTimeout(this.idleTimer);
         for (const { reject, timer } of this.pendingRequests.values()) {
           clearTimeout(timer);
           reject(new ToolError(`LSP process exited with code ${code}`));
@@ -188,13 +193,6 @@ export class ElmLspClient {
     await new Promise((r) => setTimeout(r, 50));
   }
 
-  async getCompletion(uri, line, character) {
-    return this.sendRequest("textDocument/completion", {
-      textDocument: { uri },
-      position: { line, character },
-    });
-  }
-
   async getSymbols(uri) {
     return this.sendRequest("textDocument/documentSymbol", {
       textDocument: { uri },
@@ -250,10 +248,6 @@ export class ElmLspClient {
     });
   }
 
-  async workspaceSymbol(query) {
-    return this.sendRequest("workspace/symbol", { query });
-  }
-
   async executeCommand(command, args) {
     return this.sendRequest("workspace/executeCommand", {
       command,
@@ -261,35 +255,46 @@ export class ElmLspClient {
     });
   }
 
-  // The close handler settles what is still pending and calls onExit.
+  // Start the idle countdown again. Called for every use of the client.
+  keepAlive() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.stop(), IDLE_TIMEOUT_MS);
+    // An idle server must not keep a process alive that has nothing else to do
+    this.idleTimer.unref();
+  }
+
+  // The process takes a moment to go, and a call that arrives in that moment
+  // must not be sent to it. The close handler settles what is still pending.
   stop() {
+    this.onExit();
     this.process?.kill();
   }
 }
 
-// One running language server per Elm project, started on first use.
+// One running language server per Elm project, started on first use and
+// stopped once it has been idle for IDLE_TIMEOUT_MS.
 // The promise settles once the server has answered the handshake.
 const clients = new Map(); // workspace root -> Promise<ElmLspClient>
 
-export function ensureClient(workspaceRoot) {
-  const running = clients.get(workspaceRoot);
-  if (running) {
-    return running;
+export async function ensureClient(workspaceRoot) {
+  let starting = clients.get(workspaceRoot);
+  if (!starting) {
+    const client = new ElmLspClient(workspaceRoot);
+    starting = client.start().then(() => client);
+    // Drop a server that failed to start, is stopping or has exited, so the next call starts a new one
+    const forget = () => {
+      if (clients.get(workspaceRoot) === starting) {
+        clients.delete(workspaceRoot);
+      }
+    };
+    client.onExit = forget;
+    starting.catch(forget);
+    clients.set(workspaceRoot, starting);
   }
 
-  const client = new ElmLspClient(workspaceRoot);
-  const starting = client.start().then(() => client);
-  // Drop a server that failed to start or has exited, so the next call starts a new one
-  const forget = () => {
-    if (clients.get(workspaceRoot) === starting) {
-      clients.delete(workspaceRoot);
-    }
-  };
-  client.onExit = forget;
-  starting.catch(forget);
-
-  clients.set(workspaceRoot, starting);
-  return starting;
+  const client = await starting;
+  client.keepAlive();
+  return client;
 }
 
 // Stop every language server, so a short-lived process can exit.
