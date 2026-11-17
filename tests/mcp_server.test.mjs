@@ -32,6 +32,20 @@ test("a relative path resolves against the server's working directory", async (t
   assert.ok(lost.text.includes(join(elsewhere, "src/Types.elm")), lost.text);
 });
 
+test("one server serves several projects in turn", async (t) => {
+  const first = copyFixture(t, "first");
+  const second = copyFixture(t, "second");
+  const client = await connect(t, { cwd: tempDir(t) });
+
+  for (const project of [first, second, first, second]) {
+    const symbols = await callTool(client, "elm_symbols", { file_path: join(project, "src/Types.elm") });
+    assert.deepEqual(symbols, {
+      text: "Found 4 symbols:\nUser (Event) at line 4\ndefaultUser (Function) at line 11\nGuest (Event) at line 19\ncreateGuest (Function) at line 24",
+      isError: false,
+    });
+  }
+});
+
 test("the server tells the client how to address files", async (t) => {
   const client = await connect(t, { cwd: tempDir(t) });
   assert.match(client.getInstructions(), /absolute file paths/);

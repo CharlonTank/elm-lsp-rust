@@ -14,77 +14,69 @@ const __dirname = dirname(__filename);
 // Path to the Rust LSP binary
 export const RUST_LSP_PATH = join(__dirname, "..", "target", "release", "elm_lsp");
 
-class ElmLspClient {
-  constructor() {
+const REQUEST_TIMEOUT_MS = 30000;
+
+// One language server process, bound to one Elm project for its whole life.
+export class ElmLspClient {
+  constructor(workspaceRoot) {
+    this.workspaceRoot = workspaceRoot;
     this.process = null;
     this.requestId = 0;
-    this.pendingRequests = new Map();
+    this.pendingRequests = new Map(); // id -> { resolve, reject, timer }
     this.buffer = "";
-    this.initialized = false;
-    this.workspaceRoot = null;
+    this.documentVersions = {};
+    // Called once the process is gone, however it ended
+    this.onExit = () => {};
   }
 
-  async start(workspaceRoot) {
-    if (this.process && this.workspaceRoot === workspaceRoot) {
-      return;
-    }
-
-    // Kill existing process if switching workspaces
-    if (this.process) {
-      this.stop();
-    }
-
-    this.workspaceRoot = workspaceRoot;
-
+  // Spawn the server and complete the LSP handshake.
+  start() {
     return new Promise((resolve, reject) => {
-      // Check if binary exists
       if (!existsSync(RUST_LSP_PATH)) {
-        reject(new Error(`Rust LSP binary not found at ${RUST_LSP_PATH}. Run 'cargo build --release' in the plugin directory.`));
+        reject(new Error(`Rust LSP binary not found at ${RUST_LSP_PATH}. Run scripts/setup.sh to build it.`));
         return;
       }
 
-      this.process = spawn(RUST_LSP_PATH, [], {
+      const child = spawn(RUST_LSP_PATH, [], {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, RUST_LOG: "warn" },
       });
+      this.process = child;
 
-      this.process.stdout.on("data", (data) => {
+      child.stdout.on("data", (data) => {
         this.handleData(data.toString());
       });
 
-      this.process.stderr.on("data", (data) => {
+      child.stderr.on("data", (data) => {
         // Log errors but don't fail
         console.error(`[elm-lsp-rust] ${data.toString()}`);
       });
 
-      this.process.on("error", (err) => {
-        reject(err);
-      });
+      // A write to a server that just died fails here. The close handler reports the exit.
+      child.stdin.on("error", () => {});
 
-      this.process.on("close", (code) => {
+      child.on("error", reject);
+
+      child.on("close", (code) => {
         this.process = null;
-        this.initialized = false;
-        // Reject all pending requests
-        for (const [id, { reject }] of this.pendingRequests) {
+        for (const { reject, timer } of this.pendingRequests.values()) {
+          clearTimeout(timer);
           reject(new Error(`LSP process exited with code ${code}`));
         }
         this.pendingRequests.clear();
+        this.onExit();
       });
 
-      // Initialize the LSP
       this.sendRequest("initialize", {
         processId: process.pid,
-        rootUri: `file://${workspaceRoot}`,
+        rootUri: `file://${this.workspaceRoot}`,
         capabilities: {},
       })
-        .then(() => {
-          return this.sendNotification("initialized", {});
-        })
-        .then(() => {
-          this.initialized = true;
-          resolve();
-        })
-        .catch(reject);
+        .then(() => this.sendNotification("initialized", {}))
+        .then(resolve, reject);
+    }).catch((error) => {
+      this.stop();
+      throw error;
     });
   }
 
@@ -107,13 +99,14 @@ class ElmLspClient {
 
       try {
         const message = JSON.parse(content);
-        if (message.id !== undefined && this.pendingRequests.has(message.id)) {
-          const { resolve, reject } = this.pendingRequests.get(message.id);
+        const pending = this.pendingRequests.get(message.id);
+        if (pending) {
+          clearTimeout(pending.timer);
           this.pendingRequests.delete(message.id);
           if (message.error) {
-            reject(new Error(message.error.message));
+            pending.reject(new Error(message.error.message));
           } else {
-            resolve(message.result);
+            pending.resolve(message.result);
           }
         }
       } catch (e) {
@@ -123,8 +116,8 @@ class ElmLspClient {
   }
 
   sendMessage(message) {
-    if (!this.process || !this.process.stdin) {
-      throw new Error("LSP process not running. Try reconnecting the MCP server.");
+    if (!this.process) {
+      throw new Error("The Elm language server has stopped. Repeat the call to start it again.");
     }
     const content = JSON.stringify(message);
     const byteLength = Buffer.byteLength(content, 'utf8');
@@ -135,16 +128,13 @@ class ElmLspClient {
   sendRequest(method, params) {
     return new Promise((resolve, reject) => {
       const id = ++this.requestId;
-      this.pendingRequests.set(id, { resolve, reject });
       this.sendMessage({ jsonrpc: "2.0", id, method, params });
 
-      // Timeout after 30 seconds
-      setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id);
-          reject(new Error(`Request ${method} timed out`));
-        }
-      }, 30000);
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`Request ${method} timed out`));
+      }, REQUEST_TIMEOUT_MS);
+      this.pendingRequests.set(id, { resolve, reject, timer });
     });
   }
 
@@ -168,7 +158,6 @@ class ElmLspClient {
 
   async notifyFileChanged(uri, content) {
     // Increment version for tracking changes
-    this.documentVersions = this.documentVersions || {};
     this.documentVersions[uri] = (this.documentVersions[uri] || 1) + 1;
 
     await this.sendNotification("textDocument/didChange", {
@@ -255,39 +244,44 @@ class ElmLspClient {
     });
   }
 
+  // The close handler settles what is still pending and calls onExit.
   stop() {
-    if (this.process) {
-      this.process.kill();
-      this.process = null;
-    }
+    this.process?.kill();
   }
 }
 
-// Global LSP client with mutex to prevent race conditions
-let lspClient = null;
-let clientInitPromise = null;
+// One running language server per Elm project, started on first use.
+// The promise settles once the server has answered the handshake.
+const clients = new Map(); // workspace root -> Promise<ElmLspClient>
 
-export async function ensureClient(workspaceRoot) {
-  // If initialization is in progress, wait for it
-  if (clientInitPromise) {
-    await clientInitPromise;
-    // After waiting, check if the workspace matches
-    if (lspClient && lspClient.initialized && lspClient.workspaceRoot === workspaceRoot) {
-      return lspClient;
-    }
+export function ensureClient(workspaceRoot) {
+  const running = clients.get(workspaceRoot);
+  if (running) {
+    return running;
   }
 
-  // Need to (re)initialize - create the promise to prevent concurrent initialization
-  if (!lspClient) {
-    lspClient = new ElmLspClient();
-  }
-  if (!lspClient.initialized || lspClient.workspaceRoot !== workspaceRoot) {
-    clientInitPromise = lspClient.start(workspaceRoot);
-    try {
-      await clientInitPromise;
-    } finally {
-      clientInitPromise = null;
+  const client = new ElmLspClient(workspaceRoot);
+  const starting = client.start().then(() => client);
+  // Drop a server that failed to start or has exited, so the next call starts a new one
+  const forget = () => {
+    if (clients.get(workspaceRoot) === starting) {
+      clients.delete(workspaceRoot);
     }
+  };
+  client.onExit = forget;
+  starting.catch(forget);
+
+  clients.set(workspaceRoot, starting);
+  return starting;
+}
+
+// Stop every language server, so a short-lived process can exit.
+export function stopClients() {
+  for (const starting of clients.values()) {
+    starting.then(
+      (client) => client.stop(),
+      () => {}
+    );
   }
-  return lspClient;
+  clients.clear();
 }
