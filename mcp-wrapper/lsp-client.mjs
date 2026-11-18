@@ -266,10 +266,14 @@ export class ElmLspClient {
    */
   async syncWithDisk() {
     const result = await this.executeCommand("elm.syncWithDisk", []);
-    // The server says why it has no index, for instance an elm.json it cannot read
-    if (result?.synced === false) {
-      throw new ToolError(result.error);
-    }
+    if (result?.synced === true) return;
+    // The server says why it has no index, for instance an elm.json it cannot
+    // read. A server built before this command existed answers something else.
+    throw new ToolError(
+      result?.synced === false
+        ? result.error
+        : `${RUST_LSP_PATH} is older than this wrapper. Run scripts/setup.sh to rebuild it.`
+    );
   }
 
   // Start the idle countdown again. Called for every use of the client.

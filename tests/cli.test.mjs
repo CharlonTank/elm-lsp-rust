@@ -7,7 +7,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { copyFixture, installLocalTool, installTool, REPO, runNode, tempDir, wrapperCopy } from "./support.mjs";
+import {
+  copyFixture,
+  installLanguageServerStandIn,
+  installLocalTool,
+  installTool,
+  REPO,
+  runNode,
+  tempDir,
+  wrapperCopy,
+} from "./support.mjs";
 
 const CLI = join(REPO, "mcp-wrapper/cli.mjs");
 const cli = (args, options) => runNode(CLI, args, options);
@@ -188,6 +197,19 @@ test("doctor fails when the language server is not built", async (t) => {
   assert.match(stdout, /^fail\s+language server\s+.*elm_lsp is missing\. Run scripts\/setup\.sh to build it\.$/m);
 });
 
+test("doctor fails when the language server is older than the wrapper", async (t) => {
+  const { cli, binary } = wrapperCopy(t);
+  // Answers the handshake and does not know the command every tool call begins with
+  installLanguageServerStandIn(
+    binary,
+    `(message) => (message.method === "workspace/executeCommand" ? { success: false, error: "Unknown command" } : null)`
+  );
+
+  const { code, stdout } = await runNode(cli, ["doctor"]);
+  assert.equal(code, 1);
+  assert.match(stdout, /^fail\s+language server\s+.*elm_lsp is older than this wrapper\. Run scripts\/setup\.sh to rebuild it\.$/m);
+});
+
 test("a tool says in one line why the language server did not start", async (t) => {
   const { cli, binary } = wrapperCopy(t);
   const file = join(copyFixture(t), "src/Types.elm");
@@ -211,4 +233,16 @@ test("a tool says in one line why the language server did not start", async (t) 
   chmodSync(binary, 0o755);
   const exitsEarly = await runNode(cli, ["symbols", "--file_path", file]);
   assert.deepEqual(exitsEarly, { code: 1, stdout: "", stderr: "LSP process exited with code 3\n" });
+
+  // A server from before a "git pull", which does not know a command the wrapper sends
+  installLanguageServerStandIn(
+    binary,
+    `(message) => (message.method === "workspace/executeCommand" ? { success: false, error: "Unknown command" } : null)`
+  );
+  const older = await runNode(cli, ["symbols", "--file_path", file]);
+  assert.deepEqual(older, {
+    code: 1,
+    stdout: "",
+    stderr: `${binary} is older than this wrapper. Run scripts/setup.sh to rebuild it.\n`,
+  });
 });

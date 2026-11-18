@@ -2,7 +2,8 @@
  * The installation checks behind `cli.mjs doctor`.
  */
 
-import { accessSync, constants, existsSync, statSync } from "fs";
+import { accessSync, constants, existsSync, mkdtempSync, rmSync, statSync } from "fs";
+import { tmpdir } from "os";
 import { delimiter, join } from "path";
 import { ElmLspClient, RUST_LSP_PATH } from "./lsp-client.mjs";
 
@@ -31,19 +32,26 @@ function checkNode() {
   return ["ok", `v${version}`];
 }
 
-// The binary exists and answers the LSP handshake.
+// The binary exists, answers the LSP handshake and knows what this wrapper asks of it.
 async function checkLanguageServer() {
   if (!existsSync(RUST_LSP_PATH)) {
     return ["fail", `${RUST_LSP_PATH} is missing. Run scripts/setup.sh to build it.`];
   }
-  const client = new ElmLspClient(process.cwd());
+  // An empty directory, so that the check says nothing about the project the doctor is run in
+  const emptyProject = mkdtempSync(join(tmpdir(), "elm-lsp-doctor-"));
+  const client = new ElmLspClient(emptyProject);
+  let started = false;
   try {
     await client.start();
+    started = true;
+    // Every tool call begins with this command, and an older binary does not have it
+    await client.syncWithDisk();
     return ["ok", RUST_LSP_PATH];
   } catch (error) {
-    return ["fail", `${RUST_LSP_PATH} did not start: ${error.message}`];
+    return ["fail", started ? error.message : `${RUST_LSP_PATH} did not start: ${error.message}`];
   } finally {
     client.stop();
+    rmSync(emptyProject, { recursive: true, force: true });
   }
 }
 
