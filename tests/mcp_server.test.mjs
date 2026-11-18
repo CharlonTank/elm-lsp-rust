@@ -363,6 +363,24 @@ test("with --project-tools, tools at the root of a monorepo are found from the E
   assert.equal(readFileSync(record, "utf-8"), `--yes ${file}\n`);
 });
 
+// The language server counts columns in bytes and the wrapper applies them as
+// character positions. Until the server settles on one unit, this fails.
+test.todo("a rename lands on its symbol on a line with non-ASCII text before it", async (t) => {
+  const project = copyFixture(t);
+  const main = join(project, "src/Main.elm");
+  writeFileSync(main, readFileSync(main, "utf-8").replace('" - Formatted: "', '"café: "'));
+  const client = await connect(t, { cwd: project });
+
+  await callTool(client, "elm_rename_function", {
+    file_path: join(project, "src/Utils.elm"),
+    line: 6,
+    character: 0,
+    old_name: "formatName",
+    newName: "shout",
+  });
+  assert.match(readFileSync(main, "utf-8"), /"café: " \+\+ shout model\.user\.name/);
+});
+
 test("an answer that quotes non-ASCII source text arrives", async (t) => {
   const project = copyFixture(t);
   const file = join(project, "src/Drinks.elm");

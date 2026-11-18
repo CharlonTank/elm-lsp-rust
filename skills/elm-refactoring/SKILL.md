@@ -264,6 +264,7 @@ type_name: "BackendModel"
 - **Pass absolute file paths.** A relative path resolves against the directory the server was started in.
 - **Refactoring tools write to disk.** Read a file again before editing it further.
 - **Always verify compilation** after refactoring, with `elm_diagnostics` on the project's entry module or with the project's build command
+- **Lines with non-ASCII text before the symbol.** Columns are counted in bytes there, so a column in a result is too large and an edit can land a few characters off. Read such a line again after a tool has changed it.
 - These tools understand Elm's scope and semantics - safer than text replace
 
 ## Why Use LSP Tools

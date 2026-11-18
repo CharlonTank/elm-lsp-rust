@@ -106,6 +106,11 @@ The index covers the source directories that `elm.json` lists, also one outside 
 
 When the harness closes the server's input, the server answers the requests it has already received, stops its language servers and exits.
 
+### Known limitations
+
+- **Columns on lines with non-ASCII text.** The language server counts columns in bytes, and the wrapper applies them as character positions. On a line with a non-ASCII character before the symbol, a column in a result is too large by the extra bytes, and an edit lands that far off. A rename of `formatName` in `"café " ++ formatName name` damages that line. Read such a line again after a refactoring has changed it.
+- **Windows.** File paths and the setup script assume a POSIX system.
+
 ## Features
 
 | Feature | Description |
