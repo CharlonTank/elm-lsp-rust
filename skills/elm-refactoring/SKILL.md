@@ -139,7 +139,7 @@ newName: "newFieldName"
 ### Moving Code
 
 #### elm_move_function
-Move a function from one module to another.
+Move a function from one module to another. Only the function's text moves, and only an import that lists it by name, as in `import Utils exposing (greet)`, is pointed at the new module. Uses by qualified name, through an alias or through `exposing (..)` stay as they were. Imports that the function needs and functions of its old module that it calls are not added to the target. Run `elm_diagnostics` on the project's entry module afterwards and repair what it reports.
 ```
 file_path: "/path/to/Source.elm"
 line: 28

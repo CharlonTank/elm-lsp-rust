@@ -537,6 +537,25 @@ test("a rename lands on its symbol on a line with non-ASCII text before it", asy
   assert.match(readFileSync(at("Types.elm"), "utf-8"), /^import \u00c9t\u00e9 exposing \(first, welcome, last\)$/m);
 });
 
+// The move takes the function's text and nothing the text depends on. Until it
+// brings the imports along, this fails.
+test.todo("a moved function takes along the imports it needs", async (t) => {
+  const project = copyFixture(t);
+  const target = join(project, "src/Target.elm");
+  writeFileSync(target, "module Target exposing (..)\n");
+  const client = await connect(t, { cwd: project });
+
+  // greet : User -> String, and User comes from an import of Utils
+  await callTool(client, "elm_move_function", {
+    file_path: join(project, "src/Utils.elm"),
+    line: 11,
+    character: 0,
+    function_name: "greet",
+    target_module: target,
+  });
+  assert.match(readFileSync(target, "utf-8"), /^import Types exposing \(User\)$/m);
+});
+
 test("an answer that quotes non-ASCII source text arrives", async (t) => {
   const project = copyFixture(t);
   const file = join(project, "src/Drinks.elm");
