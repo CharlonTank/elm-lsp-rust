@@ -777,6 +777,16 @@ test("--elm-projects-only exits quietly outside an Elm project", async (t) => {
   assert.equal(stdout, "");
 });
 
+test("--elm-projects-only with --http says why no server started", async (t) => {
+  // Nobody is listening afterwards, and whoever typed the command needs to know
+  const cwd = tempDir(t);
+  assert.deepEqual(await runNode(SERVER, ["--elm-projects-only", "--http"], { cwd }), {
+    code: 1,
+    stdout: "",
+    stderr: `No server started: --elm-projects-only was given, and neither ${cwd} nor a direct child of it holds an elm.json.\n`,
+  });
+});
+
 test("--elm-projects-only serves a project and a monorepo that holds one", async (t) => {
   const project = copyFixture(t);
   const inProject = await connect(t, { args: ["--elm-projects-only"], cwd: project });

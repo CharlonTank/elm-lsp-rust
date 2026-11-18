@@ -272,6 +272,13 @@ async function main() {
   // start anywhere. The Claude Code plugin starts it in every project the user
   // opens, and passes this flag to keep the tools out of the ones without Elm.
   if (flags.has("--elm-projects-only") && !isElmProject()) {
+    // Over stdio the harness started the server and is told nothing. A person starts the HTTP server.
+    if (transportMode === "http") {
+      console.error(
+        `No server started: --elm-projects-only was given, and neither ${process.cwd()} nor a direct child of it holds an elm.json.`
+      );
+      process.exit(1);
+    }
     process.exit(0);
   }
 
