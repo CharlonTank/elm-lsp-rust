@@ -262,6 +262,9 @@ async function handleHttpRequest(req, res, transports, { serverOptions, transpor
   res.end("Method Not Allowed");
 }
 
+// A command line the server understands and cannot carry out
+class StartError extends Error {}
+
 // True for an address of this machine that nothing outside it can reach.
 const isLoopback = (address) => address === "::1" || /^(::ffff:)?127\./.test(address);
 
@@ -301,7 +304,10 @@ async function startHttpServer({ host, port, serverOptions }) {
     });
   });
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    server.once("error", (error) => {
+      reject(new StartError(`Cannot listen on ${host}:${port}: ${error.message}`));
+    });
     server.listen(port, host, () => {
       // Decided from the address the server got, whichever way the host was spelled
       options.transportOptions = loopbackGuard(server.address().address, host, port);
@@ -393,6 +399,10 @@ main().catch((err) => {
   if (err instanceof UsageError) {
     console.error(`${err.message}\n\n${USAGE}`);
     process.exit(2);
+  }
+  if (err instanceof StartError) {
+    console.error(err.message);
+    process.exit(1);
   }
   console.error(err);
   process.exit(1);

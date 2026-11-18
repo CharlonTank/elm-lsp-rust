@@ -612,6 +612,15 @@ for (const host of ["127.0.0.1", "127.1"]) {
   });
 }
 
+test("a port that is taken is reported in one line", async (t) => {
+  const { port } = await connectOverHttp(t);
+  assert.deepEqual(await runNode(SERVER, ["--http", "--port", String(port)]), {
+    code: 1,
+    stdout: "",
+    stderr: `Cannot listen on 127.0.0.1:${port}: listen EADDRINUSE: address already in use 127.0.0.1:${port}\n`,
+  });
+});
+
 // A package's elm.json lists no source directories. Its modules are in src.
 const PACKAGE_ELM_JSON = {
   type: "package",
