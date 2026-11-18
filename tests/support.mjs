@@ -30,6 +30,9 @@ export function copyFixture(t, name = "fixture") {
   cpSync(join(REPO, "tests/fixture"), dir, {
     recursive: true,
     filter: (source) => !source.endsWith("elm-stuff"),
+    // The language server reads a file again while it is only moments old. A
+    // project's files rarely are, and neither are these with their old dates.
+    preserveTimestamps: true,
   });
   return dir;
 }

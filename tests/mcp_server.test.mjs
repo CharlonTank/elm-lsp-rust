@@ -5,7 +5,19 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "fs";
 import { dirname, join } from "path";
 import { once } from "node:events";
 import {
@@ -19,6 +31,9 @@ import {
   SERVER,
   tempDir,
 } from "./support.mjs";
+
+// Root reads and writes every file, whatever its permissions say
+const asRoot = process.getuid?.() === 0 && "permissions do not hold root back";
 
 test("the server works from a directory that is not an Elm project", async (t) => {
   const project = copyFixture(t);
@@ -334,6 +349,341 @@ test("the HTTP server offers the same tools and honours --read-only", async (t) 
   const closed = once(server, "close");
   server.kill("SIGTERM");
   assert.deepEqual(await closed, [0, null]);
+});
+
+// A package's elm.json lists no source directories. Its modules are in src.
+const PACKAGE_ELM_JSON = {
+  type: "package",
+  name: "author/fixture",
+  summary: "The fixture as a package",
+  license: "BSD-3-Clause",
+  version: "1.0.0",
+  "exposed-modules": ["Utils"],
+  "elm-version": "0.19.0 <= v < 0.20.0",
+  dependencies: { "elm/browser": "1.0.0 <= v < 2.0.0", "elm/core": "1.0.0 <= v < 2.0.0", "elm/html": "1.0.0 <= v < 2.0.0" },
+  "test-dependencies": {},
+};
+
+for (const kind of ["an application", "a package"]) {
+  test(`in ${kind}, files the agent changed with its own tools are seen by the next call`, async (t) => {
+    const project = copyFixture(t);
+    if (kind === "a package") {
+      writeFileSync(join(project, "elm.json"), JSON.stringify(PACKAGE_ELM_JSON));
+    }
+    const client = await connect(t, { cwd: project });
+    const main = join(project, "src/Main.elm");
+    const utils = join(project, "src/Utils.elm");
+    // The first call starts the language server, which reads every file once
+    await callTool(client, "elm_symbols", { file_path: utils });
+
+    // Between calls: two lines added to one file, one file created, one deleted
+    const shifted = readFileSync(main, "utf-8").replace("import Browser\n", "import Browser\n-- added\n-- by hand\n");
+    writeFileSync(main, shifted);
+    writeFileSync(join(project, "src/Extra.elm"), "module Extra exposing (loud)\n\nimport Utils\n\n\nloud =\n    Utils.formatName\n");
+    rmSync(join(project, "src/FieldRename.elm"));
+
+    const rename = await callTool(client, "elm_rename_function", {
+      file_path: utils,
+      line: 6,
+      character: 0,
+      old_name: "formatName",
+      newName: "shout",
+    });
+    assert.equal(rename.isError, false, rename.text);
+    // Edits computed from the old text of Main.elm would land two lines too high
+    assert.equal(readFileSync(main, "utf-8"), shifted.replaceAll("formatName", "shout"));
+    assert.match(readFileSync(join(project, "src/Extra.elm"), "utf-8"), /Utils\.shout/);
+    assert.match(rename.text, /Applied 7 edit\(s\) in 3 file\(s\)/);
+  });
+}
+
+test("a module moved to another source directory is found in its new place", async (t) => {
+  const project = copyFixture(t);
+  const elmJson = JSON.parse(readFileSync(join(project, "elm.json"), "utf-8"));
+  elmJson["source-directories"].push("lib");
+  writeFileSync(join(project, "elm.json"), JSON.stringify(elmJson));
+  mkdirSync(join(project, "lib"));
+  const client = await connect(t, { cwd: project });
+  // Main.elm calls greet, which Utils.elm defines
+  const definitionOfGreet = () =>
+    callTool(client, "elm_definition", { file_path: join(project, "src/Main.elm"), line: 48, character: 16 });
+  assert.equal((await definitionOfGreet()).text, `Definition at ${join(project, "src/Utils.elm")}:12:0`);
+
+  renameSync(join(project, "src/Utils.elm"), join(project, "lib/Utils.elm"));
+
+  assert.equal((await definitionOfGreet()).text, `Definition at ${join(project, "lib/Utils.elm")}:12:0`);
+});
+
+test("a source directory that appears after the server started is indexed", async (t) => {
+  const project = copyFixture(t);
+  const elmJson = JSON.parse(readFileSync(join(project, "elm.json"), "utf-8"));
+  elmJson["source-directories"].push("generated");
+  writeFileSync(join(project, "elm.json"), JSON.stringify(elmJson));
+  const client = await connect(t, { cwd: project });
+  const utils = join(project, "src/Utils.elm");
+  await callTool(client, "elm_symbols", { file_path: utils });
+
+  // A code generator writes its directory later. elm.json listed it all along.
+  mkdirSync(join(project, "generated"));
+  const consumer = join(project, "generated/Consumer.elm");
+  const text = "module Consumer exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n";
+  writeFileSync(consumer, text);
+
+  const rename = await callTool(client, "elm_rename_function", {
+    file_path: utils,
+    line: 6,
+    character: 0,
+    old_name: "formatName",
+    newName: "shout",
+  });
+  assert.equal(rename.isError, false, rename.text);
+  assert.equal(readFileSync(consumer, "utf-8"), text.replaceAll("formatName", "shout"));
+});
+
+test("a source directory added to elm.json is indexed", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const usesOfFormatName = () =>
+    callTool(client, "elm_references", { file_path: join(project, "src/Utils.elm"), line: 6, character: 0 });
+  mkdirSync(join(project, "lib"));
+  const extra = join(project, "lib/Extra.elm");
+  writeFileSync(extra, "module Extra exposing (loud)\n\nimport Utils\n\n\nloud =\n    Utils.formatName\n");
+  // lib is no source directory yet, so the new module is not part of the project
+  assert.doesNotMatch((await usesOfFormatName()).text, /Extra\.elm/);
+
+  const elmJson = JSON.parse(readFileSync(join(project, "elm.json"), "utf-8"));
+  elmJson["source-directories"].push("lib");
+  writeFileSync(join(project, "elm.json"), JSON.stringify(elmJson));
+
+  assert.match((await usesOfFormatName()).text, new RegExp(`${extra}:7:`));
+});
+
+test("a file outside the source directories is followed once a tool was called on it", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const utils = join(project, "src/Utils.elm");
+  const rename = (from, to) =>
+    callTool(client, "elm_rename_function", { file_path: utils, line: 6, character: 0, old_name: from, newName: to });
+  mkdirSync(join(project, "tests"));
+  const utilsTest = join(project, "tests/UtilsTest.elm");
+  const text = "module UtilsTest exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n";
+  writeFileSync(utilsTest, text);
+  // A test is no source file. The language server learns of it here.
+  await callTool(client, "elm_symbols", { file_path: utilsTest });
+
+  const shifted = text.replace("import Utils", "-- added\n-- by hand\nimport Utils");
+  writeFileSync(utilsTest, shifted);
+  const renamed = await rename("formatName", "shout");
+  assert.equal(renamed.isError, false, renamed.text);
+  // Edits computed from the text the server was given would land two lines too high
+  assert.equal(readFileSync(utilsTest, "utf-8"), shifted.replaceAll("formatName", "shout"));
+
+  rmSync(utilsTest);
+  const back = await rename("shout", "formatName");
+  assert.match(back.text, /Applied 6 edit\(s\) in 2 file\(s\)/);
+});
+
+test("a file out of reach is not taken for a deleted one", { skip: asRoot }, async (t) => {
+  const project = copyFixture(t);
+  const utils = join(project, "src/Utils.elm");
+  const rename = (client, from, to) =>
+    callTool(client, "elm_rename_function", { file_path: utils, line: 6, character: 0, old_name: from, newName: to });
+  const consumer = (module) => `module ${module} exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n`;
+  // A test, which the index knows from a tool call on it
+  const tests = join(project, "tests");
+  const utilsTest = join(tests, "UtilsTest.elm");
+  mkdirSync(tests);
+  writeFileSync(utilsTest, consumer("UtilsTest"));
+  // A module that is a link to a file kept somewhere else
+  const vault = join(tempDir(t), "vault");
+  const linked = join(project, "src/Linked.elm");
+  mkdirSync(vault);
+  writeFileSync(join(vault, "Linked.elm"), consumer("Linked"));
+  symlinkSync(join(vault, "Linked.elm"), linked);
+  const client = await connect(t, { cwd: project });
+  await callTool(client, "elm_symbols", { file_path: utilsTest });
+
+  try {
+    chmodSync(tests, 0o000);
+    assert.deepEqual(await rename(client, "formatName", "shout"), {
+      text: `Cannot read ${utilsTest}: Permission denied (os error 13).`,
+      isError: true,
+    });
+    chmodSync(tests, 0o755);
+    chmodSync(vault, 0o000);
+    assert.deepEqual(await rename(client, "formatName", "shout"), {
+      text: `Cannot read ${linked}: Permission denied (os error 13).`,
+      isError: true,
+    });
+  } finally {
+    chmodSync(tests, 0o755);
+    chmodSync(vault, 0o755);
+  }
+
+  // Both in reach again, and neither was dropped from the index meanwhile
+  const renamed = await rename(client, "formatName", "shout");
+  assert.match(renamed.text, /Applied 10 edit\(s\) in 4 file\(s\)/);
+  assert.equal(readFileSync(utilsTest, "utf-8"), consumer("UtilsTest").replaceAll("formatName", "shout"));
+  assert.equal(readFileSync(linked, "utf-8"), consumer("Linked").replaceAll("formatName", "shout"));
+});
+
+test("a file outside the source directories stays in an index that is built anew", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  mkdirSync(join(project, "tests"));
+  const utilsTest = join(project, "tests/UtilsTest.elm");
+  const text = "module UtilsTest exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n";
+  writeFileSync(utilsTest, text);
+  await callTool(client, "elm_symbols", { file_path: utilsTest });
+
+  // "elm install" writes elm.json again, and the language server then builds its index anew.
+  // In between the file is broken for a moment, and there is no index at all.
+  const elmJson = readFileSync(join(project, "elm.json"), "utf-8");
+  writeFileSync(join(project, "elm.json"), "{");
+  const symbolsOfUtils = () => callTool(client, "elm_symbols", { file_path: join(project, "src/Utils.elm") });
+  assert.equal((await symbolsOfUtils()).isError, true);
+
+  // The next two indexes find the file itself unreadable. Each says so, and neither forgets the file.
+  writeFileSync(utilsTest, Buffer.from([0xff, 0xfe]));
+  for (const ending of ["\n", "\n\n"]) {
+    writeFileSync(join(project, "elm.json"), `${elmJson}${ending}`);
+    const unread = await symbolsOfUtils();
+    assert.equal(unread.isError, true);
+    assert.ok(unread.text.includes(utilsTest), unread.text);
+  }
+  writeFileSync(utilsTest, text);
+  writeFileSync(join(project, "elm.json"), elmJson);
+
+  const renamed = await callTool(client, "elm_rename_function", {
+    file_path: join(project, "src/Utils.elm"),
+    line: 6,
+    character: 0,
+    old_name: "formatName",
+    newName: "shout",
+  });
+  assert.match(renamed.text, /Applied 8 edit\(s\) in 3 file\(s\)/);
+  assert.equal(readFileSync(utilsTest, "utf-8"), text.replaceAll("formatName", "shout"));
+});
+
+test("while elm.json cannot be read every tool says so, and the index is built once it can", async (t) => {
+  const project = copyFixture(t);
+  const elmJson = join(project, "elm.json");
+  const sound = readFileSync(elmJson, "utf-8");
+  const usesOfFormatName = (client) =>
+    callTool(client, "elm_references", { file_path: join(project, "src/Utils.elm"), line: 6, character: 0 });
+
+  // Broken before the language server starts, so it starts without an index
+  writeFileSync(elmJson, sound.replace(/\}\s*$/, ",}"));
+  const client = await connect(t, { cwd: project });
+  const refused = await usesOfFormatName(client);
+  assert.equal(refused.isError, true);
+  assert.ok(refused.text.startsWith(`Cannot read ${elmJson}: `), refused.text);
+
+  writeFileSync(elmJson, sound);
+  const found = await usesOfFormatName(client);
+  assert.equal(found.isError, false, found.text);
+  assert.match(found.text, /src\/Main\.elm/);
+
+  // Broken again while the server is running
+  writeFileSync(elmJson, "{");
+  assert.ok((await usesOfFormatName(client)).text.startsWith(`Cannot read ${elmJson}: `));
+  // There and not readable as text is no missing elm.json, whose modules would be looked for in src
+  writeFileSync(elmJson, Buffer.from([0xff, 0xfe]));
+  assert.equal((await usesOfFormatName(client)).text, `Cannot read ${elmJson}: stream did not contain valid UTF-8.`);
+  writeFileSync(elmJson, sound);
+  assert.deepEqual(await usesOfFormatName(client), found);
+});
+
+test("while a source file cannot be read every tool says so, and the file is indexed once it can", async (t) => {
+  const project = copyFixture(t);
+  const main = join(project, "src/Main.elm");
+  const utils = join(project, "src/Utils.elm");
+  const text = readFileSync(main);
+  const { atime, mtime } = statSync(main);
+  // Not text, of the length and with the date the file had. A file without read permission fails the same way.
+  const unreadable = () => {
+    writeFileSync(main, Buffer.alloc(text.length, 0xff));
+    utimesSync(main, atime, mtime);
+  };
+  const readable = () => {
+    writeFileSync(main, text);
+    utimesSync(main, atime, mtime);
+  };
+  const rename = (client, from, to) =>
+    callTool(client, "elm_rename_function", { file_path: utils, line: 6, character: 0, old_name: from, newName: to });
+
+  // Unreadable when the language server starts
+  unreadable();
+  const client = await connect(t, { cwd: project });
+  assert.deepEqual(await rename(client, "formatName", "shout"), {
+    text: `Cannot read ${main}: stream did not contain valid UTF-8.`,
+    isError: true,
+  });
+  assert.match(readFileSync(utils, "utf-8"), /^formatName name =$/m);
+
+  // Nothing about the file tells that it changed, except that it was never read
+  readable();
+  const renamed = await rename(client, "formatName", "shout");
+  assert.match(renamed.text, /Applied 6 edit\(s\) in 2 file\(s\)/);
+  assert.match(readFileSync(main, "utf-8"), /shout model\.user\.name/);
+
+  // Unreadable later on
+  writeFileSync(main, Buffer.from([0xff]));
+  assert.equal((await rename(client, "shout", "formatName")).text, `Cannot read ${main}: stream did not contain valid UTF-8.`);
+});
+
+test("while a directory of sources cannot be listed every tool says so", { skip: asRoot }, async (t) => {
+  const project = copyFixture(t);
+  const utils = join(project, "src/Utils.elm");
+  const hidden = join(project, "src/Hidden");
+  const deep = join(hidden, "Deep.elm");
+  mkdirSync(hidden);
+  writeFileSync(deep, "module Hidden.Deep exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n");
+  const rename = (client, from, to) =>
+    callTool(client, "elm_rename_function", { file_path: utils, line: 6, character: 0, old_name: from, newName: to });
+  const refused = { text: `Cannot read ${hidden}: Permission denied (os error 13).`, isError: true };
+
+  try {
+    // Closed when the language server starts
+    chmodSync(hidden, 0o000);
+    const client = await connect(t, { cwd: project });
+    assert.deepEqual(await rename(client, "formatName", "shout"), refused);
+    assert.match(readFileSync(utils, "utf-8"), /^formatName name =$/m);
+
+    chmodSync(hidden, 0o755);
+    assert.equal((await rename(client, "formatName", "shout")).isError, false);
+    assert.match(readFileSync(deep, "utf-8"), /^    shout$/m);
+
+    // Closed later on. A rename that left the module in it as it was would break the build.
+    chmodSync(hidden, 0o000);
+    assert.deepEqual(await rename(client, "shout", "formatName"), refused);
+  } finally {
+    // Open again, or the copy of the project cannot be removed
+    chmodSync(hidden, 0o755);
+  }
+});
+
+test("a link to nothing and a dot-file among the source files are passed over", async (t) => {
+  const project = copyFixture(t);
+  const types = join(project, "src/Types.elm");
+  const client = await connect(t, { cwd: project });
+  assert.match((await callTool(client, "elm_symbols", { file_path: types })).text, /^Found 4 symbols/);
+
+  // Emacs keeps such a link beside every buffer with unsaved changes
+  symlinkSync("someone@host.1234", join(project, "src/.#Types.elm"));
+  // A link to a module that is still to be generated
+  symlinkSync("../generated/Later.elm", join(project, "src/Later.elm"));
+  // macOS keeps such a file beside Types.elm on a volume without extended attributes. It is no
+  // text, and no module either: a module's name starts with a letter.
+  writeFileSync(join(project, "src/._Types.elm"), Buffer.from([0x00, 0x05, 0x16, 0x07, 0xff, 0xfe]));
+  // The same goes for what lies in a directory of such a name
+  mkdirSync(join(project, "src/.cache"));
+  writeFileSync(join(project, "src/.cache/Old.elm"), Buffer.from([0xff, 0xfe]));
+
+  assert.match((await callTool(client, "elm_symbols", { file_path: types })).text, /^Found 4 symbols/);
+  // A server that starts with the link in place gets by as well
+  const second = await connect(t, { cwd: project });
+  assert.match((await callTool(second, "elm_symbols", { file_path: types })).text, /^Found 4 symbols/);
 });
 
 test("--elm-projects-only exits quietly outside an Elm project", async (t) => {

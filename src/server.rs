@@ -26,12 +26,19 @@ const CMD_PREPARE_REMOVE_FIELD: &str = "elm.prepareRemoveField";
 const CMD_REMOVE_FIELD: &str = "elm.removeField";
 const CMD_PREPARE_ADD_VARIANT: &str = "elm.prepareAddVariant";
 const CMD_ADD_VARIANT: &str = "elm.addVariant";
+const CMD_SYNC_WITH_DISK: &str = "elm.syncWithDisk";
 
 pub struct ElmLanguageServer {
     client: Client,
     documents: DashMap<Url, Document>,
     parser: ElmParser,
+    /// The project directory the client named when it connected
+    root: RwLock<Option<PathBuf>>,
+    /// The index of that project. `None` while its elm.json cannot be read.
     workspace: RwLock<Option<Workspace>>,
+    /// The files beyond the source directories that the last index held,
+    /// kept while there is none, for the next one to take over
+    beyond_the_walk: RwLock<Vec<PathBuf>>,
     diagnostics_provider: RwLock<DiagnosticsProvider>,
 }
 
@@ -41,11 +48,16 @@ impl ElmLanguageServer {
             client,
             documents: DashMap::new(),
             parser: ElmParser::new(),
+            root: RwLock::new(None),
             workspace: RwLock::new(None),
+            beyond_the_walk: RwLock::new(Vec::new()),
             diagnostics_provider: RwLock::new(DiagnosticsProvider::new()),
         }
     }
 
+    /// Take in the new text of a document. This must not wait for anything:
+    /// a client sends its request right behind the document, and that order
+    /// holds only as long as a notification is done when its handler returns.
     fn on_change(&self, uri: Url, text: String, version: i32) {
         tracing::info!("on_change: uri={}", uri);
         let doc = Document::new(uri.clone(), text.clone(), version);
@@ -77,6 +89,16 @@ impl ElmLanguageServer {
             provider.get_diagnostics(uri)
         } else {
             Vec::new()
+        }
+    }
+
+    /// Drop a file that is gone from the open documents and from the index.
+    fn forget_file(&self, uri: &Url) {
+        self.documents.remove(uri);
+        if let Ok(mut ws) = self.workspace.write() {
+            if let Some(workspace) = ws.as_mut() {
+                workspace.remove_file(uri);
+            }
         }
     }
 
@@ -609,6 +631,9 @@ impl LanguageServer for ElmLanguageServer {
                 if let Ok(mut diag) = self.diagnostics_provider.write() {
                     diag.set_workspace_root(&path.to_string_lossy());
                 }
+                if let Ok(mut root) = self.root.write() {
+                    *root = Some(path.clone());
+                }
 
                 let mut workspace = Workspace::new(path);
                 if let Err(e) = workspace.initialize() {
@@ -662,6 +687,7 @@ impl LanguageServer for ElmLanguageServer {
                         CMD_REMOVE_FIELD.to_string(),
                         CMD_PREPARE_ADD_VARIANT.to_string(),
                         CMD_ADD_VARIANT.to_string(),
+                        CMD_SYNC_WITH_DISK.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -741,12 +767,7 @@ impl LanguageServer for ElmLanguageServer {
                 }
                 FileChangeType::DELETED => {
                     tracing::info!("File deleted: {}", uri);
-                    self.documents.remove(&uri);
-                    if let Ok(mut ws) = self.workspace.write() {
-                        if let Some(workspace) = ws.as_mut() {
-                            workspace.remove_file(&uri);
-                        }
-                    }
+                    self.forget_file(&uri);
                 }
                 _ => {}
             }
@@ -1530,6 +1551,106 @@ impl LanguageServer for ElmLanguageServer {
                     "uri": file_uri,
                     "diagnostics": diagnostics_json
                 })))
+            }
+            CMD_SYNC_WITH_DISK => {
+                // No arguments. Brings the index in step with the project on
+                // disk, which an agent edits with its own tools between calls.
+                // The reply has "synced": true, or false with the reason in "error".
+                let not_synced = |reason: String| {
+                    Ok(Some(
+                        serde_json::json!({ "synced": false, "error": reason }),
+                    ))
+                };
+                let Some(root) = self.root.read().ok().and_then(|root| root.clone()) else {
+                    return not_synced(
+                        "The language server was started without a project directory".to_string(),
+                    );
+                };
+
+                let changes = {
+                    let Ok(mut ws) = self.workspace.write() else {
+                        return not_synced("The index is unavailable".to_string());
+                    };
+
+                    // There is no index while elm.json cannot be read, and the one
+                    // there is was built from elm.json as it read at the time
+                    let current = ws
+                        .as_ref()
+                        .is_some_and(|workspace| !workspace.elm_json_changed());
+                    if !current {
+                        // A test or another file beyond the source directories, which a
+                        // document was opened for, stays in the index. With no index to
+                        // ask, as after an elm.json that could not be read, the list that
+                        // was kept from the last one stands in.
+                        let Ok(mut kept) = self.beyond_the_walk.write() else {
+                            return not_synced("The index is unavailable".to_string());
+                        };
+                        if let Some(workspace) = ws.as_mut() {
+                            *kept = workspace.files_beyond_the_walk();
+                        }
+                        let mut fresh = Workspace::new(root.clone());
+                        if let Err(e) = fresh.initialize() {
+                            // An index built from another elm.json would answer for a project that no longer is
+                            *ws = None;
+                            return not_synced(format!(
+                                "Cannot read {}: {}.",
+                                root.join("elm.json").display(),
+                                e
+                            ));
+                        }
+                        fresh.adopt(&kept);
+                        kept.clear();
+                        let incomplete = fresh.unreadable_files();
+                        *ws = Some(fresh);
+                        self.documents.clear();
+                        return match incomplete {
+                            Some(problem) => not_synced(problem),
+                            None => Ok(Some(
+                                serde_json::json!({ "synced": true, "reindexed": true }),
+                            )),
+                        };
+                    }
+
+                    ws.as_mut()
+                        .map(|workspace| workspace.take_disk_changes())
+                        .unwrap_or_default()
+                };
+
+                // Deletions first. A module that moved to another directory keeps
+                // its name, and its old symbols are found by that name.
+                for path in &changes.deleted {
+                    if let Ok(uri) = Url::from_file_path(path) {
+                        self.forget_file(&uri);
+                    }
+                }
+                for path in &changes.changed {
+                    let read = std::fs::read_to_string(path);
+                    if let (Ok(uri), Ok(text)) = (Url::from_file_path(path), &read) {
+                        self.on_change(uri, text.clone(), 0);
+                    }
+                    if let Ok(mut ws) = self.workspace.write() {
+                        if let Some(workspace) = ws.as_mut() {
+                            match read {
+                                Ok(_) => workspace.mark_read(path),
+                                Err(e) => workspace.mark_unreadable(path, e.to_string()),
+                            }
+                        }
+                    }
+                }
+
+                // A file the index could not read is a file a refactoring would pass over
+                let incomplete = self.workspace.read().ok().and_then(|ws| {
+                    ws.as_ref()
+                        .and_then(|workspace| workspace.unreadable_files())
+                });
+                match incomplete {
+                    Some(problem) => not_synced(problem),
+                    None => Ok(Some(serde_json::json!({
+                        "synced": true,
+                        "changed": changes.changed.len(),
+                        "deleted": changes.deleted.len()
+                    }))),
+                }
             }
             CMD_PREPARE_REMOVE_VARIANT => {
                 // Expected arguments: [uri, line, character]

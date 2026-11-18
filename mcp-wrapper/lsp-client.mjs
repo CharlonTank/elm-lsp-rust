@@ -255,6 +255,21 @@ export class ElmLspClient {
     });
   }
 
+  /**
+   * Have the server compare its index with the project's source files and read
+   * the ones that changed. It reads them once, when it starts. An agent edits,
+   * creates and deletes files with its own tools between calls, and a
+   * refactoring computed from the old text would put its edits in the wrong
+   * places.
+   */
+  async syncWithDisk() {
+    const result = await this.executeCommand("elm.syncWithDisk", []);
+    // The server says why it has no index, for instance an elm.json it cannot read
+    if (result?.synced === false) {
+      throw new ToolError(result.error);
+    }
+  }
+
   // Start the idle countdown again. Called for every use of the client.
   keepAlive() {
     clearTimeout(this.idleTimer);
@@ -276,6 +291,10 @@ export class ElmLspClient {
 // The promise settles once the server has answered the handshake.
 const clients = new Map(); // workspace root -> Promise<ElmLspClient>
 
+/**
+ * The language server for a project, with its index in step with the
+ * project's files as they are on disk right now.
+ */
 export async function ensureClient(workspaceRoot) {
   let starting = clients.get(workspaceRoot);
   if (!starting) {
@@ -294,6 +313,7 @@ export async function ensureClient(workspaceRoot) {
 
   const client = await starting;
   client.keepAlive();
+  await client.syncWithDisk();
   return client;
 }
 

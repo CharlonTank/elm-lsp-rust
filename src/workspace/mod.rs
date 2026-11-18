@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use tower_lsp::lsp_types::*;
 use walkdir::WalkDir;
 
@@ -26,6 +27,96 @@ pub fn depends_on_lamdera(elm_json: &serde_json::Value) -> bool {
             .as_object()
             .is_some_and(|packages| packages.keys().any(|name| name.starts_with("lamdera/")))
     })
+}
+
+/// The path without its "." and ".." parts, worked out from the text alone.
+/// A source directory such as "../shared" is then spelled the way every
+/// other path of the project is, so a file has one name in the index.
+pub(crate) fn normalized(path: &Path) -> PathBuf {
+    let mut plain = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                plain.pop();
+            }
+            other => plain.push(other.as_os_str()),
+        }
+    }
+    plain
+}
+
+/// Why a file is not there for the index to read.
+enum Absent {
+    /// Nothing is at the path, or a link that leads nowhere
+    Gone,
+    /// Something is, and it cannot be looked at. Carries the reason.
+    Hidden(String),
+}
+
+/// Whether an error says that nothing is at a path: no entry of that name,
+/// or a plain file where one of the directories on the way would have to be.
+fn says_nothing_is_there(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// Look at a path the way a read of it would, following links: `Ok` when a
+/// file is there. A missing permission on a directory above it must not pass
+/// for a missing file, or the index would drop a module that is still there.
+fn file_at(path: &Path) -> Result<(), Absent> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(Absent::Gone),
+        Err(e) if says_nothing_is_there(&e) => Err(Absent::Gone),
+        Err(e) => Err(Absent::Hidden(e.to_string())),
+    }
+}
+
+/// How a source file looked when the index last read it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FileStamp {
+    modified: SystemTime,
+    len: u64,
+}
+
+/// File systems round modification times, some to two seconds. A file that
+/// changed more recently than this can change again without a new stamp, so
+/// it gets none and is read again at the next look.
+const UNSETTLED: Duration = Duration::from_secs(2);
+
+impl FileStamp {
+    /// The stamp of a file, or `None` while the file is too fresh to have a reliable one.
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok()?;
+        // A date well ahead of the clock is as far from the next write as one well behind it
+        let settled = match modified.elapsed() {
+            Ok(age) => age > UNSETTLED,
+            Err(ahead) => ahead.duration() > UNSETTLED,
+        };
+        settled.then_some(FileStamp {
+            modified,
+            len: metadata.len(),
+        })
+    }
+
+    /// Whether a file that had the stamp `before` and has the stamp `now` is
+    /// known to be the same. Without a stamp it may have changed unnoticed.
+    fn unchanged(before: &Option<Self>, now: &Option<Self>) -> bool {
+        now.is_some() && before == now
+    }
+}
+
+/// The source files that differ on disk from what the index last read.
+#[derive(Debug, Default, PartialEq)]
+pub struct DiskChanges {
+    /// New or modified
+    pub changed: Vec<PathBuf>,
+    /// Gone
+    pub deleted: Vec<PathBuf>,
 }
 
 /// Represents an Elm module with its symbols and metadata
@@ -123,6 +214,17 @@ pub struct Workspace {
     pub external_packages: Vec<ExternalPackage>,
     /// Symbols from external packages (indexed separately)
     pub external_symbols: HashMap<String, Vec<GlobalSymbol>>,
+    /// The source files as the index last read them
+    file_stamps: HashMap<PathBuf, Option<FileStamp>>,
+    /// elm.json as it was read, or `None` when there was none
+    elm_json_text: Option<String>,
+    /// Source files that could not be read, each with the reason. The index
+    /// knows nothing of them, so a refactoring would pass them over.
+    unreadable: BTreeMap<PathBuf, String>,
+    /// What the last walk of the source directories could not look at, each
+    /// with the reason: a directory it could not list, or a file it could not
+    /// tell from a missing one. What lies there is unknown to the index.
+    hidden: Vec<(PathBuf, String)>,
 }
 
 impl Workspace {
@@ -138,6 +240,10 @@ impl Workspace {
             is_lamdera_project: false,
             external_packages: Vec::new(),
             external_symbols: HashMap::new(),
+            file_stamps: HashMap::new(),
+            elm_json_text: None,
+            unreadable: BTreeMap::new(),
+            hidden: Vec::new(),
         }
     }
 
@@ -196,16 +302,12 @@ impl Workspace {
     /// Initialize workspace by reading elm.json and indexing all files
     pub fn initialize(&mut self) -> anyhow::Result<()> {
         // Read elm.json to find source directories
-        let elm_json_path = self.root_path.join("elm.json");
-        if elm_json_path.exists() {
-            let content = std::fs::read_to_string(&elm_json_path)?;
+        self.elm_json_text = self.read_elm_json()?;
+        if let Some(content) = self.elm_json_text.clone() {
             self.parse_elm_json(&content)?;
         } else {
             // Default to src/ if no elm.json
-            let src_dir = self.root_path.join("src");
-            if src_dir.exists() {
-                self.source_dirs.push(src_dir);
-            }
+            self.source_dirs = vec![self.root_path.join("src")];
         }
 
         // Index all .elm files
@@ -226,27 +328,21 @@ impl Workspace {
             tracing::info!("Detected Lamdera project");
         }
 
-        // Handle both application and package elm.json formats
-        if let Some(source_dirs) = json.get("source-directories") {
-            if let Some(dirs) = source_dirs.as_array() {
-                for dir in dirs {
-                    if let Some(dir_str) = dir.as_str() {
-                        let full_path = self.root_path.join(dir_str);
-                        if full_path.exists() {
-                            self.source_dirs.push(full_path);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Package format uses "src" implicitly
-        if self.source_dirs.is_empty() {
-            let src_dir = self.root_path.join("src");
-            if src_dir.exists() {
-                self.source_dirs.push(src_dir);
-            }
-        }
+        // An application lists its source directories. A package has none to
+        // list and keeps its modules in src. A directory that is not there yet
+        // is kept as well: generated sources appear after the server started,
+        // and the walk passes over what does not exist.
+        self.source_dirs = match json
+            .get("source-directories")
+            .and_then(|dirs| dirs.as_array())
+        {
+            Some(dirs) => dirs
+                .iter()
+                .filter_map(|dir| dir.as_str())
+                .map(|dir| normalized(&self.root_path.join(dir)))
+                .collect(),
+            None => vec![self.root_path.join("src")],
+        };
 
         // Parse dependencies for external package support
         self.parse_dependencies(&json);
@@ -381,31 +477,244 @@ impl Workspace {
         Ok(())
     }
 
-    /// Index all .elm files in the workspace
-    pub fn index_all_files(&mut self) -> anyhow::Result<()> {
-        let mut files_to_index = Vec::new();
-        let is_lamdera = self.is_lamdera_project;
+    /// The .elm files in the source directories. A Lamdera project's
+    /// Evergreen snapshots are left out. What cannot be looked at is noted,
+    /// because the answer is short of it.
+    fn source_files(&mut self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut hidden = Vec::new();
 
         for source_dir in &self.source_dirs {
-            for entry in WalkDir::new(source_dir).into_iter().filter_map(|e| e.ok()) {
+            // No part of a module's name starts with a dot, so below a source directory
+            // nothing that does is a module or leads to one. macOS keeps ._Main.elm beside
+            // Main.elm on a volume without extended attributes, and it is no text.
+            let walk = WalkDir::new(source_dir).into_iter().filter_entry(|entry| {
+                entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
+            });
+            for entry in walk {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        // What is not there has nothing to read, such as a
+                        // source directory that is still to be generated
+                        let io = e.io_error();
+                        let missing = io.is_some_and(says_nothing_is_there);
+                        if let (false, Some(path)) = (missing, e.path()) {
+                            let reason = io.map_or_else(|| e.to_string(), |io| io.to_string());
+                            hidden.push((path.to_path_buf(), reason));
+                        }
+                        continue;
+                    }
+                };
                 let path = entry.path();
 
-                // Skip Evergreen directory in Lamdera projects
-                if is_lamdera && self.is_evergreen_path(path) {
+                if self.is_lamdera_project && self.is_evergreen_path(path) {
+                    continue;
+                }
+                let is_elm = path.extension().is_some_and(|ext| ext == "elm");
+                if !is_elm {
                     continue;
                 }
 
-                if path.extension().is_some_and(|ext| ext == "elm") {
-                    files_to_index.push(path.to_path_buf());
+                // Links are followed, so a link to nothing is left out, such as one
+                // to a module that is still to be generated
+                match file_at(path) {
+                    Ok(()) => files.push(path.to_path_buf()),
+                    Err(Absent::Gone) => {}
+                    Err(Absent::Hidden(reason)) => hidden.push((path.to_path_buf(), reason)),
                 }
             }
         }
 
+        self.hidden = hidden;
+        files
+    }
+
+    /// The text of elm.json, or `None` when the project has none. A file
+    /// that is there and cannot be read is an error: taking it for a missing
+    /// one would index another project than the one on disk.
+    fn read_elm_json(&self) -> std::io::Result<Option<String>> {
+        match std::fs::read_to_string(self.root_path.join("elm.json")) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether elm.json reads differently now than when the index was built.
+    /// The source directories and the dependencies come from it, so the index
+    /// has to be built anew. The file is small, and its text tells more
+    /// reliably than its modification time.
+    pub fn elm_json_changed(&self) -> bool {
+        !self
+            .read_elm_json()
+            .is_ok_and(|text| text == self.elm_json_text)
+    }
+
+    /// Note that a source file could not be read. It gets no stamp, so the
+    /// next comparison reports it again.
+    pub fn mark_unreadable(&mut self, path: &Path, reason: String) {
+        self.file_stamps.insert(path.to_path_buf(), None);
+        self.unreadable.insert(path.to_path_buf(), reason);
+    }
+
+    /// Note that a source file was read after all.
+    pub fn mark_read(&mut self, path: &Path) {
+        self.unreadable.remove(path);
+    }
+
+    /// What is missing from the index, in one sentence, or `None` when every
+    /// source file was read.
+    pub fn unreadable_files(&self) -> Option<String> {
+        // A file can be on both lists: hidden from the walk, and then not read
+        let mut all: BTreeMap<&PathBuf, &String> = self.unreadable.iter().collect();
+        all.extend(self.hidden.iter().map(|(path, reason)| (path, reason)));
+        // A directory that cannot be listed speaks for the files in it
+        let unread: Vec<(&PathBuf, &String)> = all
+            .iter()
+            .filter(|(path, _)| {
+                !path
+                    .ancestors()
+                    .skip(1)
+                    .any(|above| all.contains_key(&above.to_path_buf()))
+            })
+            .map(|(path, reason)| (*path, *reason))
+            .collect();
+        let (path, reason) = unread.first()?;
+        let more = match unread.len() - 1 {
+            0 => String::new(),
+            1 => " One more file or directory cannot be read either.".to_string(),
+            n => format!(" {} more files or directories cannot be read either.", n),
+        };
+        Some(format!(
+            "Cannot read {}: {}.{}",
+            path.display(),
+            reason,
+            more
+        ))
+    }
+
+    /// Compare the source files on disk with what the index last read, and
+    /// remember how they look now. The caller brings the index up to date.
+    pub fn take_disk_changes(&mut self) -> DiskChanges {
+        let mut current: HashMap<PathBuf, Option<FileStamp>> = self
+            .source_files()
+            .into_iter()
+            .map(|path| {
+                let stamp = FileStamp::of(&path);
+                (path, stamp)
+            })
+            .collect();
+
+        // A file that the walk does not return is in the index once a document
+        // was opened for it: a test or an Evergreen snapshot. It has no stamp
+        // until the first comparison, which reads it for that reason. One that
+        // could not be read is looked for again in the same way.
+        let beyond: Vec<PathBuf> = self
+            .modules
+            .values()
+            .map(|module| &module.path)
+            .chain(self.unreadable.keys())
+            .filter(|path| !current.contains_key(*path))
+            .cloned()
+            .collect();
+        let mut gone: Vec<PathBuf> = Vec::new();
+        for path in beyond {
+            match file_at(&path) {
+                Ok(()) => {
+                    let stamp = FileStamp::of(&path);
+                    current.insert(path, stamp);
+                }
+                Err(Absent::Gone) => gone.push(path),
+                // Still there, as far as anyone can tell. Without a stamp it
+                // is read at this and every later comparison, and the failed
+                // read is what the caller reports.
+                Err(Absent::Hidden(_)) => {
+                    current.insert(path, None);
+                }
+            }
+        }
+
+        let mut changes = DiskChanges::default();
+        for (path, stamp) in &current {
+            let known = self.file_stamps.get(path);
+            if !known.is_some_and(|before| FileStamp::unchanged(before, stamp)) {
+                changes.changed.push(path.clone());
+            }
+        }
+        changes.deleted = self
+            .file_stamps
+            .keys()
+            .filter(|path| !current.contains_key(*path))
+            .cloned()
+            .chain(gone)
+            .collect();
+        changes.changed.sort();
+        changes.deleted.sort();
+        changes.deleted.dedup();
+        for path in &changes.deleted {
+            self.unreadable.remove(path);
+        }
+
+        self.file_stamps = current;
+        changes
+    }
+
+    /// The indexed files that a walk of the source directories does not
+    /// return, such as a test a document was opened for. One of them that
+    /// could not be read is in no module, and is a file of the index all the
+    /// same: the index that is built after this one has to ask for it again.
+    pub fn files_beyond_the_walk(&mut self) -> Vec<PathBuf> {
+        let walked: std::collections::HashSet<PathBuf> = self.source_files().into_iter().collect();
+        let mut beyond: Vec<PathBuf> = self
+            .modules
+            .values()
+            .map(|module| &module.path)
+            .chain(self.unreadable.keys())
+            .filter(|path| !walked.contains(*path))
+            .cloned()
+            .collect();
+        beyond.sort();
+        beyond.dedup();
+        beyond
+    }
+
+    /// Index files that an earlier index held beyond its walk, so that
+    /// building the index anew does not drop them. One that this index has
+    /// from its own walk, or that is gone, is passed over.
+    pub fn adopt(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            if self.modules.values().any(|module| module.path == *path) {
+                continue;
+            }
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    if let Ok(uri) = Url::from_file_path(path) {
+                        self.update_file(&uri, &text);
+                    }
+                }
+                Err(e) if says_nothing_is_there(&e) => {}
+                Err(e) => self.mark_unreadable(path, e.to_string()),
+            }
+        }
+    }
+
+    /// Index all .elm files in the workspace
+    pub fn index_all_files(&mut self) -> anyhow::Result<()> {
+        let files_to_index = self.source_files();
+        // Stamped before the files are read, so a change in between shows up as one later
+        self.file_stamps = files_to_index
+            .iter()
+            .map(|path| (path.clone(), FileStamp::of(path)))
+            .collect();
+
         tracing::info!("Indexing {} Elm files", files_to_index.len());
 
+        self.unreadable.clear();
         for path in files_to_index {
             if let Err(e) = self.index_file(&path) {
                 tracing::warn!("Failed to index {:?}: {}", path, e);
+                self.mark_unreadable(&path, e.to_string());
             }
         }
 
@@ -2350,6 +2659,545 @@ mod tests {
         workspace.initialize().unwrap();
 
         (temp_dir, workspace)
+    }
+
+    /// Write a source file and date it far enough back for its stamp to count.
+    fn write_settled(path: &Path, content: &str) {
+        fs::write(path, content).unwrap();
+        let a_minute_ago = SystemTime::now() - Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(a_minute_ago)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_disk_changes_are_new_modified_and_deleted_files() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let a = temp_dir.path().join("src").join("A.elm");
+        let b = temp_dir.path().join("src").join("B.elm");
+
+        write_settled(&a, "module A exposing (..)\n");
+        write_settled(&b, "module B exposing (..)\n");
+        assert_eq!(
+            workspace.take_disk_changes(),
+            DiskChanges {
+                changed: vec![a.clone(), b.clone()],
+                deleted: vec![]
+            }
+        );
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+
+        // Same length, later modification time
+        write_settled(&a, "module A exposing (a)\n\n");
+        write_settled(&a, "module A exposing (..)\n");
+        fs::remove_file(&b).unwrap();
+        assert_eq!(
+            workspace.take_disk_changes(),
+            DiskChanges {
+                changed: vec![a],
+                deleted: vec![b]
+            }
+        );
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+    }
+
+    #[test]
+    fn test_an_indexed_file_outside_the_source_directories_is_compared_too() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let a_test = temp_dir.path().join("tests").join("ATest.elm");
+        let uri = Url::from_file_path(&a_test).unwrap();
+        fs::create_dir(a_test.parent().unwrap()).unwrap();
+        write_settled(&a_test, "module ATest exposing (..)\n");
+        // The walk does not reach it
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+
+        // A document was opened for it, with a text that the file may not hold any more
+        workspace.update_file(&uri, "module ATest exposing (..)\n");
+        let only_the_test = || DiskChanges {
+            changed: vec![a_test.clone()],
+            deleted: vec![],
+        };
+        assert_eq!(workspace.take_disk_changes(), only_the_test());
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+
+        write_settled(&a_test, "module ATest exposing (a)\n");
+        assert_eq!(workspace.take_disk_changes(), only_the_test());
+
+        fs::remove_file(&a_test).unwrap();
+        assert_eq!(
+            workspace.take_disk_changes(),
+            DiskChanges {
+                changed: vec![],
+                deleted: vec![a_test.clone()]
+            }
+        );
+        workspace.remove_file(&uri);
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+    }
+
+    /// Take every permission from a directory, or return false where that
+    /// holds nobody back, as for root. The caller gives them back with `open`.
+    #[cfg(unix)]
+    fn close(dir: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(dir).is_ok() {
+            open(dir);
+            return false;
+        }
+        true
+    }
+
+    #[cfg(unix)]
+    fn open(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_an_indexed_file_that_cannot_be_looked_at_is_not_taken_for_deleted() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let tests_dir = temp_dir.path().join("tests");
+        let a_test = tests_dir.join("ATest.elm");
+        fs::create_dir(&tests_dir).unwrap();
+        write_settled(&a_test, "module ATest exposing (..)\n");
+        workspace.update_file(
+            &Url::from_file_path(&a_test).unwrap(),
+            "module ATest exposing (..)\n",
+        );
+        assert_eq!(workspace.take_disk_changes().changed, vec![a_test.clone()]);
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+
+        if !close(&tests_dir) {
+            return;
+        }
+        let hidden = workspace.take_disk_changes();
+        let again = workspace.take_disk_changes();
+        open(&tests_dir);
+        // Reported for reading, which fails and tells the caller why. Never as deleted.
+        let to_read = DiskChanges {
+            changed: vec![a_test.clone()],
+            deleted: vec![],
+        };
+        assert_eq!(hidden, to_read);
+        assert_eq!(again, to_read);
+        assert!(workspace.modules.contains_key("ATest"));
+
+        // Within reach again, it is read once more
+        assert_eq!(workspace.take_disk_changes(), to_read);
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_link_whose_file_cannot_be_looked_at_is_missing_from_the_index() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let vault = temp_dir.path().join("vault");
+        let link = temp_dir.path().join("src").join("Linked.elm");
+        fs::create_dir(&vault).unwrap();
+        write_settled(&vault.join("Linked.elm"), "module Linked exposing (..)\n");
+        std::os::unix::fs::symlink(vault.join("Linked.elm"), &link).unwrap();
+        // A link to nothing, by contrast, is no file at all
+        std::os::unix::fs::symlink(
+            "../generated/Later.elm",
+            temp_dir.path().join("src").join("Later.elm"),
+        )
+        .unwrap();
+
+        if !close(&vault) {
+            return;
+        }
+        workspace.initialize().unwrap();
+        let problem = workspace.unreadable_files();
+        let changes = workspace.take_disk_changes();
+        let still = workspace.unreadable_files();
+        open(&vault);
+        let told = Some(format!(
+            "Cannot read {}: Permission denied (os error 13).",
+            link.display()
+        ));
+        assert_eq!(problem, told);
+        assert_eq!(changes, DiskChanges::default());
+        assert_eq!(still, told);
+
+        assert_eq!(workspace.take_disk_changes().changed, vec![link]);
+        assert_eq!(workspace.unreadable_files(), None);
+    }
+
+    #[test]
+    fn test_a_file_beyond_the_source_directories_survives_a_new_index() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let a_test = temp_dir.path().join("tests").join("ATest.elm");
+        let gone = temp_dir.path().join("tests").join("Gone.elm");
+        fs::create_dir(a_test.parent().unwrap()).unwrap();
+        write_settled(
+            &temp_dir.path().join("src").join("A.elm"),
+            "module A exposing (..)\n",
+        );
+        for path in [&a_test, &gone] {
+            write_settled(path, "module X exposing (..)\n");
+        }
+        workspace.initialize().unwrap();
+        workspace.update_file(
+            &Url::from_file_path(&a_test).unwrap(),
+            "module ATest exposing (..)\n",
+        );
+        workspace.update_file(
+            &Url::from_file_path(&gone).unwrap(),
+            "module Gone exposing (..)\n",
+        );
+        let beyond = workspace.files_beyond_the_walk();
+        assert_eq!(beyond, vec![a_test.clone(), gone.clone()]);
+
+        // elm.json reads differently, so the index is built anew
+        fs::remove_file(&gone).unwrap();
+        write_settled(&a_test, "module ATest exposing (a)\n");
+        let mut fresh = Workspace::new(temp_dir.path().to_path_buf());
+        fresh.initialize().unwrap();
+        assert!(!fresh.modules.contains_key("ATest"));
+        fresh.adopt(&beyond);
+        // Read from the file as it is now, not taken over from the old index
+        let exposing = fresh
+            .modules
+            .get("ATest")
+            .map(|module| module.exposing.clone());
+        assert!(matches!(exposing, Some(ExposingInfo::Explicit(names)) if names == ["a"]));
+        assert!(!fresh.modules.contains_key("Gone"));
+        assert_eq!(fresh.files_beyond_the_walk(), vec![a_test.clone()]);
+
+        // No text while the next index is built. The one after that still has to ask for it.
+        fs::write(&a_test, [0xff, 0xfe]).unwrap();
+        let mut unread = Workspace::new(temp_dir.path().to_path_buf());
+        unread.initialize().unwrap();
+        unread.adopt(&fresh.files_beyond_the_walk());
+        assert!(!unread.modules.contains_key("ATest"));
+        assert!(unread.unreadable_files().is_some());
+        assert_eq!(unread.files_beyond_the_walk(), vec![a_test]);
+    }
+
+    #[test]
+    fn test_a_source_directory_outside_the_project_has_one_spelling() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("app");
+        let shared = temp_dir.path().join("shared").join("Shared.elm");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir(shared.parent().unwrap()).unwrap();
+        fs::write(
+            root.join("elm.json"),
+            r#"{ "source-directories": ["./src", "../shared", "src/../lib/"] }"#,
+        )
+        .unwrap();
+        write_settled(&shared, "module Shared exposing (..)\n");
+        let mut workspace = Workspace::new(root.clone());
+        workspace.initialize().unwrap();
+
+        assert_eq!(
+            workspace.source_dirs,
+            vec![
+                root.join("src"),
+                temp_dir.path().join("shared"),
+                root.join("lib")
+            ]
+        );
+        // The path a client names the file by, with no ".." in it
+        assert_eq!(
+            workspace
+                .modules
+                .get("Shared")
+                .map(|module| module.path.clone()),
+            Some(shared.clone())
+        );
+        workspace.update_file(
+            &Url::from_file_path(&shared).unwrap(),
+            "module Shared exposing (..)\n",
+        );
+        assert_eq!(workspace.files_beyond_the_walk(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn test_a_file_indexed_at_startup_is_not_a_disk_change() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        write_settled(
+            &temp_dir.path().join("src").join("A.elm"),
+            "module A exposing (..)\n",
+        );
+
+        workspace.initialize().unwrap();
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+    }
+
+    #[test]
+    fn test_a_file_written_moments_ago_is_read_again_until_it_settles() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let a = temp_dir.path().join("src").join("A.elm");
+        let only_a = || DiskChanges {
+            changed: vec![a.clone()],
+            deleted: vec![],
+        };
+
+        // Its modification time may be rounded, so a second write could look the same
+        fs::write(&a, "module A exposing (..)\n").unwrap();
+        assert_eq!(workspace.take_disk_changes(), only_a());
+        assert_eq!(workspace.take_disk_changes(), only_a());
+
+        write_settled(&a, "module A exposing (..)\n");
+        assert_eq!(workspace.take_disk_changes(), only_a());
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+    }
+
+    #[test]
+    fn test_a_file_dated_ahead_of_the_clock_settles_too() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let a = temp_dir.path().join("src").join("A.elm");
+        fs::write(&a, "module A exposing (..)\n").unwrap();
+        let in_an_hour = SystemTime::now() + Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(in_an_hour)
+            .unwrap();
+
+        assert_eq!(workspace.take_disk_changes().changed, vec![a]);
+        // Read once. A later write would date it back to now, which shows.
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+    }
+
+    #[test]
+    fn test_a_file_below_what_is_no_directory_any_more_is_gone() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let sub = temp_dir.path().join("src").join("Sub");
+        let x = sub.join("X.elm");
+        let beyond = temp_dir.path().join("tests").join("Sub").join("XTest.elm");
+        for path in [&x, &beyond] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            write_settled(path, "module X exposing (..)\n");
+        }
+        workspace.initialize().unwrap();
+        workspace.update_file(
+            &Url::from_file_path(&beyond).unwrap(),
+            "module XTest exposing (..)\n",
+        );
+        workspace.take_disk_changes();
+
+        // A plain file takes the place of each directory. Nothing can be below it.
+        for directory in [&sub, &beyond.parent().unwrap().to_path_buf()] {
+            fs::remove_dir_all(directory).unwrap();
+            fs::write(directory, "no directory").unwrap();
+        }
+        assert_eq!(
+            workspace.take_disk_changes(),
+            DiskChanges {
+                changed: vec![],
+                deleted: vec![x, beyond]
+            }
+        );
+        assert_eq!(workspace.unreadable_files(), None);
+    }
+
+    #[test]
+    fn test_elm_json_counts_as_changed_when_it_reads_differently() {
+        let (temp_dir, workspace) = create_test_workspace();
+        let elm_json = temp_dir.path().join("elm.json");
+        assert!(!workspace.elm_json_changed());
+
+        // Written again with the same text, which only moves its modification time
+        fs::write(&elm_json, r#"{ "source-directories": ["src"] }"#).unwrap();
+        assert!(!workspace.elm_json_changed());
+
+        fs::write(&elm_json, r#"{ "source-directories": ["src", "lib"] }"#).unwrap();
+        assert!(workspace.elm_json_changed());
+        fs::remove_file(&elm_json).unwrap();
+        assert!(workspace.elm_json_changed());
+    }
+
+    #[test]
+    fn test_a_file_that_could_not_be_read_at_startup_is_looked_at_again() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let a = temp_dir.path().join("src").join("A.elm");
+        let b = temp_dir.path().join("src").join("B.elm");
+        write_settled(&a, "module A exposing (..)\n");
+        // No text at all. A file without read permission fails the same way.
+        fs::write(&b, [0xff, 0xfe, 0xfd]).unwrap();
+        let long_ago = SystemTime::now() - Duration::from_secs(60);
+        let dated = |path: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap()
+        };
+        dated(&b);
+
+        workspace.initialize().unwrap();
+        assert!(!workspace.modules.contains_key("B"));
+        assert_eq!(
+            workspace.unreadable_files(),
+            Some(format!(
+                "Cannot read {}: stream did not contain valid UTF-8.",
+                b.display()
+            ))
+        );
+
+        // Readable now, with the length and the date it had: only a forgotten stamp gives it away
+        fs::write(&b, "--\n").unwrap();
+        dated(&b);
+        assert_eq!(workspace.take_disk_changes().changed, vec![b.clone()]);
+        workspace.mark_read(&b);
+        assert_eq!(workspace.unreadable_files(), None);
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+
+        // Unreadable again, and gone before anyone repaired it
+        workspace.mark_unreadable(&b, "no".to_string());
+        workspace.mark_unreadable(&a, "no".to_string());
+        assert_eq!(
+            workspace.unreadable_files(),
+            Some(format!(
+                "Cannot read {}: no. One more file or directory cannot be read either.",
+                a.display()
+            ))
+        );
+        fs::remove_file(&b).unwrap();
+        fs::remove_file(&a).unwrap();
+        workspace.take_disk_changes();
+        assert_eq!(workspace.unreadable_files(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_directory_that_cannot_be_listed_is_missing_from_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let hidden = temp_dir.path().join("src").join("Hidden");
+        let a = hidden.join("A.elm");
+        fs::create_dir(&hidden).unwrap();
+        write_settled(&a, "module Hidden.A exposing (..)\n");
+        let allow =
+            |mode: u32| fs::set_permissions(&hidden, fs::Permissions::from_mode(mode)).unwrap();
+
+        allow(0o000);
+        if fs::read_dir(&hidden).is_ok() {
+            // Root lists every directory, whatever its permissions say
+            allow(0o755);
+            return;
+        }
+        workspace.initialize().unwrap();
+        let problem = workspace.unreadable_files();
+        allow(0o755);
+        assert_eq!(
+            problem,
+            Some(format!(
+                "Cannot read {}: Permission denied (os error 13).",
+                hidden.display()
+            ))
+        );
+
+        assert_eq!(workspace.take_disk_changes().changed, vec![a]);
+        assert_eq!(workspace.unreadable_files(), None);
+    }
+
+    #[test]
+    fn test_an_elm_json_that_is_there_and_cannot_be_read_is_an_error() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let elm_json = temp_dir.path().join("elm.json");
+
+        // Not text. Reading it fails as it does without read permission.
+        fs::write(&elm_json, [0xff, 0xfe]).unwrap();
+        assert!(workspace.elm_json_changed());
+        let error = workspace.initialize().unwrap_err();
+        assert_eq!(error.to_string(), "stream did not contain valid UTF-8");
+
+        // A project without elm.json is a different matter: its modules are taken to be in src
+        fs::remove_file(&elm_json).unwrap();
+        workspace.initialize().unwrap();
+        assert!(!workspace.elm_json_changed());
+    }
+
+    #[test]
+    fn test_a_source_directory_made_after_startup_is_walked() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("elm.json"),
+            r#"{ "source-directories": ["src", "generated"] }"#,
+        )
+        .unwrap();
+        fs::create_dir(temp_dir.path().join("src")).unwrap();
+        let mut workspace = Workspace::new(temp_dir.path().to_path_buf());
+        workspace.initialize().unwrap();
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+
+        // A code generator writes its directory later, and elm.json stays as it is
+        let generated = temp_dir.path().join("generated").join("Api.elm");
+        fs::create_dir(generated.parent().unwrap()).unwrap();
+        write_settled(&generated, "module Api exposing (..)\n");
+        assert_eq!(
+            workspace.take_disk_changes(),
+            DiskChanges {
+                changed: vec![generated],
+                deleted: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn test_a_package_keeps_its_modules_in_src() {
+        let temp_dir = TempDir::new().unwrap();
+        let a = temp_dir.path().join("src").join("A.elm");
+        // A package's elm.json has no source-directories
+        fs::write(temp_dir.path().join("elm.json"), r#"{ "type": "package" }"#).unwrap();
+        let mut workspace = Workspace::new(temp_dir.path().to_path_buf());
+        workspace.initialize().unwrap();
+
+        // src need not be there when the server starts
+        fs::create_dir(a.parent().unwrap()).unwrap();
+        write_settled(&a, "module A exposing (..)\n");
+        assert_eq!(
+            workspace.take_disk_changes(),
+            DiskChanges {
+                changed: vec![a],
+                deleted: vec![]
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_source_files_leave_out_dead_links_and_evergreen_snapshots() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("src");
+        fs::create_dir_all(src.join("Evergreen").join("V1")).unwrap();
+        fs::write(
+            temp_dir.path().join("elm.json"),
+            r#"{ "source-directories": ["src"], "dependencies": { "direct": { "lamdera/core": "1.0.0" } } }"#,
+        )
+        .unwrap();
+        fs::write(src.join("Main.elm"), "module Main exposing (..)\n").unwrap();
+        fs::write(
+            src.join("Evergreen").join("V1").join("Types.elm"),
+            "module Evergreen.V1.Types exposing (..)\n",
+        )
+        .unwrap();
+        // The lock file Emacs keeps beside a buffer with unsaved changes
+        std::os::unix::fs::symlink("someone@host.1234", src.join(".#Main.elm")).unwrap();
+        // What macOS keeps beside Main.elm on a volume without extended attributes. It is no text.
+        fs::write(src.join("._Main.elm"), [0x00, 0x05, 0x16, 0x07, 0xff, 0xfe]).unwrap();
+        // And a directory that no module's name can lead through
+        fs::create_dir(src.join(".cache")).unwrap();
+        fs::write(
+            src.join(".cache").join("Old.elm"),
+            "module Old exposing (..)\n",
+        )
+        .unwrap();
+        let mut workspace = Workspace::new(temp_dir.path().to_path_buf());
+        workspace.initialize().unwrap();
+
+        assert_eq!(workspace.source_files(), vec![src.join("Main.elm")]);
     }
 
     #[test]
