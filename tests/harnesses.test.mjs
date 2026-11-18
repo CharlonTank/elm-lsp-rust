@@ -74,6 +74,11 @@ test("a clone path with a space is quoted in shell commands and kept whole in co
   const codex = renderText(findHarness("codex"), install);
   assert.ok(codex.includes(`args = ["/opt/my tools/elm-lsp-rust/mcp-wrapper/index.mjs"]`), codex);
   assert.ok(codex.includes(`codex mcp add elm-lsp -- node '/opt/my tools/elm-lsp-rust/mcp-wrapper/index.mjs'`), codex);
+
+  // Aider's commands are typed into a shell as well
+  const aider = renderText(findHarness("aider"), install);
+  assert.ok(aider.includes(`/run node '/opt/my tools/elm-lsp-rust/mcp-wrapper/cli.mjs' doctor`), aider);
+  assert.ok(aider.includes(`aider --read '/opt/my tools/elm-lsp-rust/skills/elm-refactoring/SKILL.md'`), aider);
 });
 
 test("an unknown harness is a usage error that names the known ones", async () => {

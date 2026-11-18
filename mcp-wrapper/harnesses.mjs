@@ -47,7 +47,7 @@ const shell = (...words) => words.map(shellQuote).join(" ");
  *   Without it the entry follows the harness's documentation and was never run.
  *
  * `verify` and `notes` may contain {cli} and {skill}, which stand for the
- * paths of this install.
+ * paths of this install, quoted for a shell.
  */
 
 /** @type {Harness[]} */
@@ -217,7 +217,7 @@ export function findHarness(id) {
 
 // The parts of one harness's instructions, with this install's paths filled in.
 function instructions(harness, install) {
-  const fill = (text) => text.replaceAll("{cli}", install.cli).replaceAll("{skill}", install.skill);
+  const fill = (text) => text.replaceAll("{cli}", shellQuote(install.cli)).replaceAll("{skill}", shellQuote(install.skill));
   const config = harness.config?.(install);
   return {
     files: Object.entries(harness.files || {}),
