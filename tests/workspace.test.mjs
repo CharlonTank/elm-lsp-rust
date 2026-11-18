@@ -6,9 +6,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
+import { ToolError } from "../mcp-wrapper/errors.mjs";
 import { ElmLspClient } from "../mcp-wrapper/lsp-client.mjs";
-import { applyWorkspaceEdit, toFileUri } from "../mcp-wrapper/workspace.mjs";
+import { applyWorkspaceEdit, projectDirectories, toFileUri } from "../mcp-wrapper/workspace.mjs";
 import { copyFixture, tempDir } from "./support.mjs";
 
 test("the wrapper spells a file URI exactly as the language server does", async (t) => {
@@ -52,4 +53,30 @@ test("an edit listed under two spellings of one file is applied once", async (t)
   assert.equal(readFileSync(file, "utf-8"), "fresh = 1\nmain = fresh\n");
   assert.deepEqual(applied, [{ path: file, edits: 2 }]);
   assert.deepEqual(told, [toFileUri(file)]);
+});
+
+test("a change that names a file outside the project, or one that is gone, changes no file", async (t) => {
+  const root = join(tempDir(t), "app");
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "elm.json"), JSON.stringify({ "source-directories": ["src", "../shared"] }));
+  const inside = join(root, "src/Main.elm");
+  const outside = join(dirname(root), "elsewhere/Other.elm");
+  mkdirSync(dirname(outside));
+  writeFileSync(inside, "old = 1\n");
+  writeFileSync(outside, "old = 1\n");
+  const client = { notifyFileChanged: async () => assert.fail("no file was to be changed") };
+  const rename = [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "fresh" }];
+  const apply = (...files) => applyWorkspaceEdit(Object.fromEntries(files.map((file) => [toFileUri(file), rename])), client, root);
+
+  assert.deepEqual(projectDirectories(root), [root, join(root, "src"), join(dirname(root), "shared")]);
+  await assert.rejects(apply(inside, outside), (error) => {
+    assert.ok(error instanceof ToolError);
+    assert.equal(error.message, `The change reaches ${outside}, outside the project and the source directories of its elm.json, so no file was changed.`);
+    return true;
+  });
+  // A file the index still names, though it is no longer there
+  const gone = join(root, "src/Gone.elm");
+  await assert.rejects(apply(inside, gone), (error) => error instanceof ToolError && error.message.startsWith(`Cannot read ${gone}, so no file was changed. `));
+  assert.equal(readFileSync(inside, "utf-8"), "old = 1\n");
+  assert.equal(readFileSync(outside, "utf-8"), "old = 1\n");
 });

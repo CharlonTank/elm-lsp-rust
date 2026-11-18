@@ -8,9 +8,9 @@
  */
 
 import { join } from "path";
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { ToolError } from "./errors.mjs";
-import { toFileUri } from "./workspace.mjs";
+import { projectDirectories, readForEdit, toFileUri, writeEdited } from "./workspace.mjs";
 
 function extractModuleName(content) {
   const match = content.match(/^module\s+([A-Za-z.]+)\s+exposing/m);
@@ -73,17 +73,48 @@ function exposingLineIndex(lines) {
   return index !== -1 && !lines[index].includes("exposing (..)") ? index : -1;
 }
 
-function elmFilesIn(dir, excluded) {
+// What the disk knows a regular file by, whatever name leads to it: a link to a file and a
+// second name of it are that file. Nothing for what is no file.
+function fileAt(path) {
+  try {
+    const stats = statSync(path, { bigint: true });
+    return stats.isFile() ? `${stats.dev}:${stats.ino}` : undefined;
+  } catch (error) {
+    // A link to nothing, such as the one an editor keeps as a lock
+    if (error.code === "ENOENT") return undefined;
+    // Anything else can be a module that is there and out of reach, which the move must not pass over
+    throw new ToolError(`Cannot read ${path}, so no file was changed. ${error.message}`);
+  }
+}
+
+function entriesOf(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch (error) {
+    throw new ToolError(`Cannot read ${dir}, so no file was changed. ${error.message}`);
+  }
+}
+
+// The Elm files under dir, found the way the language server finds them: a
+// link to a file counts as that file, a link to a directory is not followed,
+// and nothing whose name starts with a dot is a module or leads to one. A file
+// that `seen` holds is left out, and each file that is found joins it, so a
+// file with several names is listed once.
+function elmFilesIn(dir, seen) {
   const files = [];
   if (!existsSync(dir)) return files;
-  for (const entry of readdirSync(dir)) {
-    const fullPath = join(dir, entry);
-    if (statSync(fullPath).isDirectory()) {
-      if (!entry.startsWith(".") && entry !== "elm-stuff" && entry !== "node_modules") {
-        files.push(...elmFilesIn(fullPath, excluded));
+  for (const entry of entriesOf(dir)) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!entry.name.startsWith(".") && entry.name !== "elm-stuff" && entry.name !== "node_modules") {
+        files.push(...elmFilesIn(fullPath, seen));
       }
-    } else if (entry.endsWith(".elm") && !excluded.includes(fullPath)) {
-      files.push(fullPath);
+    } else if (entry.name.endsWith(".elm") && !entry.name.startsWith(".")) {
+      const file = fileAt(fullPath);
+      if (file && !seen.has(file)) {
+        seen.add(file);
+        files.push(fullPath);
+      }
     }
   }
   return files;
@@ -130,7 +161,7 @@ function retargetImport(content, functionName, sourceModuleName, targetModuleNam
  */
 export async function moveFunction({ client, workspaceRoot, absPath, absTargetModule, sourceContent, functionName, funcLine }) {
   const sourceLines = sourceContent.split("\n");
-  const targetContent = readFileSync(absTargetModule, "utf-8");
+  const targetContent = readForEdit(absTargetModule);
   const targetLines = targetContent.split("\n");
 
   const { start, end } = functionBounds(sourceLines, functionName, funcLine);
@@ -188,23 +219,23 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
 
   newSourceLines.splice(importInsertIndex(newSourceLines), 0, `import ${targetModuleName} exposing (${functionName})`);
 
-  writeFileSync(absPath, newSourceLines.join("\n"));
-  writeFileSync(absTargetModule, newTargetLines.join("\n"));
-  const changedFiles = [absPath, absTargetModule];
+  // Every other file that exposed the function from the source module. All of
+  // them are read before the first file is written, so that a file that cannot
+  // be read stops the move while nothing has changed yet.
+  // A source directory can lie outside the project root, and one inside it is walked with the root.
+  // The two modules of the move are no other files, under any of their names: what is written for
+  // a link to the target would put the target back as it was, and the function would be in no file.
+  const seen = new Set([fileAt(absPath), fileAt(absTargetModule)]);
+  const others = projectDirectories(workspaceRoot).flatMap((directory) => elmFilesIn(directory, seen));
+  const retargeted = others
+    .map((elmFile) => [elmFile, retargetImport(readForEdit(elmFile), functionName, sourceModuleName, targetModuleName)])
+    .filter(([, newContent]) => newContent !== null);
+  const filesUpdated = retargeted.length;
 
-  // Every other file that exposed the function from the source module
-  let filesUpdated = 0;
-  for (const elmFile of elmFilesIn(workspaceRoot, [absPath, absTargetModule])) {
-    const newContent = retargetImport(readFileSync(elmFile, "utf-8"), functionName, sourceModuleName, targetModuleName);
-    if (newContent !== null) {
-      writeFileSync(elmFile, newContent);
-      changedFiles.push(elmFile);
-      filesUpdated++;
-    }
-  }
-
-  for (const filePath of changedFiles) {
-    await client.notifyFileChanged(toFileUri(filePath), readFileSync(filePath, "utf-8"));
+  const written = [[absPath, newSourceLines.join("\n")], [absTargetModule, newTargetLines.join("\n")], ...retargeted];
+  writeEdited(written);
+  for (const [filePath, content] of written) {
+    await client.notifyFileChanged(toFileUri(filePath), content);
   }
 
   return (

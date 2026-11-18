@@ -8,6 +8,7 @@ import { test } from "node:test";
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -39,6 +40,20 @@ import {
 
 // Root reads and writes every file, whatever its permissions say
 const asRoot = process.getuid?.() === 0 && "permissions do not hold root back";
+
+// The text of every Elm file in the project's src
+function sourcesOf(project) {
+  const src = join(project, "src");
+  const names = readdirSync(src, { recursive: true }).filter((name) => name.endsWith(".elm"));
+  return Object.fromEntries(names.sort().map((name) => [name, readFileSync(join(src, name), "utf-8")]));
+}
+
+// Add a source directory to the project's elm.json.
+function addSourceDirectory(project, directory) {
+  const elmJson = JSON.parse(readFileSync(join(project, "elm.json"), "utf-8"));
+  elmJson["source-directories"].push(directory);
+  writeFileSync(join(project, "elm.json"), JSON.stringify(elmJson));
+}
 
 test("the server works from a directory that is not an Elm project", async (t) => {
   const project = copyFixture(t);
@@ -907,6 +922,238 @@ test("while a directory of sources cannot be listed every tool says so", { skip:
     // Open again, or the copy of the project cannot be removed
     chmodSync(hidden, 0o755);
   }
+});
+
+test("a function is moved in a project that holds a link to nothing and a dot-file", async (t) => {
+  const project = copyFixture(t);
+  symlinkSync("someone@host.1234", join(project, "src/.#Main.elm"));
+  // What macOS keeps beside Main.elm on some volumes. No module has such a name, whatever the file holds.
+  const main = readFileSync(join(project, "src/Main.elm"), "utf-8");
+  writeFileSync(join(project, "src/._Main.elm"), main);
+  const client = await connect(t, { cwd: project });
+
+  const moved = await callTool(client, "elm_move_function", {
+    file_path: join(project, "src/Utils.elm"),
+    line: 6,
+    character: 0,
+    function_name: "formatName",
+    target_module: join(project, "src/Types.elm"),
+  });
+  assert.equal(moved.isError, false, moved.text);
+  // Main.elm exposed the function from Utils and now takes it from Types
+  assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /^import Types exposing \(User, defaultUser, formatName\)$/m);
+  assert.match(readFileSync(join(project, "src/Types.elm"), "utf-8"), /^formatName name =$/m);
+  assert.equal(readFileSync(join(project, "src/._Main.elm"), "utf-8"), main);
+});
+
+test("a function is moved in a project where a source file is a link to the real one", async (t) => {
+  const project = copyFixture(t);
+  const main = join(project, "src/Main.elm");
+  const real = join(tempDir(t), "Main.elm");
+  renameSync(main, real);
+  symlinkSync(real, main);
+  const client = await connect(t, { cwd: project });
+
+  const moved = await callTool(client, "elm_move_function", {
+    file_path: join(project, "src/Utils.elm"),
+    line: 6,
+    character: 0,
+    function_name: "formatName",
+    target_module: join(project, "src/Types.elm"),
+  });
+  assert.equal(moved.isError, false, moved.text);
+  // The importing module is reached through its link, like any other
+  assert.match(readFileSync(real, "utf-8"), /^import Types exposing \(User, defaultUser, formatName\)$/m);
+});
+
+// A file has two names when a link leads to it, and when a directory lists it a second time
+for (const [name, alsoAt] of [
+  ["a link to it", symlinkSync],
+  ["a second name", linkSync],
+]) {
+  test(`a file that has ${name} is one file when a function moves`, async (t) => {
+    const client = await connect(t, { cwd: tempDir(t) });
+    // Main.elm lists formatName in its import of Utils, which the move writes anew in another file
+    const move = async (twice, target) => {
+      const project = copyFixture(t);
+      alsoAt(join(project, "src", twice), join(project, "src/Second.elm"));
+      const before = sourcesOf(project);
+      const moved = await callTool(client, "elm_move_function", {
+        file_path: join(project, "src/Utils.elm"),
+        line: 6,
+        character: 0,
+        function_name: "formatName",
+        target_module: join(project, "src", target),
+      });
+      return { moved, before, after: sourcesOf(project) };
+    };
+    const body = /^formatName name =\n    String\.toUpper name$/m;
+
+    // The target under its other name is the target. Written as another file, it was put back
+    // as it had been, with a new import, and the function was in no file.
+    const intoIt = await move("Main.elm", "Main.elm");
+    assert.equal(intoIt.moved.isError, false, intoIt.moved.text);
+    assert.match(intoIt.moved.text, /Updated imports in 0 other file\(s\)/);
+    assert.match(intoIt.after["Main.elm"], body);
+    assert.equal(intoIt.after["Second.elm"], intoIt.after["Main.elm"]);
+    assert.doesNotMatch(intoIt.after["Utils.elm"], body);
+
+    // A file that imports the function is written once
+    const pastIt = await move("Main.elm", "Types.elm");
+    assert.match(pastIt.moved.text, /Updated imports in 1 other file\(s\)/);
+    assert.match(pastIt.after["Main.elm"], /^import Types exposing \(User, defaultUser, formatName\)$/m);
+    assert.match(pastIt.after["Types.elm"], body);
+
+    // The source under its other name is no place to move to
+    const intoItself = await move("Utils.elm", "Second.elm");
+    assert.equal(intoItself.moved.isError, true);
+    assert.deepEqual(intoItself.after, intoItself.before);
+  });
+}
+
+test("a function is moved to all of its files or to none", { skip: asRoot }, async (t) => {
+  const project = copyFixture(t);
+  const main = join(project, "src/Main.elm");
+  // Outside the source directories, where the language server does not look and the move does
+  mkdirSync(join(project, "tests"));
+  const locked = join(project, "tests/Locked.elm");
+  writeFileSync(locked, "module Locked exposing (..)\n");
+  const client = await connect(t, { cwd: project });
+  const before = sourcesOf(project);
+  const move = () =>
+    callTool(client, "elm_move_function", {
+      file_path: join(project, "src/Utils.elm"),
+      line: 6,
+      character: 0,
+      function_name: "formatName",
+      target_module: join(project, "src/Types.elm"),
+    });
+
+  chmodSync(locked, 0o000);
+  const unread = await move();
+  assert.equal(unread.isError, true);
+  assert.ok(unread.text.startsWith(`Cannot read ${locked}, so no file was changed. `), unread.text);
+  assert.deepEqual(sourcesOf(project), before);
+  chmodSync(locked, 0o644);
+
+  // Main.elm imports the function, so the move has to write it
+  chmodSync(main, 0o444);
+  const unwritten = await move();
+  assert.equal(unwritten.isError, true);
+  assert.ok(unwritten.text.startsWith(`Cannot write ${main}, so no file was changed. `), unwritten.text);
+  assert.deepEqual(sourcesOf(project), before);
+  chmodSync(main, 0o644);
+
+  assert.equal((await move()).isError, false);
+  assert.match(readFileSync(main, "utf-8"), /^import Types exposing \(User, defaultUser, formatName\)$/m);
+});
+
+for (const readOnly of ["src/Main.elm", "src/Utils.elm"]) {
+  test(`a rename changes no file while ${readOnly} cannot be written`, { skip: asRoot }, async (t) => {
+    const project = copyFixture(t);
+    const client = await connect(t, { cwd: project });
+    const before = sourcesOf(project);
+    const rename = () =>
+      callTool(client, "elm_rename_function", {
+        file_path: join(project, "src/Utils.elm"),
+        line: 6,
+        character: 0,
+        old_name: "formatName",
+        newName: "shout",
+      });
+
+    // The rename edits both files. Whichever it would write first, the other must not be left changed.
+    chmodSync(join(project, readOnly), 0o444);
+    const refused = await rename();
+    assert.equal(refused.isError, true);
+    assert.ok(refused.text.startsWith(`Cannot write ${join(project, readOnly)}, so no file was changed. `), refused.text);
+    assert.deepEqual(sourcesOf(project), before);
+
+    chmodSync(join(project, readOnly), 0o644);
+    assert.match((await rename()).text, /Applied 6 edit\(s\) in 2 file\(s\)/);
+  });
+}
+
+test("a function is not moved while a file that may import it is out of reach", { skip: asRoot }, async (t) => {
+  const project = copyFixture(t);
+  // The move looks at every Elm file under the project root, also outside the source directories.
+  // This one is a link to a file in a directory that cannot be entered.
+  const vault = join(tempDir(t), "vault");
+  const linked = join(project, "tests/Linked.elm");
+  mkdirSync(vault);
+  mkdirSync(join(project, "tests"));
+  writeFileSync(join(vault, "Linked.elm"), "module Linked exposing (..)\n\nimport Utils exposing (formatName)\n");
+  symlinkSync(join(vault, "Linked.elm"), linked);
+  const client = await connect(t, { cwd: project });
+  const before = sourcesOf(project);
+
+  chmodSync(vault, 0o000);
+  try {
+    const moved = await callTool(client, "elm_move_function", {
+      file_path: join(project, "src/Utils.elm"),
+      line: 6,
+      character: 0,
+      function_name: "formatName",
+      target_module: join(project, "src/Types.elm"),
+    });
+    assert.equal(moved.isError, true);
+    assert.ok(moved.text.startsWith(`Cannot read ${linked}, so no file was changed. `), moved.text);
+  } finally {
+    chmodSync(vault, 0o755);
+  }
+  assert.deepEqual(sourcesOf(project), before);
+});
+
+test("a file is moved together with its edits or not at all", { skip: asRoot }, async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const src = join(project, "src");
+  const before = sourcesOf(project);
+
+  // The Elm files can be written. The directory takes no new entry and gives none up.
+  chmodSync(src, 0o555);
+  try {
+    const renamed = await callTool(client, "elm_rename_file", { file_path: join(src, "Utils.elm"), new_name: "Helpers.elm" });
+    assert.equal(renamed.isError, true);
+    assert.ok(renamed.text.startsWith(`Cannot rename file: nothing can be changed in ${src}, so no file was changed. `), renamed.text);
+    const moved = await callTool(client, "elm_move_file", { file_path: join(src, "Utils.elm"), target_path: "src/Deep/Down/Utils.elm" });
+    assert.ok(moved.text.startsWith(`Cannot move file: nothing can be changed in ${src}, so no file was changed. `), moved.text);
+  } finally {
+    chmodSync(src, 0o755);
+  }
+  assert.deepEqual(sourcesOf(project), before);
+});
+
+test("a refactoring reaches a source directory outside the project root", async (t) => {
+  // A repository of several applications, which share a directory of modules
+  const project = copyFixture(t, "app");
+  const shared = join(dirname(project), "shared");
+  addSourceDirectory(project, "../shared");
+  mkdirSync(shared);
+  const consumer = join(shared, "Consumer.elm");
+  const text = "module Consumer exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n";
+  writeFileSync(consumer, text);
+  const client = await connect(t, { cwd: project });
+  const rename = (from, to) =>
+    callTool(client, "elm_rename_function", { file_path: join(project, "src/Utils.elm"), line: 6, character: 0, old_name: from, newName: to });
+
+  const renamed = await rename("formatName", "shout");
+  assert.match(renamed.text, /Applied 8 edit\(s\) in 3 file\(s\)/);
+  assert.equal(readFileSync(consumer, "utf-8"), text.replaceAll("formatName", "shout"));
+  // The file has one name in the index, so a second rename finds each use once
+  assert.match((await rename("shout", "formatName")).text, /Applied 8 edit\(s\) in 3 file\(s\)/);
+  assert.equal(readFileSync(consumer, "utf-8"), text);
+
+  // A function that moves to another module is imported from there in the shared directory too
+  const moved = await callTool(client, "elm_move_function", {
+    file_path: join(project, "src/Utils.elm"),
+    line: 6,
+    character: 0,
+    function_name: "formatName",
+    target_module: join(project, "src/Types.elm"),
+  });
+  assert.match(moved.text, /Updated imports in 2 other file\(s\)\./);
+  assert.match(readFileSync(consumer, "utf-8"), /^import Types exposing \(formatName\)$/m);
 });
 
 test("a link to nothing and a dot-file among the source files are passed over", async (t) => {

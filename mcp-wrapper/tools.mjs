@@ -11,7 +11,7 @@
 import { execFile } from "child_process";
 import { mkdir, rename } from "fs/promises";
 import { dirname, join, resolve } from "path";
-import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { z } from "zod";
@@ -201,6 +201,24 @@ function isAnotherFile(path, original) {
   return found.ino !== own.ino || found.dev !== own.dev;
 }
 
+// Taking an entry out of a directory and putting one into another both need
+// write and search permission on the directory. The target directory may not
+// exist yet, and then its nearest ancestor that does has to take a new entry.
+function assertCanRelocate(oldPath, newPath, verb) {
+  let target = dirname(newPath);
+  while (!existsSync(target) && dirname(target) !== target) {
+    target = dirname(target);
+  }
+  for (const directory of new Set([dirname(oldPath), target])) {
+    try {
+      if (!statSync(directory).isDirectory()) throw new Error("it is not a directory");
+      accessSync(directory, constants.W_OK | constants.X_OK);
+    } catch (error) {
+      throw new ToolError(`Cannot ${verb} file: nothing can be changed in ${directory}, so no file was changed. ${error.message}`);
+    }
+  }
+}
+
 // Shared by elm_rename_file and elm_move_file. The server returns the edits
 // for the module declaration and every import, then the file itself is moved
 // here. `verb` and `done` word the messages, as in "rename" and "Renamed".
@@ -221,6 +239,9 @@ async function relocateFile({ file_path, command, target, verb, done }) {
   if (isAnotherFile(result.newPath, result.oldPath)) {
     throw new ToolError(`Cannot ${verb} file: ${result.newPath} already exists`);
   }
+
+  // The file itself moves last, after the edits. Whether it can move is found out now, while nothing has changed.
+  assertCanRelocate(result.oldPath, result.newPath, verb);
 
   const { fileCount, totalEdits } = await applyEdits(result.changes, client, workspaceRoot);
 

@@ -104,6 +104,8 @@ The server starts one language server per Elm project on first use and stops it 
 
 The index covers the source directories that `elm.json` lists, also one outside the project root such as `../shared`. A file in none of them, such as a test, joins the index when a tool is called on that file. The language server then follows it like the rest, also when it builds its index anew. Such a file is gone from the index again once the language server restarts, which it does after ten idle minutes. Until a tool is called on the file again, a rename does not reach it. From the command line every call starts a new language server, so a rename there never reaches a file outside the source directories.
 
+A refactoring reads every file it changes, and checks that it may write each of them, before it writes the first. A file that cannot be read or written leaves the project as it was, and the error names the file. A file move also checks first that its two directories take the change. These are checks ahead of the work and no transaction: a disk that fills up half way still leaves a refactoring half done.
+
 When the harness closes the server's input, the server answers the requests it has already received, stops its language servers and exits.
 
 ### Known limitations

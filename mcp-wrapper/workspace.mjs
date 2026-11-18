@@ -3,7 +3,7 @@
  */
 
 import { delimiter, dirname, join, resolve } from "path";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { ToolError } from "./errors.mjs";
 
@@ -74,15 +74,28 @@ export function projectToolsHint(dir, names) {
   return "";
 }
 
-function isInWorkspace(absPath, workspaceRoot) {
-  const path = resolve(absPath);
+const isInside = (path, directory) => path === directory || path.startsWith(directory + "/");
+
+/**
+ * The directories that hold a project's files: its root, and the source
+ * directories of its elm.json. One of those can lie outside the root, as
+ * "../shared" does in a repository of several applications.
+ */
+export function projectDirectories(workspaceRoot) {
   const root = resolve(workspaceRoot);
-  return path === root || path.startsWith(root + "/");
+  let listed = [];
+  try {
+    listed = JSON.parse(readFileSync(join(root, "elm.json"), "utf-8"))["source-directories"] ?? [];
+  } catch {
+    // The language server reports an elm.json that cannot be read. The root is all there is to go by.
+  }
+  return [root, ...listed.filter((directory) => typeof directory === "string").map((directory) => resolve(root, directory))];
 }
 
 export function assertInWorkspace(absPath, workspaceRoot) {
-  if (!isInWorkspace(absPath, workspaceRoot)) {
-    throw new ToolError(`Path ${resolve(absPath)} is outside workspace ${resolve(workspaceRoot)}`);
+  const [path, root] = [resolve(absPath), resolve(workspaceRoot)];
+  if (!isInside(path, root)) {
+    throw new ToolError(`Path ${path} is outside workspace ${root}`);
   }
 }
 
@@ -101,21 +114,53 @@ function editsByPath(changes) {
   return [...byPath].map(([filePath, known]) => [filePath, [...known.values()]]);
 }
 
+// The text of a file that a refactoring is about to change.
+export function readForEdit(filePath) {
+  try {
+    return readFileSync(filePath, "utf-8");
+  } catch (error) {
+    throw new ToolError(`Cannot read ${filePath}, so no file was changed. ${error.message}`);
+  }
+}
+
+// Write the files of a refactoring, given as [path, content] pairs. One that
+// stops after its first file leaves a project that does not compile, so a file
+// without write permission is found before anything has changed.
+export function writeEdited(files) {
+  for (const [filePath] of files) {
+    try {
+      accessSync(filePath, constants.W_OK);
+    } catch (error) {
+      throw new ToolError(`Cannot write ${filePath}, so no file was changed. ${error.message}`);
+    }
+  }
+  for (const [filePath, content] of files) {
+    writeFileSync(filePath, content, "utf-8");
+  }
+}
+
 // Write the text edits of an LSP WorkspaceEdit to disk and tell the language
 // server about the new contents. Returns one { path, edits } entry per file.
+// Every file is read before the first is written.
 export async function applyWorkspaceEdit(changes, client, workspaceRoot) {
   const applied = [];
-  const changedFiles = [];
+  const edited = [];
+  const perFile = editsByPath(changes);
 
-  for (const [filePath, edits] of editsByPath(changes)) {
-    if (!isInWorkspace(filePath, workspaceRoot)) {
-      console.error(`Skipping edit outside workspace: ${filePath}`);
-      continue;
-    }
+  // A change that names a file outside the project is not one to carry out in
+  // part. Leaving that file as it is would break the build as surely as a
+  // file that cannot be written.
+  const directories = projectDirectories(workspaceRoot);
+  const strangers = perFile.map(([filePath]) => filePath).filter((filePath) => !directories.some((directory) => isInside(filePath, directory)));
+  if (strangers.length > 0) {
+    const others = strangers.length > 1 ? ` and ${strangers.length - 1} more` : "";
+    throw new ToolError(
+      `The change reaches ${strangers[0]}${others}, outside the project and the source directories of its elm.json, so no file was changed.`
+    );
+  }
 
-    if (!existsSync(filePath)) continue;
-
-    const lines = readFileSync(filePath, "utf-8").split("\n");
+  for (const [filePath, edits] of perFile) {
+    const lines = readForEdit(filePath).split("\n");
 
     // Apply bottom to top, right to left, so earlier edits keep their positions.
     const sortedEdits = [...edits].sort((a, b) => {
@@ -136,14 +181,13 @@ export async function applyWorkspaceEdit(changes, client, workspaceRoot) {
       }
     }
 
-    const newContent = lines.join("\n");
-    writeFileSync(filePath, newContent, "utf-8");
     applied.push({ path: filePath, edits: edits.length });
-    changedFiles.push({ uri: toFileUri(filePath), content: newContent });
+    edited.push([filePath, lines.join("\n")]);
   }
 
-  for (const { uri, content } of changedFiles) {
-    await client.notifyFileChanged(uri, content);
+  writeEdited(edited);
+  for (const [filePath, content] of edited) {
+    await client.notifyFileChanged(toFileUri(filePath), content);
   }
 
   return applied;
