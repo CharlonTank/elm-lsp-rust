@@ -84,14 +84,6 @@ impl ElmLanguageServer {
         // first. Clients ask for them with the elm.getDiagnostics command.
     }
 
-    fn get_diagnostics(&self, uri: &Url) -> Vec<Diagnostic> {
-        if let Ok(provider) = self.diagnostics_provider.read() {
-            provider.get_diagnostics(uri)
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Drop a file that is gone from the open documents and from the index.
     fn forget_file(&self, uri: &Url) {
         self.documents.remove(uri);
@@ -1526,10 +1518,19 @@ impl LanguageServer for ElmLanguageServer {
 
                 tracing::info!("Getting diagnostics for {}", uri);
 
-                let diagnostics = self.get_diagnostics(&uri);
+                let report = self
+                    .diagnostics_provider
+                    .read()
+                    .map_err(|_| "The diagnostics provider is unavailable".to_string())
+                    .and_then(|provider| provider.get_diagnostics(&uri));
+                let report = match report {
+                    Ok(report) => report,
+                    // No verdict from the compiler. The caller must not take that for a clean build.
+                    Err(error) => return Ok(Some(serde_json::json!({ "error": error }))),
+                };
 
                 // Convert diagnostics to JSON-serializable format
-                let diagnostics_json: Vec<serde_json::Value> = diagnostics.iter().map(|d| {
+                let diagnostics_json: Vec<serde_json::Value> = report.diagnostics.iter().map(|d| {
                     serde_json::json!({
                         "range": {
                             "start": { "line": d.range.start.line, "character": d.range.start.character },
@@ -1547,9 +1548,18 @@ impl LanguageServer for ElmLanguageServer {
                     })
                 }).collect();
 
+                let elsewhere_json: Vec<serde_json::Value> = report
+                    .elsewhere
+                    .iter()
+                    .map(
+                        |p| serde_json::json!({ "path": p.path, "line": p.line, "title": p.title }),
+                    )
+                    .collect();
+
                 Ok(Some(serde_json::json!({
                     "uri": file_uri,
-                    "diagnostics": diagnostics_json
+                    "diagnostics": diagnostics_json,
+                    "elsewhere": elsewhere_json
                 })))
             }
             CMD_SYNC_WITH_DISK => {

@@ -211,6 +211,91 @@ test("lamdera builds an Elm project on a machine without elm", async (t) => {
   assert.equal(used, "GLOBAL LAMDERA");
 });
 
+test("elm_diagnostics fails when it has no verdict from a compiler", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Main.elm");
+  const diagnosticsWith = async (globalTools) => {
+    const globalBin = tempDir(t);
+    for (const [name, script] of Object.entries(globalTools)) {
+      installTool(globalBin, name, script);
+    }
+    const client = await connect(t, { cwd: project, env: { PATH: `${globalBin}:/usr/bin:/bin` } });
+    return callTool(client, "elm_diagnostics", { file_path: file });
+  };
+
+  // "No errors or warnings" here would send an agent on with a project nobody compiled
+  assert.deepEqual(await diagnosticsWith({}), {
+    text: "Could not run the Elm compiler: neither elm nor lamdera could be started. Is one of them on PATH?",
+    isError: true,
+  });
+  assert.deepEqual(await diagnosticsWith({ elm: "echo 'elm: Map.!: given key is not an element in the map' >&2\nexit 1" }), {
+    text: "The compiler failed, and its report could not be read: elm: Map.!: given key is not an element in the map",
+    isError: true,
+  });
+});
+
+test("elm_diagnostics knows its file under the path the compiler resolved", async (t) => {
+  const project = copyFixture(t);
+  const link = join(tempDir(t), "link");
+  symlinkSync(project, link);
+  const globalBin = tempDir(t);
+  // A compiler that names the file by its resolved path, as elm does
+  installTool(
+    globalBin,
+    "elm",
+    `resolved="$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")"
+cat >&2 <<JSON
+{"type":"compile-errors","errors":[{"path":"$resolved","name":"Main","problems":[{"title":"NAMING ERROR","region":{"start":{"line":3,"column":1},"end":{"line":3,"column":7}},"message":["broken"]}]}]}
+JSON
+exit 1`
+  );
+  const client = await connect(t, { cwd: tempDir(t), env: { PATH: `${globalBin}:/usr/bin:/bin` } });
+
+  // Read as another file's error, this would say that Main.elm itself is fine
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: join(link, "src/Main.elm") }), {
+    text: "Line 3:1 - NAMING ERROR\n\nbroken",
+    isError: false,
+  });
+});
+
+test("elm_diagnostics says when the errors are in other files", async (t) => {
+  const project = copyFixture(t);
+  const main = join(project, "src/Main.elm");
+  const types = join(project, "src/Types.elm");
+  // A compiler that fails with whatever report the test wrote last
+  const globalBin = tempDir(t);
+  const report = join(globalBin, "report.json");
+  installTool(globalBin, "elm", `cat "${report}" >&2\nexit 1`);
+  const client = await connect(t, { cwd: project, env: { PATH: `${globalBin}:/usr/bin:/bin` } });
+  const problem = (title, line) => ({
+    title,
+    region: { start: { line, column: 1 }, end: { line, column: 7 } },
+    message: ["broken"],
+  });
+  const diagnosticsOf = (file, problemsByPath) => {
+    const errors = Object.entries(problemsByPath).map(([path, problems]) => ({ path, name: "Module", problems }));
+    writeFileSync(report, JSON.stringify({ type: "compile-errors", errors }));
+    return callTool(client, "elm_diagnostics", { file_path: file });
+  };
+
+  const inTypes = { [types]: [problem("NAMING ERROR", 3)] };
+  assert.deepEqual(await diagnosticsOf(main, inTypes), {
+    text: `No errors in this file, but the project does not compile. Errors in other files:\n  ${types}:3 - NAMING ERROR`,
+    isError: false,
+  });
+  assert.deepEqual(await diagnosticsOf(types, inTypes), { text: "Line 3:1 - NAMING ERROR\n\nbroken", isError: false });
+  assert.deepEqual(await diagnosticsOf(main, { ...inTypes, [main]: [problem("TYPE MISMATCH", 9)] }), {
+    text: `Line 9:1 - TYPE MISMATCH\n\nbroken\n\nErrors in other files:\n  ${types}:3 - NAMING ERROR`,
+    isError: false,
+  });
+
+  // A long list is cut after 20 entries
+  const many = { [types]: Array.from({ length: 23 }, (_, i) => problem("NAMING ERROR", i + 1)) };
+  const lines = (await diagnosticsOf(main, many)).text.split("\n");
+  assert.equal(lines.length, 22);
+  assert.deepEqual(lines.slice(-2), [`  ${types}:20 - NAMING ERROR`, "  ... and 3 more"]);
+});
+
 test("only elm_diagnostics runs the compiler", async (t) => {
   const project = copyFixture(t);
   const runs = join(project, "compiler-runs.log");

@@ -147,7 +147,7 @@ type Route = HomeRoute | AboutRoute | NewRoute
 | `elm_definition` | Go to definition |
 | `elm_references` | Find all references |
 | `elm_symbols` | List file symbols |
-| `elm_diagnostics` | Get compiler errors |
+| `elm_diagnostics` | Get compiler errors for a file and what it imports |
 | `elm_code_actions` | Get available actions |
 | `elm_apply_code_action` | Apply a code action |
 | `elm_format` | Format file |

@@ -58,7 +58,7 @@ limit: 50      # optional, default 50
 ### Diagnostics & Code Actions
 
 #### elm_diagnostics
-Get compile errors and warnings for a file.
+Compile a file and the modules it imports, and get the file's errors. When the build stops on errors in other files, the answer lists them by file, line and title. Modules that import the file are not compiled. "No errors or warnings" for the project's entry module, such as `src/Main.elm`, means the project compiles. For any other file it covers that file and what it imports.
 ```
 file_path: "/path/to/File.elm"
 ```
@@ -263,7 +263,7 @@ type_name: "BackendModel"
 - **Line/character positions are 0-indexed** in arguments. Locations in results have 1-indexed lines.
 - **Pass absolute file paths.** A relative path resolves against the directory the server was started in.
 - **Refactoring tools write to disk.** Read a file again before editing it further.
-- **Always verify compilation** after refactoring with `elm_diagnostics` or the project's build command
+- **Always verify compilation** after refactoring, with `elm_diagnostics` on the project's entry module or with the project's build command
 - These tools understand Elm's scope and semantics - safer than text replace
 
 ## Why Use LSP Tools

@@ -40,6 +40,9 @@ const SYMBOL_KIND_NAMES = {
 
 const elmFile = (description = "Path to the Elm file") => z.string().describe(description);
 
+// How many errors in other files elm_diagnostics lists before it only counts them
+const MAX_ERRORS_ELSEWHERE = 20;
+
 // The `line` and `character` fields that point at a symbol.
 function position(subject) {
   return {
@@ -326,23 +329,39 @@ export const tools = [
     readOnly: true,
     // The compiler downloads packages that are not in its cache yet
     openWorld: true,
-    description: "Get diagnostics (errors/warnings) for an Elm file",
+    description:
+      "Compile an Elm file and the modules it imports, and get the file's errors. Errors in other files that stop the build are listed by file, line and title. " +
+      "Modules that import the file are not compiled, so ask for the project's entry module to check the whole project.",
     input: { file_path: elmFile() },
     async run({ file_path }) {
       const { client, uri } = await connect(file_path);
 
       const result = await client.getDiagnostics(uri);
-      if (!result?.diagnostics?.length) {
-        return "No errors or warnings";
+      // Without a verdict from the compiler the answer must not read like a clean build
+      if (!result || result.error) {
+        throw new ToolError(result?.error ?? "The language server sent no diagnostics");
       }
 
-      return result.diagnostics
-        .map((d) => {
-          const line = d.range?.start?.line ?? 0;
-          const col = d.range?.start?.character ?? 0;
-          return `Line ${line + 1}:${col + 1} - ${d.message}`;
-        })
-        .join("\n\n");
+      const own = result.diagnostics.map((d) => {
+        const line = d.range?.start?.line ?? 0;
+        const col = d.range?.start?.character ?? 0;
+        return `Line ${line + 1}:${col + 1} - ${d.message}`;
+      });
+      // The compiler stops at the first modules that fail, which need not include this file
+      const elsewhere = (result.elsewhere ?? []).map((p) => `  ${p.path}:${p.line} - ${p.title}`);
+      if (elsewhere.length === 0) {
+        return own.length > 0 ? own.join("\n\n") : "No errors or warnings";
+      }
+
+      const listed = elsewhere.slice(0, MAX_ERRORS_ELSEWHERE);
+      if (elsewhere.length > listed.length) {
+        listed.push(`  ... and ${elsewhere.length - listed.length} more`);
+      }
+      const heading =
+        own.length > 0
+          ? "Errors in other files:"
+          : "No errors in this file, but the project does not compile. Errors in other files:";
+      return [...own, [heading, ...listed].join("\n")].join("\n\n");
     },
   },
 
