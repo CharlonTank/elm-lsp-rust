@@ -12,6 +12,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -148,6 +149,47 @@ test("a file is never renamed or moved onto an existing file", async (t) => {
 
   // Neither file was touched, not even by the import edits that precede the move
   assert.deepEqual({ utils: readFileSync(utils, "utf-8"), types: readFileSync(types, "utf-8") }, before);
+});
+
+test("a file is never renamed or moved out of its project", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const utils = join(project, "src/Utils.elm");
+  const outside = join(dirname(project), "Outside.elm");
+  const noDirectory = "New name must be a file name without a directory. elm_move_file moves a file to another directory.";
+  const leavesProject = `Path ${outside} is outside workspace ${project}`;
+  const rename = (new_name) => callTool(client, "elm_rename_file", { file_path: utils, new_name });
+  const move = (target_path) => callTool(client, "elm_move_file", { file_path: utils, target_path });
+
+  assert.deepEqual(await rename("../../Outside.elm"), { text: noDirectory, isError: true });
+  assert.deepEqual(await rename("Helpers/Utils.elm"), { text: noDirectory, isError: true });
+  assert.deepEqual(await move("../Outside.elm"), { text: leavesProject, isError: true });
+  assert.deepEqual(await move("src/../../Outside.elm"), { text: leavesProject, isError: true });
+  assert.deepEqual(await move(outside), { text: leavesProject, isError: true });
+  assert.equal(existsSync(outside), false);
+  assert.ok(existsSync(utils));
+
+  // A roundabout spelling of a place inside the project is taken for the place it names
+  const moved = await move("./src/Helpers/../Helpers/Text.elm");
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(readFileSync(join(project, "src/Helpers/Text.elm"), "utf-8"), /^module Helpers\.Text exposing/);
+  assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /^import Helpers\.Text exposing/m);
+});
+
+test("a file is not moved out of its project through a linked directory", async (t) => {
+  const project = copyFixture(t);
+  const elsewhere = tempDir(t);
+  symlinkSync(elsewhere, join(project, "src/External"));
+  const client = await connect(t, { cwd: project });
+  const before = sourcesOf(project);
+
+  const moved = await callTool(client, "elm_move_file", { file_path: join(project, "src/Utils.elm"), target_path: "src/External/Utils.elm" });
+  assert.deepEqual(moved, {
+    text: `Path ${join(project, "src/External/Utils.elm")} leads out of workspace ${project}, through a link to ${join(realpathSync(elsewhere), "Utils.elm")}`,
+    isError: true,
+  });
+  assert.deepEqual(readdirSync(elsewhere), []);
+  assert.deepEqual(sourcesOf(project), before);
 });
 
 test("a rename that only changes letter case goes through", async (t) => {

@@ -10,7 +10,7 @@
 
 import { execFile } from "child_process";
 import { mkdir, rename } from "fs/promises";
-import { dirname, join, resolve } from "path";
+import { basename, dirname, join, relative, resolve } from "path";
 import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
@@ -20,7 +20,7 @@ import { ensureClient } from "./lsp-client.mjs";
 import { moveFunction } from "./move-function.mjs";
 import {
   applyWorkspaceEdit,
-  assertInWorkspace,
+  assertInProject,
   findWorkspaceRoot,
   projectToolsHint,
   toFileUri,
@@ -527,7 +527,7 @@ export const tools = [
     async run({ file_path, line, function_name, target_module }) {
       const absTargetModule = resolve(target_module);
       const { workspaceRoot } = locate(file_path);
-      assertInWorkspace(absTargetModule, workspaceRoot);
+      assertInProject(absTargetModule, workspaceRoot);
       if (!existsSync(absTargetModule)) {
         throw new ToolError(`Target module does not exist: ${target_module}`);
       }
@@ -675,6 +675,10 @@ export const tools = [
       if (!new_name.endsWith(".elm")) {
         throw new ToolError("New name must end with .elm");
       }
+      // The file stays in its directory. A path here could also lead out of the project.
+      if (basename(new_name) !== new_name) {
+        throw new ToolError("New name must be a file name without a directory. elm_move_file moves a file to another directory.");
+      }
       return relocateFile({ file_path, command: "elm.renameFile", target: new_name, verb: "rename", done: "Renamed" });
     },
   },
@@ -694,13 +698,12 @@ export const tools = [
         throw new ToolError("Target path must end with .elm");
       }
 
-      // The server expects the target relative to the workspace root
-      let target = target_path;
-      if (target_path.startsWith("/")) {
-        const { workspaceRoot } = locate(file_path);
-        assertInWorkspace(target_path, workspaceRoot);
-        target = resolve(target_path).slice(workspaceRoot.length + 1);
-      }
+      // A relative target starts at the workspace root, which is also how the
+      // server expects it. One with ".." in it could lead out of the project.
+      const { workspaceRoot } = locate(file_path);
+      const absTarget = resolve(workspaceRoot, target_path);
+      assertInProject(absTarget, workspaceRoot);
+      const target = relative(workspaceRoot, absTarget);
       return relocateFile({ file_path, command: "elm.moveFile", target, verb: "move", done: "Moved" });
     },
   },

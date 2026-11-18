@@ -2,8 +2,8 @@
  * Finding the Elm project a file belongs to, and writing edits into it.
  */
 
-import { delimiter, dirname, join, resolve } from "path";
-import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "fs";
+import { delimiter, dirname, join, relative, resolve } from "path";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { ToolError } from "./errors.mjs";
 
@@ -92,10 +92,29 @@ export function projectDirectories(workspaceRoot) {
   return [root, ...listed.filter((directory) => typeof directory === "string").map((directory) => resolve(root, directory))];
 }
 
-export function assertInWorkspace(absPath, workspaceRoot) {
-  const [path, root] = [resolve(absPath), resolve(workspaceRoot)];
-  if (!isInside(path, root)) {
-    throw new ToolError(`Path ${path} is outside workspace ${root}`);
+// The real place of a path whose last parts may not exist yet: links in the part that exists are followed.
+function realPlace(absPath) {
+  let existing = absPath;
+  while (!existsSync(existing) && dirname(existing) !== existing) {
+    existing = dirname(existing);
+  }
+  return join(realpathSync(existing), relative(existing, absPath));
+}
+
+/**
+ * Throw unless a path lies in the project, both as it is spelled and where it
+ * really is. A directory in the project can be a link to one outside it, and
+ * a file moved "into" it would leave the project.
+ */
+export function assertInProject(absPath, workspaceRoot) {
+  const path = resolve(absPath);
+  const directories = projectDirectories(workspaceRoot);
+  if (!directories.some((directory) => isInside(path, directory))) {
+    throw new ToolError(`Path ${path} is outside workspace ${resolve(workspaceRoot)}`);
+  }
+  const real = realPlace(path);
+  if (!directories.some((directory) => isInside(real, realPlace(directory)))) {
+    throw new ToolError(`Path ${path} leads out of workspace ${resolve(workspaceRoot)}, through a link to ${real}`);
   }
 }
 
