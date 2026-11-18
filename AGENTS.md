@@ -20,12 +20,13 @@ Fast Elm Language Server (Rust) for coding agents. **Not for text editors** - ag
 
 ```bash
 cargo build --release --locked
+(cd tests && npm ci --ignore-scripts)                                   # once per clone
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs  # tools and language server
 node --test tests/*.test.mjs                                            # MCP server, CLI, harness config
 node mcp-wrapper/cli.mjs config --markdown > docs/harnesses.md          # after editing harnesses.mjs
 ```
 
-The suites need `elm` 0.19.1 and `elm-format` on `PATH`. The meetdown suite also needs `lamdera`.
+The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or newer. The meetdown suite also needs `lamdera`.
 
 ## Key Files
 

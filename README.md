@@ -238,6 +238,9 @@ elm-lsp-rust/
 ## Testing
 
 ```bash
+# Once per clone: the suites' own dependencies
+(cd tests && npm ci --ignore-scripts)
+
 # Tools and language server, against the fixture and a real project
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
 
@@ -245,7 +248,7 @@ node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
 node --test tests/*.test.mjs
 ```
 
-The suites need `elm` 0.19.1 and `elm-format` on `PATH`. The meetdown suite also needs `lamdera`.
+The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or newer, two major versions past what the server itself needs. The meetdown suite also needs `lamdera`.
 
 Tests cover: definition, references, symbols, rename (functions, types, variants, fields), diagnostics, code actions, move function, file rename/move, add/remove variant, add/remove field, and ERD generation.
 
