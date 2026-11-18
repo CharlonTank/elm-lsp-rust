@@ -37,10 +37,11 @@ const OPTIONS_WITH_VALUE = ["--host", "--port"];
 class UsageError extends Error {}
 
 /**
- * Read the command line into { flags, values }. An option the server does not
- * know is an error: a mistyped --read-only must not start a server that writes.
+ * Read the command line into { flags, http, host, port }. An option the
+ * server does not understand is an error: a mistyped --read-only must not
+ * start a server that writes.
  */
-function parseArguments(argv) {
+function parseArguments(argv, env) {
   const flags = new Set();
   const values = {};
   for (let i = 0; i < argv.length; i++) {
@@ -48,8 +49,13 @@ function parseArguments(argv) {
     if (FLAGS.includes(argument)) {
       flags.add(argument);
     } else if (OPTIONS_WITH_VALUE.includes(argument)) {
-      if (argv[i + 1] === undefined) throw new UsageError(`${argument} needs a value`);
-      values[argument] = argv[++i];
+      const value = argv[++i];
+      // Another option in the value's place means the value was left out.
+      // Read as a host name, --read-only would be gone from the command line.
+      if (value === undefined || value.startsWith("-")) {
+        throw new UsageError(`${argument} needs a value`);
+      }
+      values[argument] = value;
     } else {
       throw new UsageError(`Unknown option "${argument}"`);
     }
@@ -57,7 +63,16 @@ function parseArguments(argv) {
   if (flags.has("--http") && flags.has("--stdio")) {
     throw new UsageError("Choose either --http or --stdio (not both).");
   }
-  return { flags, values };
+
+  const http = flags.has("--http") || (!flags.has("--stdio") && env.MCP_TRANSPORT === "http");
+  if (!http && Object.keys(values).length > 0) {
+    throw new UsageError(`${Object.keys(values).join(" and ")} can only be used with --http`);
+  }
+  const port = values["--port"] || env.MCP_PORT || "3333";
+  if (http && !(/^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535)) {
+    throw new UsageError(`Invalid port: ${port}`);
+  }
+  return { flags, http, host: values["--host"] || env.MCP_HOST || "127.0.0.1", port: Number(port) };
 }
 
 // Sent to the client when it connects. Harnesses show it to the model.
@@ -253,27 +268,20 @@ function shutDown() {
 
 // Start the server
 async function main() {
-  const { flags, values } = parseArguments(process.argv.slice(2));
+  const { flags, http, host, port } = parseArguments(process.argv.slice(2), process.env);
   if (flags.has("--help") || flags.has("-h")) {
     console.log(USAGE);
     return;
   }
 
   const serverOptions = { readOnly: flags.has("--read-only") };
-  const transportMode = flags.has("--http")
-    ? "http"
-    : flags.has("--stdio")
-      ? "stdio"
-      : process.env.MCP_TRANSPORT === "http"
-        ? "http"
-        : "stdio";
 
   // Every tool finds its project from the file it is given, so the server can
   // start anywhere. The Claude Code plugin starts it in every project the user
   // opens, and passes this flag to keep the tools out of the ones without Elm.
   if (flags.has("--elm-projects-only") && !isElmProject()) {
     // Over stdio the harness started the server and is told nothing. A person starts the HTTP server.
-    if (transportMode === "http") {
+    if (http) {
       console.error(
         `No server started: --elm-projects-only was given, and neither ${process.cwd()} nor a direct child of it holds an elm.json.`
       );
@@ -295,13 +303,7 @@ async function main() {
   process.on("SIGTERM", shutDown);
   process.on("SIGINT", shutDown);
 
-  if (transportMode === "http") {
-    const host = values["--host"] || process.env.MCP_HOST || "127.0.0.1";
-    const portRaw = values["--port"] || process.env.MCP_PORT || "3333";
-    const port = Number.parseInt(portRaw, 10);
-    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-      throw new UsageError(`Invalid port: ${portRaw}`);
-    }
+  if (http) {
     await startHttpServer({ host, port, serverOptions });
     return;
   }

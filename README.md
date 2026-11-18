@@ -94,7 +94,7 @@ Append these to the arguments of `mcp-wrapper/index.mjs` in your harness's confi
 | `--read-only` | Offers only the nine tools that never edit a source file |
 | `--project-tools` | Takes the compiler and `elm-format` from a project's `node_modules/.bin` when they are there. Only for projects you trust |
 | `--elm-projects-only` | Exits at once unless the working directory, or a direct child of it, holds an `elm.json`. The harness then lists the server as not connected |
-| `--http`, `--host`, `--port` | Serves over HTTP instead of stdio, see [Shared MCP server](#shared-mcp-server-manual-http) |
+| `--http`, `--host`, `--port` | Serves over HTTP instead of stdio, see [Shared MCP server](#shared-mcp-server-manual-http). `--host` and `--port` need `--http` |
 
 Every tool carries MCP annotations. Nine are marked read-only: `elm_definition`, `elm_references`, `elm_symbols`, `elm_diagnostics`, `elm_code_actions`, `elm_notify_file_changed` and the three `elm_prepare_*` previews. The rest are marked as writing to disk, so a harness that reads annotations asks before it runs them. Read-only means that a tool edits no source file. `elm_diagnostics` still runs the compiler, which writes its cache to `elm-stuff/` and downloads packages it does not have yet.
 

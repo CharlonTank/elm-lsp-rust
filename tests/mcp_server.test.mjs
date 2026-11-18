@@ -394,6 +394,13 @@ test("an option the server does not know stops it with the usage text", async ()
     [["--http", "--stdio"], /^Choose either --http or --stdio/],
     [["--http", "--port"], /^--port needs a value/],
     [["--http", "--port", "seventy"], /^Invalid port: seventy/],
+    [["--http", "--port", "3333abc"], /^Invalid port: 3333abc/],
+    // An option in a value's place must not be swallowed as the value, least of all --read-only
+    [["--host", "--read-only"], /^--host needs a value/],
+    [["--http", "--port", "--read-only"], /^--port needs a value/],
+    // Over stdio these two would be ignored without a word
+    [["--port", "4000"], /^--port can only be used with --http/],
+    [["--stdio", "--host", "0.0.0.0", "--port", "4000"], /^--host and --port can only be used with --http/],
   ];
   for (const [args, message] of cases) {
     const result = await runNode(SERVER, args);
