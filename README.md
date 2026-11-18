@@ -104,6 +104,8 @@ The server starts one language server per Elm project on first use and stops it 
 
 The index covers the source directories that `elm.json` lists, also one outside the project root such as `../shared`. A file in none of them, such as a test, joins the index when a tool is called on that file. The language server then follows it like the rest, also when it builds its index anew. Such a file is gone from the index again once the language server restarts, which it does after ten idle minutes. Until a tool is called on the file again, a rename does not reach it. From the command line every call starts a new language server, so a rename there never reaches a file outside the source directories.
 
+When the harness closes the server's input, the server answers the requests it has already received, stops its language servers and exits.
+
 ## Features
 
 | Feature | Description |

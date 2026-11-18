@@ -83,6 +83,17 @@ const INSTRUCTIONS =
   "Lines and characters in arguments are 0-indexed. Locations in results have 1-indexed lines. " +
   "Refactoring tools write their edits to disk, so read a file again before you edit it further.";
 
+// The tool calls that are running now. A refactoring among them has files left
+// to write, so the server does not leave before they are done.
+const runningCalls = new Set();
+
+// Resolves once no tool call is running.
+async function callsDone() {
+  while (runningCalls.size > 0) {
+    await Promise.allSettled([...runningCalls]);
+  }
+}
+
 // Short name to avoid 64-char limit on tool names
 function createMcpServer({ readOnly }) {
   const server = new McpServer(
@@ -105,7 +116,15 @@ function createMcpServer({ readOnly }) {
         },
       },
       // When run() throws, the SDK answers with the error message and isError set.
-      async (args) => ({ content: [{ type: "text", text: await tool.run(args) }] })
+      async (args) => {
+        const call = tool.run(args);
+        runningCalls.add(call);
+        try {
+          return { content: [{ type: "text", text: await call }] };
+        } finally {
+          runningCalls.delete(call);
+        }
+      }
     );
   }
   return server;
@@ -266,6 +285,9 @@ function shutDown() {
   process.exit(0);
 }
 
+// How long the server goes on working after its input has closed
+const ANSWER_GRACE_MS = 60_000;
+
 // Start the server
 async function main() {
   const { flags, http, host, port } = parseArguments(process.argv.slice(2), process.env);
@@ -309,10 +331,17 @@ async function main() {
   }
 
   const server = createMcpServer(serverOptions);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  // A harness ends a stdio server by closing its input
-  process.stdin.on("end", shutDown);
+  await server.connect(new StdioServerTransport());
+  // A harness ends a stdio server by closing its input. It may still be
+  // reading the answer to its last call, and a refactoring under way has files
+  // left to write, so the calls that are running finish first. A call the
+  // client cancelled runs on as well: it gets no answer, and it still writes.
+  process.stdin.on("end", async () => {
+    await Promise.race([callsDone(), new Promise((resolve) => setTimeout(resolve, ANSWER_GRACE_MS))]);
+    // The answers are sent in the turns after their calls settle. The callback
+    // of the write runs once everything before it has left this process.
+    setImmediate(() => process.stdout.write("", shutDown));
+  });
 }
 
 main().catch((err) => {

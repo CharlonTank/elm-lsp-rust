@@ -20,6 +20,7 @@ import {
 } from "fs";
 import { dirname, join } from "path";
 import { once } from "node:events";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import {
   callTool,
   connect,
@@ -412,6 +413,56 @@ test("an option the server does not know stops it with the usage text", async ()
   const help = await runNode(SERVER, ["--help"]);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /^Usage: node index\.mjs \[options\]/);
+});
+
+test("requests that arrived before the input closed are answered", async (t) => {
+  const project = copyFixture(t);
+  const utils = join(project, "src/Utils.elm");
+  const rename = { file_path: utils, line: 6, character: 0, old_name: "formatName", newName: "shout" };
+  const messages = [
+    {
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "pipe", version: "1" } },
+    },
+    { method: "notifications/initialized" },
+    { id: 2, method: "tools/call", params: { name: "elm_rename_function", arguments: rename } },
+  ];
+
+  // As from "cat requests | node index.mjs": all three are in the pipe, and it is closed behind them
+  const input = messages.map((message) => JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n").join("");
+  const { code, stdout } = await runNode(SERVER, [], { cwd: project, input });
+
+  assert.equal(code, 0);
+  const answers = stdout.trim().split("\n").map((line) => JSON.parse(line));
+  assert.match(answers.find((answer) => answer.id === 2).result.content[0].text, /Applied 6 edit\(s\) in 2 file\(s\)/);
+  // The refactoring wrote every file before the server left
+  assert.match(readFileSync(utils, "utf-8"), /^shout name =$/m);
+  assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /shout model\.user\.name/);
+});
+
+test("a call the client cancelled does not keep the server once its input has closed", async (t) => {
+  const project = copyFixture(t);
+  const globalBin = tempDir(t);
+  // A compiler that takes a second, so the call is still running when it is cancelled
+  installTool(globalBin, "elm", "sleep 1");
+  const messages = [
+    {
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "pipe", version: "1" } },
+    },
+    { method: "notifications/initialized" },
+    { id: 2, method: "tools/call", params: { name: "elm_diagnostics", arguments: { file_path: join(project, "src/Main.elm") } } },
+    { method: "notifications/cancelled", params: { requestId: 2, reason: "the user pressed escape" } },
+  ];
+  const input = messages.map((message) => JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n").join("");
+
+  const started = Date.now();
+  const { code } = await runNode(SERVER, [], { cwd: project, env: { PATH: `${globalBin}:/usr/bin:/bin` }, input });
+  assert.equal(code, 0);
+  // It gets no answer, so waiting for one would last the full minute of grace
+  assert.ok(Date.now() - started < 20000, `the server stayed for ${Date.now() - started} ms`);
 });
 
 test("the server ends when the harness closes its input, language servers included", async (t) => {

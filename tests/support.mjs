@@ -57,13 +57,13 @@ export async function callTool(client, name, args) {
   return { text: result.content?.[0]?.text ?? "", isError: result.isError === true };
 }
 
-// Run a Node script to completion with stdin closed.
-export function runNode(script, args = [], { cwd, env } = {}) {
+// Run a Node script to completion. Its stdin gets `input`, if any, and is closed.
+export function runNode(script, args = [], { cwd, env, input } = {}) {
   return new Promise((resolve) => {
     const child = execFile(process.execPath, [script, ...args], { cwd, env }, (error, stdout, stderr) => {
       resolve({ code: error ? error.code : 0, stdout, stderr });
     });
-    child.stdin.end();
+    child.stdin.end(input);
   });
 }
 
