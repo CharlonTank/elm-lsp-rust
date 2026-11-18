@@ -153,5 +153,5 @@ export async function connectOverHttp(t, { args = [] } = {}) {
   const client = new Client({ name: "elm-lsp-rust-test", version: "1.0.0" }, { capabilities: {} });
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
   t.after(() => client.close());
-  return { client, server };
+  return { client, server, port };
 }

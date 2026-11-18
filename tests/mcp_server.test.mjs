@@ -20,6 +20,7 @@ import {
 } from "fs";
 import { dirname, join } from "path";
 import { once } from "node:events";
+import { request } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -548,6 +549,35 @@ test("the HTTP server offers the same tools and honours --read-only", async (t) 
   server.kill("SIGTERM");
   assert.deepEqual(await closed, [0, null]);
 });
+
+// The second is the same address in a spelling of its own
+for (const host of ["127.0.0.1", "127.1"]) {
+  test(`the HTTP server at ${host} answers only requests addressed to this machine`, async (t) => {
+    const { port } = await connectOverHttp(t, { args: ["--host", host] });
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "page", version: "1" } },
+    });
+    // The status of an initialize request sent with the given headers on top of the usual ones
+    const statusWith = (headers) =>
+      new Promise((resolve, reject) => {
+        const usual = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+        const sent = request({ port, path: "/mcp", method: "POST", headers: { ...usual, ...headers } }, (response) => {
+          response.resume();
+          resolve(response.statusCode);
+        });
+        sent.on("error", reject);
+        sent.end(body);
+      });
+
+    assert.equal(await statusWith({}), 200);
+    // A page that pointed its own domain at 127.0.0.1 sends that domain as the host
+    assert.equal(await statusWith({ Host: `evil.example:${port}` }), 403);
+    assert.equal(await statusWith({ Origin: "http://evil.example" }), 403);
+  });
+}
 
 // A package's elm.json lists no source directories. Its modules are in src.
 const PACKAGE_ELM_JSON = {

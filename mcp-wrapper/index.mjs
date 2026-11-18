@@ -187,7 +187,7 @@ function sendJsonError(res, status, code, message) {
   res.end(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }));
 }
 
-async function handleHttpRequest(req, res, transports, serverOptions) {
+async function handleHttpRequest(req, res, transports, { serverOptions, transportOptions }) {
   if (!req.url || !req.url.startsWith("/mcp")) {
     res.statusCode = 404;
     res.end("Not found");
@@ -213,6 +213,7 @@ async function handleHttpRequest(req, res, transports, serverOptions) {
 
     if (isInit) {
       transport = new StreamableHTTPServerTransport({
+        ...transportOptions,
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sessionId) => {
           transports.set(sessionId, transport);
@@ -259,10 +260,37 @@ async function handleHttpRequest(req, res, transports, serverOptions) {
   res.end("Method Not Allowed");
 }
 
+// True for an address of this machine that nothing outside it can reach.
+const isLoopback = (address) => address === "::1" || /^(::ffff:)?127\./.test(address);
+
+// How an address is written in the host part of a URL.
+const inUrl = (address) => (address.includes(":") ? `[${address}]` : address);
+
+/**
+ * Transport options for a server that listens at `address`, which `host`
+ * resolved to. On a loopback address only requests addressed to the machine
+ * itself are answered. A web page reaches such a server by pointing its own
+ * domain at 127.0.0.1 (DNS rebinding), and the browser then sends that domain
+ * as Host and the page as Origin. A server bound to any other address is meant
+ * to be reached from elsewhere.
+ */
+function loopbackGuard(address, host, port) {
+  if (!isLoopback(address)) return {};
+  const names = new Set(["127.0.0.1", "localhost", "[::1]", inUrl(host), inUrl(address)]);
+  // A client leaves out the port that http implies
+  const hosts = [...names].map((name) => (port === 80 ? name : `${name}:${port}`));
+  return {
+    enableDnsRebindingProtection: true,
+    allowedHosts: hosts,
+    allowedOrigins: hosts.map((name) => `http://${name}`),
+  };
+}
+
 async function startHttpServer({ host, port, serverOptions }) {
   const transports = new Map();
+  const options = { serverOptions, transportOptions: {} };
   const server = createHttpServer((req, res) => {
-    handleHttpRequest(req, res, transports, serverOptions).catch((error) => {
+    handleHttpRequest(req, res, transports, options).catch((error) => {
       console.error("MCP HTTP server error:", error);
       if (!res.headersSent) {
         res.statusCode = 500;
@@ -273,7 +301,9 @@ async function startHttpServer({ host, port, serverOptions }) {
 
   return new Promise((resolve) => {
     server.listen(port, host, () => {
-      console.log(`MCP HTTP server listening on http://${host}:${port}/mcp`);
+      // Decided from the address the server got, whichever way the host was spelled
+      options.transportOptions = loopbackGuard(server.address().address, host, port);
+      console.log(`MCP HTTP server listening on http://${inUrl(host)}:${port}/mcp`);
       resolve();
     });
   });

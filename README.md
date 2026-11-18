@@ -203,6 +203,7 @@ Claude Code config example (in `~/.claude.json` or project `.mcp.json`):
 Notes:
 - Sessions share one language server per Elm project.
 - Disable the stdio server entry to avoid duplicates.
+- On a loopback address, which is the default, the server refuses a request whose `Host` or `Origin` names another site. That is how a web page in a browser on the same machine would reach it. On any other address it answers every client that can connect, and the tools write files, so bind it only on a network you trust.
 
 ## Architecture
 
