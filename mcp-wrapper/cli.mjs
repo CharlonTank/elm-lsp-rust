@@ -12,7 +12,7 @@ import { runChecks } from "./doctor.mjs";
 import { ToolError } from "./errors.mjs";
 import { findHarness, harnesses, installAt, renderMarkdown, renderText } from "./harnesses.mjs";
 import { stopClients } from "./lsp-client.mjs";
-import { tools } from "./tools.mjs";
+import { runInTurn, tools } from "./tools.mjs";
 import { allowProjectTools } from "./workspace.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -165,7 +165,7 @@ async function runTool(name, argv) {
     return toolHelp(tool);
   }
   try {
-    return await tool.run(parseToolArguments(tool, argv));
+    return await runInTurn(tool, parseToolArguments(tool, argv));
   } finally {
     stopClients();
   }

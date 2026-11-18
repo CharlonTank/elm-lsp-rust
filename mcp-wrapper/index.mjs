@@ -12,7 +12,7 @@ import { createServer as createHttpServer } from "http";
 import { join } from "path";
 import { existsSync, readdirSync, statSync } from "fs";
 import { RUST_LSP_PATH, stopClients } from "./lsp-client.mjs";
-import { tools } from "./tools.mjs";
+import { runInTurn, tools } from "./tools.mjs";
 import { allowProjectTools } from "./workspace.mjs";
 
 const USAGE = `Usage: node index.mjs [options]
@@ -120,7 +120,7 @@ function createMcpServer({ readOnly }) {
       },
       // When run() throws, the SDK answers with the error message and isError set.
       async (args) => {
-        const call = tool.run(args);
+        const call = runInTurn(tool, args);
         runningCalls.add(call);
         try {
           return { content: [{ type: "text", text: await call }] };

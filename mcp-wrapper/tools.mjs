@@ -11,7 +11,7 @@
 import { execFile } from "child_process";
 import { mkdir, rename } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
-import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { z } from "zod";
@@ -264,6 +264,49 @@ async function relocateFile({ file_path, command, target, verb, done }) {
   );
 }
 
+// The arguments that name a file of the project a call is about. Every tool has one of them.
+export const PATH_ARGUMENTS = ["file_path", "new_path", "old_path"];
+
+// The Elm project a call is about, from the file it names. Null when it names none.
+// A project that is reached through a link is the same project under another spelling,
+// so it is known by where it really is.
+function projectOf(args) {
+  for (const path of PATH_ARGUMENTS.map((name) => args[name]).filter((path) => typeof path === "string")) {
+    const root = findWorkspaceRoot(resolve(path));
+    if (root) return realpathSync(root);
+  }
+  return null;
+}
+
+// How long elm-format may take. It runs in its project's turn, and a hung one would hold every later call.
+const FORMAT_TIMEOUT_MS = 30_000;
+
+// The last call for each project, by the real path of its root
+const turns = new Map();
+
+/**
+ * Run a tool with its arguments. The calls for one project run one at a time,
+ * in the order they came. Each one brings the index in step with the disk,
+ * computes its edits from that and writes them. A second call that did the
+ * same in between would write its edits into text the first has just changed.
+ * A harness may send calls together, and an HTTP server has several clients.
+ */
+export function runInTurn(tool, args) {
+  const root = projectOf(args);
+  if (root === null) return tool.run(args);
+
+  const call = (turns.get(root) ?? Promise.resolve()).then(() => tool.run(args));
+  const over = call.then(
+    () => {},
+    () => {}
+  );
+  turns.set(root, over);
+  over.then(() => {
+    if (turns.get(root) === over) turns.delete(root);
+  });
+  return call;
+}
+
 export const tools = [
   {
     name: "elm_definition",
@@ -347,10 +390,13 @@ export const tools = [
       const directory = dirname(resolve(file_path));
       const env = { ...process.env, PATH: toolPath(directory) };
       try {
-        await execFileAsync("elm-format", ["--yes", file_path], { env });
+        await execFileAsync("elm-format", ["--yes", file_path], { env, timeout: FORMAT_TIMEOUT_MS });
       } catch (error) {
         if (error.code === "ENOENT") {
           throw new ToolError(`elm-format is not on PATH.${projectToolsHint(directory, ["elm-format"])}`);
+        }
+        if (error.killed) {
+          throw new ToolError(`Error formatting: elm-format did not finish within ${FORMAT_TIMEOUT_MS / 1000} seconds`);
         }
         throw new ToolError(`Error formatting: ${error.message}`);
       }

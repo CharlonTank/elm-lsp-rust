@@ -106,6 +106,8 @@ The index covers the source directories that `elm.json` lists, also one outside 
 
 A refactoring reads every file it changes, and checks that it may write each of them, before it writes the first. A file that cannot be read or written leaves the project as it was, and the error names the file. A file move also checks first that its two directories take the change. These are checks ahead of the work and no transaction: a disk that fills up half way still leaves a refactoring half done.
 
+The calls for one project run one at a time, in the order they arrive, whether they come from one client or from several clients of an HTTP server. Two servers that work on the same project know nothing of each other, so do not let two of them refactor at once.
+
 When the harness closes the server's input, the server answers the requests it has already received, stops its language servers and exits.
 
 ### Known limitations

@@ -25,6 +25,7 @@ import { once } from "node:events";
 import { request } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { PATH_ARGUMENTS, tools } from "../mcp-wrapper/tools.mjs";
 import {
   callTool,
   connect,
@@ -133,6 +134,36 @@ for (const name of ["my élm project", "a~b [1] ^c|d #2 50%"]) {
     assert.equal(readFileSync(utils, "utf-8"), original);
   });
 }
+
+test("two calls for one project at the same time run one after the other", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const utils = join(project, "src/Utils.elm");
+  const rename = (line, old_name, newName) => callTool(client, "elm_rename_function", { file_path: utils, line, character: 0, old_name, newName });
+
+  // Sent together, as a harness does when the model asks for two tool calls in one turn
+  const answers = await Promise.all([rename(6, "formatName", "formatTheName"), rename(11, "greet", "welcome")]);
+
+  assert.deepEqual(answers.map((answer) => answer.isError), [false, false]);
+  // Computed from the same text, the second rename would write its edits where the first moved everything along
+  assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /^import Utils exposing \(formatTheName, welcome\)$/m);
+  assert.match(readFileSync(utils, "utf-8"), /^module Utils exposing \(formatTheName, welcome, helper\)$/m);
+});
+
+test("a project that is reached through a link takes its turn with the same project under its own path", async (t) => {
+  const project = copyFixture(t);
+  const linked = join(tempDir(t), "linked");
+  symlinkSync(project, linked);
+  const client = await connect(t, { cwd: project });
+  const rename = (root, line, old_name, newName) =>
+    callTool(client, "elm_rename_function", { file_path: join(root, "src/Utils.elm"), line, character: 0, old_name, newName });
+
+  // The two spellings have a language server each. What they write is the same files.
+  const answers = await Promise.all([rename(project, 6, "formatName", "formatTheName"), rename(linked, 11, "greet", "welcome")]);
+
+  assert.deepEqual(answers.map((answer) => answer.isError), [false, false]);
+  assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /^import Utils exposing \(formatTheName, welcome\)$/m);
+});
 
 test("a file is never renamed or moved onto an existing file", async (t) => {
   const project = copyFixture(t);
@@ -1336,6 +1367,13 @@ const READ_ONLY_TOOLS = [
   "elm_references",
   "elm_symbols",
 ];
+
+test("every tool names the file whose project its call belongs to", () => {
+  // A call waits its turn among the calls for its project, which is found from one of these arguments
+  for (const tool of tools) {
+    assert.ok(PATH_ARGUMENTS.some((name) => name in tool.input), `${tool.name} takes none of ${PATH_ARGUMENTS.join(", ")}`);
+  }
+});
 
 test("every tool tells the harness whether it writes", async (t) => {
   const client = await connect(t, { cwd: copyFixture(t) });
