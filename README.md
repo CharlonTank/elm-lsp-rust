@@ -2,7 +2,7 @@
 
 A fast Elm language server written in Rust, for coding agents. It gives an agent go to definition, find references, compiler diagnostics and project-wide refactorings as tools, over MCP or from the command line.
 
-It runs in Claude Code, OpenAI Codex, GitHub Copilot, Cursor, OpenCode, Gemini CLI, Google Antigravity, Cline, Goose, Pi and Oh My Pi as an MCP server. Aider, which has no MCP client, and any script can call the same tools through the command-line interface.
+It is a stdio MCP server, so a harness with an MCP client can register it. [docs/harnesses.md](docs/harnesses.md) has the entry for Claude Code, OpenAI Codex, GitHub Copilot, Cursor, OpenCode, Gemini CLI, Google Antigravity, Cline, Goose, Pi and Oh My Pi. The Claude Code and Codex entries are tested in those harnesses. The other nine follow each harness's documentation and have not been run there. Aider, which has no MCP client, and any script can call the same tools through the command-line interface.
 
 ## Installation
 

@@ -43,6 +43,8 @@ const shell = (...words) => words.map(shellQuote).join(" ");
  *   For a harness without MCP: how to call a tool through the CLI
  * @property {string} verify   How to see that the server is connected
  * @property {string[]} [notes]
+ * @property {string} [testedWith]  The harness version this entry was run in.
+ *   Without it the entry follows the harness's documentation and was never run.
  *
  * `verify` and `notes` may contain {cli} and {skill}, which stand for the
  * paths of this install.
@@ -59,6 +61,7 @@ export const harnesses = [
     config: ({ command, server }) => mcpServers({ command, args: [server] }),
     add: ({ command, server }) => `claude mcp add --scope user ${SERVER_NAME} -- ${shell(command, server)}`,
     verify: "Run `claude mcp list`, or `/mcp` inside a session.",
+    testedWith: "Claude Code 2.1.311",
     notes: [
       "The Claude Code plugin is an alternative. It registers the server and the skill in one step: " +
         "`/plugin marketplace add CharlonTank/elm-lsp-plugin`, then `/plugin install elm-lsp-rust@CharlonTank/elm-lsp-plugin`.",
@@ -73,6 +76,7 @@ export const harnesses = [
     config: ({ command, server }) =>
       [`[mcp_servers.${SERVER_NAME}]`, `command = ${JSON.stringify(command)}`, `args = ${JSON.stringify([server])}`].join("\n"),
     add: ({ command, server }) => `codex mcp add ${SERVER_NAME} -- ${shell(command, server)}`,
+    testedWith: "Codex CLI 0.169.0",
     verify: "Run `codex mcp list`, or `/mcp` inside a session.",
     notes: [
       "Codex reads the project file only in trusted projects.",
@@ -222,12 +226,15 @@ function instructions(harness, install) {
     run: harness.run?.(install),
     verify: fill(harness.verify),
     notes: (harness.notes || []).map(fill),
+    tested: harness.testedWith
+      ? `Tested with ${harness.testedWith}.`
+      : "Not run in this harness. The entry follows the documentation.",
   };
 }
 
 // Instructions for one harness as plain text, for a terminal or an agent.
 export function renderText(harness, install) {
-  const { files, config, add, run, verify, notes } = instructions(harness, install);
+  const { files, config, add, run, verify, notes, tested } = instructions(harness, install);
   const plain = (markdown) => markdown.replaceAll("**", "").replaceAll("`", "");
   const lines = [harness.name, ""];
 
@@ -242,12 +249,12 @@ export function renderText(harness, install) {
     lines.push("Call a tool from the chat:", "", `  ${run}`, "");
   }
 
-  lines.push(`Verify: ${plain(verify)}`, ...notes.map((note) => `Note: ${plain(note)}`), `Docs: ${harness.docs}`);
+  lines.push(`Verify: ${plain(verify)}`, ...notes.map((note) => `Note: ${plain(note)}`), `Docs: ${harness.docs}`, tested);
   return lines.join("\n");
 }
 
 function markdownSection(harness, install) {
-  const { files, config, add, run, verify, notes } = instructions(harness, install);
+  const { files, config, add, run, verify, notes, tested } = instructions(harness, install);
   const lines = [`## ${harness.name}`, "", `With your paths filled in: \`node mcp-wrapper/cli.mjs config ${harness.id}\``, ""];
 
   if (config) {
@@ -261,7 +268,7 @@ function markdownSection(harness, install) {
     lines.push("```", run, "```", "");
   }
 
-  lines.push(verify, "", ...notes.flatMap((note) => [note, ""]), `Source: <${harness.docs}>`);
+  lines.push(verify, "", ...notes.flatMap((note) => [note, ""]), `Source: <${harness.docs}>. ${tested}`);
   return lines.join("\n");
 }
 
@@ -287,6 +294,8 @@ export function renderMarkdown() {
     "",
     "If a harness reports that it cannot find `node`, replace `node` with the output of `command -v node`.",
     "Editors started from a desktop launcher often do not see the `PATH` of your shell.",
+    "",
+    "Each section ends with the documentation its entry comes from, and says whether the entry was run in that harness.",
     "",
     ...harnesses.map((harness) => `- [${harness.name}](#${anchor(harness.name)})`),
   ];

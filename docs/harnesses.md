@@ -9,6 +9,8 @@ to print the entry with the path filled in.
 If a harness reports that it cannot find `node`, replace `node` with the output of `command -v node`.
 Editors started from a desktop launcher often do not see the `PATH` of your shell.
 
+Each section ends with the documentation its entry comes from, and says whether the entry was run in that harness.
+
 - [Claude Code](#claude-code)
 - [OpenAI Codex](#openai-codex)
 - [GitHub Copilot (CLI and VS Code)](#github-copilot-cli-and-vs-code)
@@ -52,7 +54,7 @@ Run `claude mcp list`, or `/mcp` inside a session.
 
 The Claude Code plugin is an alternative. It registers the server and the skill in one step: `/plugin marketplace add CharlonTank/elm-lsp-plugin`, then `/plugin install elm-lsp-rust@CharlonTank/elm-lsp-plugin`.
 
-Source: <https://code.claude.com/docs/en/mcp>
+Source: <https://code.claude.com/docs/en/mcp>. Tested with Claude Code 2.1.311.
 
 ## OpenAI Codex
 
@@ -79,7 +81,7 @@ Codex reads the project file only in trusted projects.
 
 Codex starts MCP servers with a reduced environment. `PATH` is passed on. List anything else the Elm compiler needs under `env_vars`.
 
-Source: <https://learn.chatgpt.com/docs/extend/mcp>
+Source: <https://learn.chatgpt.com/docs/extend/mcp>. Tested with Codex CLI 0.169.0.
 
 ## GitHub Copilot (CLI and VS Code)
 
@@ -115,7 +117,7 @@ Run `copilot mcp list`. In VS Code, run **MCP: List Servers** from the Command P
 
 VS Code's older Local harness reads `.vscode/mcp.json` instead. There the top-level key is `servers` and the entry has no `tools` field.
 
-Source: <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers>
+Source: <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers>. Not run in this harness. The entry follows the documentation.
 
 ## Cursor
 
@@ -140,7 +142,7 @@ With your paths filled in: `node mcp-wrapper/cli.mjs config cursor`
 
 Run `agent mcp list`, or open **Customize** in the editor sidebar.
 
-Source: <https://cursor.com/docs/context/mcp>
+Source: <https://cursor.com/docs/context/mcp>. Not run in this harness. The entry follows the documentation.
 
 ## OpenCode
 
@@ -176,7 +178,7 @@ Run `opencode mcp list`.
 
 OpenCode 1.x has no `servers` level. Put the `elm-lsp` entry directly under `mcp`, and use the file instead of `opencode mcp add`, which is interactive there.
 
-Source: <https://opencode.ai/docs/mcp-servers/>
+Source: <https://opencode.ai/docs/mcp-servers/>. Not run in this harness. The entry follows the documentation.
 
 ## Gemini CLI
 
@@ -206,7 +208,7 @@ gemini mcp add --scope user elm-lsp node /ABS/PATH/elm-lsp-rust/mcp-wrapper/inde
 
 Run `gemini mcp list`, or `/mcp` inside a session.
 
-Source: <https://geminicli.com/docs/tools/mcp-server/>
+Source: <https://geminicli.com/docs/tools/mcp-server/>. Not run in this harness. The entry follows the documentation.
 
 ## Google Antigravity
 
@@ -230,7 +232,7 @@ With your paths filled in: `node mcp-wrapper/cli.mjs config antigravity`
 
 Run `/mcp` in the CLI, or open **MCP Servers** from the **…** menu of the IDE's agent panel.
 
-Source: <https://antigravity.google/docs/mcp>
+Source: <https://antigravity.google/docs/mcp>. Not run in this harness. The entry follows the documentation.
 
 ## Cline
 
@@ -263,7 +265,7 @@ Run `cline config mcp`, or open the **MCP Servers** panel of the extension.
 
 In the extension, **MCP Servers** > **Configure** > **Configure MCP Servers** opens the file.
 
-Source: <https://docs.cline.bot/mcp/configuring-mcp-servers>
+Source: <https://docs.cline.bot/mcp/configuring-mcp-servers>. Not run in this harness. The entry follows the documentation.
 
 ## Goose
 
@@ -292,7 +294,7 @@ Run `goose info -v`.
 
 The command above adds the server to one session only. Edit the file, or run `goose configure` and pick **Add Extension** > **Command-Line Extension**, to keep it.
 
-Source: <https://goose-docs.ai/docs/getting-started/using-extensions>
+Source: <https://goose-docs.ai/docs/getting-started/using-extensions>. Not run in this harness. The entry follows the documentation.
 
 ## Pi
 
@@ -324,7 +326,7 @@ Run `pi mcp list`, or `/mcp` inside a session.
 
 Pi calls MCP tools from codemode scripts by default. Add `"exposure": "direct"` to the entry to declare them to the model like built-in tools.
 
-Source: <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/mcp.md>
+Source: <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/mcp.md>. Not run in this harness. The entry follows the documentation.
 
 ## Oh My Pi
 
@@ -351,7 +353,7 @@ Run `/mcp list` inside a session.
 
 Oh My Pi also picks up servers that Claude Code, Codex, Gemini CLI, OpenCode or Cursor already have configured.
 
-Source: <https://github.com/can1357/oh-my-pi/blob/main/docs/mcp-config.md>
+Source: <https://github.com/can1357/oh-my-pi/blob/main/docs/mcp-config.md>. Not run in this harness. The entry follows the documentation.
 
 ## Aider
 
@@ -367,4 +369,4 @@ Aider has no MCP client, so it uses the command-line interface. `/run` executes 
 
 Load the tool reference as read-only context with `aider --read /ABS/PATH/elm-lsp-rust/skills/elm-refactoring/SKILL.md`.
 
-Source: <https://aider.chat/docs/usage/commands.html>
+Source: <https://aider.chat/docs/usage/commands.html>. Not run in this harness. The entry follows the documentation.
