@@ -80,6 +80,7 @@ const INSTRUCTIONS =
   "Code intelligence and refactoring for Elm projects. " +
   "Pass absolute file paths, because a relative path resolves against the directory this server was started in, " +
   "and that differs between harnesses. " +
+  "The one exception is target_path of elm_move_file, which starts at the project root when it is relative. " +
   "Lines and characters in arguments are 0-indexed. Locations in results have 1-indexed lines. " +
   "Refactoring tools write their edits to disk, so read a file again before you edit it further. " +
   "On a line with non-ASCII text before the symbol, columns in results count bytes. Pass such a column to a tool as the result gave it. " +

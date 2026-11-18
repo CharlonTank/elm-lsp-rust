@@ -192,6 +192,56 @@ test("a file is not moved out of its project through a linked directory", async 
   assert.deepEqual(sourcesOf(project), before);
 });
 
+test("a moved module is named by its path below its source directory, or not moved", async (t) => {
+  const project = copyFixture(t);
+  addSourceDirectory(project, "lib");
+  mkdirSync(join(project, "lib"));
+  // The server runs somewhere else. A relative target still starts at the project root.
+  const client = await connect(t, { cwd: tempDir(t) });
+  const utils = join(project, "src/Utils.elm");
+  const before = sourcesOf(project);
+  const move = (target_path) => callTool(client, "elm_move_file", { file_path: utils, target_path });
+  const noName = (part) =>
+    `Error: "${part}" cannot be part of a module name. Below the source directory, every directory and the file need a name that starts with an upper-case letter and holds only letters, digits and underscores`;
+
+  assert.deepEqual(await move("tests/Utils.elm"), {
+    text: `Error: ${join(project, "tests/Utils.elm")} is in no source directory of elm.json (src, lib)`,
+    isError: true,
+  });
+  assert.deepEqual(await move("src/helpers/Utils.elm"), { text: noName("helpers"), isError: true });
+  assert.deepEqual(await move("src/Helpers/utils.elm"), { text: noName("utils"), isError: true });
+  assert.deepEqual(await callTool(client, "elm_rename_file", { file_path: utils, new_name: "utils.elm" }), {
+    text: 'Error: "utils" is no module name. It has to start with an upper-case letter and hold only letters, digits and underscores',
+    isError: true,
+  });
+  // What only looks like a letter is none for the compiler: a mark that joins the letter before it, a letter in a square
+  for (const odd of ["A\u0345", "A\u05b0", "\u{1F130}x"]) {
+    assert.deepEqual(await callTool(client, "elm_rename_file", { file_path: utils, new_name: `${odd}.elm` }), {
+      text: `Error: "${odd}" is no module name. It has to start with an upper-case letter and hold only letters, digits and underscores`,
+      isError: true,
+    });
+  }
+  assert.deepEqual(sourcesOf(project), before);
+
+  // Into another source directory, the module keeps the name it had: "lib" is no part of it
+  const moved = await move("lib/Utils.elm");
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(readFileSync(join(project, "lib/Utils.elm"), "utf-8"), /^module Utils exposing/);
+  assert.match(readFileSync(join(project, "src/Main.elm"), "utf-8"), /^import Utils exposing/m);
+  assert.equal(existsSync(utils), false);
+
+  // A letter of any script is a letter, as for the compiler, in the name of a file and of a directory
+  const accented = await callTool(client, "elm_rename_file", { file_path: join(project, "lib/Utils.elm"), new_name: "Été.elm" });
+  assert.equal(accented.isError, false, accented.text);
+  assert.match(readFileSync(join(project, "lib/Été.elm"), "utf-8"), /^module Été exposing/);
+  const below = await callTool(client, "elm_move_file", { file_path: join(project, "src/Types.elm"), target_path: "src/Modèles/Types.elm" });
+  assert.equal(below.isError, false, below.text);
+  assert.match(readFileSync(join(project, "src/Modèles/Types.elm"), "utf-8"), /^module Modèles\.Types exposing/);
+  const main = join(project, "src/Main.elm");
+  assert.match(readFileSync(main, "utf-8"), /^import Modèles\.Types exposing \(User, defaultUser\)\nimport Été exposing \(formatName, greet\)$/m);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: main }), { text: "No errors or warnings", isError: false });
+});
+
 test("a rename that only changes letter case goes through", async (t) => {
   const project = copyFixture(t);
   const client = await connect(t, { cwd: project });

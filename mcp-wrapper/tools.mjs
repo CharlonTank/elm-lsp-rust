@@ -10,7 +10,7 @@
 
 import { execFile } from "child_process";
 import { mkdir, rename } from "fs/promises";
-import { basename, dirname, join, relative, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
@@ -691,20 +691,22 @@ export const tools = [
       "Move an Elm file to a new location and update its module declaration + all imports across the project",
     input: {
       file_path: elmFile("Path to the Elm file to move"),
-      target_path: z.string().describe('Target path (e.g., "src/Utils/Helper.elm")'),
+      target_path: z
+        .string()
+        .describe('Where the file goes: an absolute path, or one relative to the project root, the directory with elm.json (e.g., "src/Utils/Helper.elm")'),
     },
     async run({ file_path, target_path }) {
       if (!target_path.endsWith(".elm")) {
         throw new ToolError("Target path must end with .elm");
       }
 
-      // A relative target starts at the workspace root, which is also how the
-      // server expects it. One with ".." in it could lead out of the project.
+      // A relative target starts at the project root, unlike every other path, so
+      // that "src/Utils/Helper.elm" means the same wherever the server was started.
+      // One with ".." in it, or through a linked directory, could lead out of the project.
       const { workspaceRoot } = locate(file_path);
       const absTarget = resolve(workspaceRoot, target_path);
       assertInProject(absTarget, workspaceRoot);
-      const target = relative(workspaceRoot, absTarget);
-      return relocateFile({ file_path, command: "elm.moveFile", target, verb: "move", done: "Moved" });
+      return relocateFile({ file_path, command: "elm.moveFile", target: absTarget, verb: "move", done: "Moved" });
     },
   },
 

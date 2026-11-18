@@ -125,6 +125,8 @@ dependencies = [
  "anyhow",
  "dashmap",
  "dirs",
+ "icu_normalizer",
+ "icu_properties",
  "serde",
  "serde_json",
  "tempfile",

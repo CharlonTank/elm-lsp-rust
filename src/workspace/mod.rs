@@ -1,3 +1,5 @@
+use icu_normalizer::ComposingNormalizerBorrowed;
+use icu_properties::{props::GeneralCategory, CodePointMapData};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -44,6 +46,45 @@ pub(crate) fn normalized(path: &Path) -> PathBuf {
         }
     }
     plain
+}
+
+/// Whether a directory or a file, without its extension, can be one part of
+/// a module name: an upper-case letter, then letters, the digits 0 to 9 and
+/// underscores. A letter is one of any script, as it is for the compiler,
+/// which builds a module Été. What only looks like a letter is none for
+/// either: a numeral such as Ⅷ, a mark that joins the letter in front of
+/// it, a letter in a square. The compiler also takes a name that starts with
+/// one of the few letters that are two capitals in one, ǅ. The grammar that
+/// the index reads a file with does not, so no tool gives a module such a
+/// name.
+pub(crate) fn is_module_segment(name: &str) -> bool {
+    use GeneralCategory::*;
+    let category_of = CodePointMapData::<GeneralCategory>::new();
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| category_of.get(first) == UppercaseLetter)
+        && chars.all(|c| {
+            c.is_ascii_digit()
+                || c == '_'
+                || matches!(
+                    category_of.get(c),
+                    UppercaseLetter
+                        | LowercaseLetter
+                        | TitlecaseLetter
+                        | ModifierLetter
+                        | OtherLetter
+                )
+        })
+}
+
+/// A name with every accent written as one letter, the form a module's name
+/// has for the compiler. A disk can keep the same name as a letter with a
+/// mark behind it, and finds it under either form.
+pub(crate) fn composed(name: &str) -> String {
+    ComposingNormalizerBorrowed::new_nfc()
+        .normalize(name)
+        .into_owned()
 }
 
 /// Why a file is not there for the index to read.
@@ -697,6 +738,52 @@ impl Workspace {
                 Err(e) => self.mark_unreadable(path, e.to_string()),
             }
         }
+    }
+
+    /// The name a module must have to live at `path`: the path below its
+    /// source directory, with dots for the separators and every accent as
+    /// one letter, whichever form the disk keeps it in. An error when the path
+    /// is in no source directory, or a part of it can be no part of a name.
+    pub(crate) fn module_name_at(&self, path: &Path) -> anyhow::Result<String> {
+        // Of nested source directories, the innermost holds the file
+        let below = self
+            .source_dirs
+            .iter()
+            .filter_map(|dir| path.strip_prefix(dir).ok())
+            .min_by_key(|below| below.components().count());
+        let Some(below) = below else {
+            let listed: Vec<String> = self
+                .source_dirs
+                .iter()
+                .map(|dir| {
+                    dir.strip_prefix(&self.root_path)
+                        .unwrap_or(dir)
+                        .display()
+                        .to_string()
+                })
+                .collect();
+            anyhow::bail!(
+                "{} is in no source directory of elm.json ({})",
+                path.display(),
+                listed.join(", ")
+            );
+        };
+
+        let segments: Vec<String> = below
+            .with_extension("")
+            .components()
+            .map(|component| composed(&component.as_os_str().to_string_lossy()))
+            .collect();
+        if let Some(odd) = segments.iter().find(|segment| !is_module_segment(segment)) {
+            anyhow::bail!(
+                "\"{}\" cannot be part of a module name. Below the source directory, every directory and the file need a name that starts with an upper-case letter and holds only letters, digits and underscores",
+                odd
+            );
+        }
+        if segments.is_empty() {
+            anyhow::bail!("{} names no file", path.display());
+        }
+        Ok(segments.join("."))
     }
 
     /// Index all .elm files in the workspace
@@ -2919,6 +3006,112 @@ mod tests {
     }
 
     #[test]
+    fn test_a_module_is_named_by_its_path_below_its_source_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::write(
+            root.join("elm.json"),
+            r#"{ "source-directories": ["src", "lib", "src/Generated"] }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        let mut workspace = Workspace::new(root.to_path_buf());
+        workspace.initialize().unwrap();
+        let name = |path: &str| {
+            workspace
+                .module_name_at(&root.join(path))
+                .map_err(|e| e.to_string())
+        };
+
+        assert_eq!(name("src/Utils/Helper.elm"), Ok("Utils.Helper".to_string()));
+        assert_eq!(name("lib/Utils.elm"), Ok("Utils".to_string()));
+        // Of two source directories that hold the file, the inner one names it
+        assert_eq!(name("src/Generated/Api.elm"), Ok("Api".to_string()));
+        // The compiler takes letters of any script, the digits 0 to 9 and underscores
+        assert_eq!(name("src/Élan/Café2_b.elm"), Ok("Élan.Café2_b".to_string()));
+        // Behind the first letter: one that is two capitals in one, one that only modifies, one without case
+        for letters in ["A\u{1c5}", "A\u{2b0}", "A\u{5d0}"] {
+            assert_eq!(name(&format!("src/{letters}.elm")), Ok(letters.to_string()));
+        }
+        // A disk can keep an accent as a letter and a mark. The name has it as one letter.
+        assert_eq!(
+            name("src/Foo/E\u{301}lan/Cafe\u{301}.elm"),
+            Ok("Foo.\u{c9}lan.Caf\u{e9}".to_string())
+        );
+        assert_eq!(
+            name("tests/X.elm"),
+            Err(format!(
+                "{} is in no source directory of elm.json (src, lib, src/Generated)",
+                root.join("tests/X.elm").display()
+            ))
+        );
+        // The compiler takes the first, a name that starts with two capitals in
+        // one letter, and the parser of the index does not read it. Each one
+        // from the fifth on is refused by the compiler as well: a lower-case
+        // letter in front, a numeral in front, a numeral inside, a digit of
+        // another script, two marks that join the letter before them and
+        // compose with nothing, a letter in a square
+        for odd in [
+            "src/\u{1c5}ungla.elm",
+            "src/helpers/Utils.elm",
+            "src/utils.elm",
+            "src/My-Module.elm",
+            "src/été.elm",
+            "src/Ⅷx.elm",
+            "src/Aⅷ.elm",
+            "src/A٣.elm",
+            "src/A\u{345}.elm",
+            "src/A\u{5b0}.elm",
+            "src/\u{1F130}x.elm",
+        ] {
+            let error = name(odd).unwrap_err();
+            assert!(
+                error.contains("cannot be part of a module name"),
+                "{odd}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_new_file_and_a_new_directory_are_spelled_as_the_module_name_is() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let src = temp_dir.path().join("src");
+        fs::write(src.join("Utils.elm"), "module Utils exposing (..)\n").unwrap();
+        workspace.initialize().unwrap();
+        let uri = Url::from_file_path(src.join("Utils.elm")).unwrap();
+
+        // The caller writes each accent as a letter and a mark. A file system
+        // that tells the two forms apart would keep that, and the compiler
+        // looks for the module under the form its name has, one letter.
+        let renamed = workspace
+            .rename_file(&uri, "E\u{301}te\u{301}.elm")
+            .unwrap();
+        assert_eq!(renamed.new_module_name, "\u{c9}t\u{e9}");
+        assert_eq!(
+            renamed.new_path,
+            src.join("\u{c9}t\u{e9}.elm").to_string_lossy()
+        );
+        let moved = workspace
+            .move_file(&uri, "src/Cafe\u{301}/E\u{301}te\u{301}.elm")
+            .unwrap();
+        assert_eq!(moved.new_module_name, "Caf\u{e9}.\u{c9}t\u{e9}");
+        assert_eq!(
+            moved.new_path,
+            src.join("Caf\u{e9}/\u{c9}t\u{e9}.elm").to_string_lossy()
+        );
+
+        // A directory that is there keeps the spelling it was called by
+        fs::create_dir(src.join("Cafe\u{301}")).unwrap();
+        let into = workspace
+            .move_file(&uri, "src/Cafe\u{301}/E\u{301}te\u{301}.elm")
+            .unwrap();
+        assert_eq!(
+            into.new_path,
+            src.join("Cafe\u{301}/\u{c9}t\u{e9}.elm").to_string_lossy()
+        );
+    }
+
+    #[test]
     fn test_a_file_indexed_at_startup_is_not_a_disk_change() {
         let (temp_dir, mut workspace) = create_test_workspace();
         write_settled(
@@ -3212,6 +3405,12 @@ mod tests {
         assert_eq!(
             file_operations::extract_module_name_from_content(content2),
             Some("Utils.Helper".to_string())
+        );
+
+        let accented = "module Été.Modèle exposing (..)";
+        assert_eq!(
+            file_operations::extract_module_name_from_content(accented),
+            Some("Été.Modèle".to_string())
         );
 
         let content3 = "-- no module declaration";

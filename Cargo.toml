@@ -35,6 +35,11 @@ dashmap = "5"
 walkdir = "2"
 dirs = "5"
 
+# Unicode: which characters are letters, and the composed form of an accent.
+# Both are in the build already, through url, at these versions.
+icu_normalizer = { version = "=2.2.0", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "=2.2.0", default-features = false, features = ["compiled_data"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

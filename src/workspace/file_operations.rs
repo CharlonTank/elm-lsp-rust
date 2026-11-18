@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::*;
 
-use super::{FileOperationResult, Workspace, LAMDERA_PROTECTED_FILES};
+use super::{
+    composed, is_module_segment, normalized, FileOperationResult, Workspace,
+    LAMDERA_PROTECTED_FILES,
+};
 
 /// Check if a file is a protected Lamdera file (must be at root of src/)
 fn is_lamdera_protected_file(path: &Path) -> bool {
@@ -22,6 +25,24 @@ fn is_lamdera_protected_file(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// `path` with each part that the disk does not hold yet in the form a
+/// module's name has, every accent written as one letter. A file system that
+/// tells the two forms of an accent apart keeps a name as it is given, and
+/// the compiler looks for a module under the one form. A part that is there
+/// already stays as the caller spells it.
+fn with_new_names_composed(path: &Path) -> PathBuf {
+    let mut made = PathBuf::new();
+    for part in path.components() {
+        let given = made.join(part);
+        made = if given.symlink_metadata().is_ok() {
+            given
+        } else {
+            made.join(composed(&part.as_os_str().to_string_lossy()))
+        };
+    }
+    made
 }
 
 impl Workspace {
@@ -52,7 +73,14 @@ impl Workspace {
             .ok_or_else(|| anyhow::anyhow!("Could not extract module name from file"))?;
 
         // Compute new module name (just the filename without .elm)
-        let new_module_base = new_name.trim_end_matches(".elm");
+        // Only the one ending: "Text.elm.elm" is no name of a module
+        let new_module_base = composed(new_name.strip_suffix(".elm").unwrap_or(new_name));
+        if !is_module_segment(&new_module_base) {
+            return Err(anyhow::anyhow!(
+                "\"{}\" is no module name. It has to start with an upper-case letter and hold only letters, digits and underscores",
+                new_module_base
+            ));
+        }
 
         // The new module name keeps the same path prefix, just changes the final component
         let old_parts: Vec<&str> = old_module_name.split('.').collect();
@@ -64,10 +92,12 @@ impl Workspace {
         };
 
         // Compute new path
-        let new_path = old_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?
-            .join(new_name);
+        let new_path = with_new_names_composed(
+            &old_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?
+                .join(new_name),
+        );
 
         // Collect all edits
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
@@ -125,15 +155,17 @@ impl Workspace {
         let old_module_name = extract_module_name_from_content(&content)
             .ok_or_else(|| anyhow::anyhow!("Could not extract module name from file"))?;
 
-        // Compute new module name from target path
-        let new_module_name = path_string_to_module_name(&self.root_path, target_path);
+        // The full new path. A relative target starts at the workspace root.
+        let new_path =
+            with_new_names_composed(&normalized(&if Path::new(target_path).is_absolute() {
+                PathBuf::from(target_path)
+            } else {
+                self.root_path.join(target_path)
+            }));
 
-        // Compute full new path (relative to workspace root or absolute)
-        let new_path = if Path::new(target_path).is_absolute() {
-            PathBuf::from(target_path)
-        } else {
-            self.root_path.join(target_path)
-        };
+        // The compiler finds a module by its path below a source directory,
+        // so that path is the module's name
+        let new_module_name = self.module_name_at(&new_path)?;
 
         // Collect all edits
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
@@ -274,11 +306,7 @@ pub(crate) fn extract_module_name_from_content(content: &str) -> Option<String> 
             if let Some(exposing_pos) = after_module.find(" exposing") {
                 let module_name = after_module[..exposing_pos].trim();
                 // Validate it's a proper module name (starts with uppercase)
-                if module_name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase())
-                {
+                if module_name.chars().next().is_some_and(char::is_uppercase) {
                     return Some(module_name.to_string());
                 }
             }
@@ -295,11 +323,7 @@ pub(crate) fn find_module_declaration_range(content: &str) -> Option<Range> {
             if let Some(exposing_pos) = after_module.find(" exposing") {
                 let module_name = after_module[..exposing_pos].trim();
                 // Validate it's a proper module name
-                if module_name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase())
-                {
+                if module_name.chars().next().is_some_and(char::is_uppercase) {
                     let line_start = line.find("module")?;
                     // Calculate end: "module " + module_name + " exposing"
                     let decl_len = "module ".len() + module_name.len() + " exposing".len();
@@ -318,55 +342,4 @@ pub(crate) fn find_module_declaration_range(content: &str) -> Option<Range> {
         }
     }
     None
-}
-
-/// Convert a path string like "src/Utils/Helper.elm" to module name "Utils.Helper"
-fn path_string_to_module_name(root_path: &Path, path_str: &str) -> String {
-    let path = Path::new(path_str);
-
-    tracing::debug!(
-        "path_string_to_module_name: path_str={}, root_path={}",
-        path_str,
-        root_path.display()
-    );
-
-    // If absolute path, make it relative to workspace root
-    let relative_path = if path.is_absolute() {
-        // Try to strip workspace root
-        if let Ok(rel) = path.strip_prefix(root_path) {
-            tracing::debug!("  Stripped prefix, relative={}", rel.display());
-            rel.to_path_buf()
-        } else {
-            tracing::debug!("  Could not strip prefix");
-            // Fallback: just use the path as-is
-            path.to_path_buf()
-        }
-    } else {
-        path.to_path_buf()
-    };
-
-    // Remove .elm extension
-    let stem = relative_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-
-    // Get parent path components, skipping "src" if present
-    let mut parts: Vec<&str> = Vec::new();
-    if let Some(parent) = relative_path.parent() {
-        for component in parent.components() {
-            if let std::path::Component::Normal(s) = component {
-                let s_str = s.to_str().unwrap_or("");
-                // Skip common source directories
-                if s_str != "src" && s_str != "." && !s_str.is_empty() {
-                    parts.push(s_str);
-                }
-            }
-        }
-    }
-
-    // Add the filename stem
-    parts.push(stem);
-
-    parts.join(".")
 }

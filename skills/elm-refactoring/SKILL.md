@@ -149,14 +149,14 @@ target_module: "/path/to/Target.elm"
 ```
 
 #### elm_rename_file
-Rename an Elm file and update module declaration + all imports.
+Rename an Elm file and update module declaration + all imports. The new name is a file name without a directory, and it must be a module name: `NewName.elm`, not `newName.elm`.
 ```
 file_path: "/path/to/OldName.elm"
 new_name: "NewName.elm"
 ```
 
 #### elm_move_file
-Move an Elm file to a new location and update everything.
+Move an Elm file to a new location and update everything. The module is named after its path below the source directory, so the target has to be in a source directory of `elm.json`, and every directory below it needs an upper-case name. A relative `target_path` starts at the project root, the directory with `elm.json`.
 ```
 file_path: "/path/to/File.elm"
 target_path: "src/Utils/File.elm"
@@ -261,7 +261,7 @@ type_name: "BackendModel"
 ## Important Notes
 
 - **Line/character positions are 0-indexed** in arguments. Locations in results have 1-indexed lines.
-- **Pass absolute file paths.** A relative path resolves against the directory the server was started in.
+- **Pass absolute file paths.** A relative path resolves against the directory the server was started in. The one exception is `target_path` of `elm_move_file`, which starts at the project root.
 - **Refactoring tools write to disk.** Read a file again before editing it further.
 - **Always verify compilation** after refactoring, with `elm_diagnostics` on the project's entry module or with the project's build command
 - **Lines with non-ASCII text before the symbol.** Columns are counted in bytes there, so a column in a result is larger than the count of characters. Pass it to a tool as the result gave it. Edits land where they belong. `elm_diagnostics` prints the compiler's own line and column, which count from 1 and by characters.
