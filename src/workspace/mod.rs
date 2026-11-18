@@ -989,16 +989,20 @@ impl Workspace {
         self.references.retain(|_, refs| !refs.is_empty());
     }
 
-    /// Notify the workspace that a file was renamed/moved
-    /// This removes the old file from the index and adds the new file
+    /// Take in that a file was renamed or moved by somebody else: index the
+    /// file at its new place, and drop the module of the old place once no
+    /// file is there. Told of a move that did not happen, or of a copy, the
+    /// index keeps the module whose file still exists.
     pub fn notify_file_renamed(&mut self, old_path: &Path, new_path: &Path) -> anyhow::Result<()> {
-        // Remove old file from index
-        if let Ok(old_uri) = Url::from_file_path(old_path) {
-            self.remove_file(&old_uri);
-        }
+        let text = std::fs::read_to_string(new_path)?;
+        let new_uri = Url::from_file_path(new_path).map_err(|_| anyhow::anyhow!("Invalid path"))?;
 
-        // Index the new file
-        self.index_file(new_path)?;
+        if !matches!(file_at(old_path), Ok(()) | Err(Absent::Hidden(_))) {
+            if let Ok(old_uri) = Url::from_file_path(old_path) {
+                self.remove_file(&old_uri);
+            }
+        }
+        self.update_file(&new_uri, &text);
 
         Ok(())
     }

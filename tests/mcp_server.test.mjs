@@ -1443,6 +1443,36 @@ test("a request that cannot be carried out is a tool error", async (t) => {
   });
   assert.equal(staleName.isError, true);
   assert.match(staleName.text, /Safety check failed: Expected function 'greet' but found 'helper'/);
+
+  // The language server is told of a move to a place where no file is
+  const nowhere = await callTool(client, "elm_notify_file_changed", { old_path: stray, new_path: join(project, "src/Nowhere.elm") });
+  assert.equal(nowhere.isError, true);
+  assert.match(nowhere.text, /^Error: No such file or directory/);
+});
+
+test("a module stays in the index while its file is there, whatever the server is told about a move", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const main = join(project, "src/Main.elm");
+  const rename = (from, to) =>
+    callTool(client, "elm_rename_function", { file_path: join(project, "src/Utils.elm"), line: 6, character: 0, old_name: from, newName: to });
+  await callTool(client, "elm_symbols", { file_path: main });
+
+  // A copy under another module name, announced as a move. Main.elm is where it was, and as old as
+  // it was, so nothing but the index itself can tell the language server that it still counts.
+  const copy = join(project, "src/Copy.elm");
+  writeFileSync(copy, readFileSync(main, "utf-8").replace("module Main exposing", "module Copy exposing"));
+  assert.equal((await callTool(client, "elm_notify_file_changed", { old_path: main, new_path: copy })).isError, false);
+  assert.match((await rename("formatName", "shout")).text, /Applied 8 edit\(s\) in 3 file\(s\)/);
+  assert.match(readFileSync(main, "utf-8"), /^import Utils exposing \(shout, greet\)$/m);
+  assert.match(readFileSync(copy, "utf-8"), /^import Utils exposing \(shout, greet\)$/m);
+
+  // A move that did not happen is an error, and takes nothing out of the index either
+  const types = join(project, "src/Types.elm");
+  const nowhere = await callTool(client, "elm_notify_file_changed", { old_path: types, new_path: join(project, "src/Nowhere.elm") });
+  assert.equal(nowhere.isError, true);
+  const users = await callTool(client, "elm_references", { file_path: types, line: 3, character: 11 });
+  assert.match(users.text, /src\/Types\.elm/);
 });
 
 test("a rename away from any symbol reports the server's reason", async (t) => {

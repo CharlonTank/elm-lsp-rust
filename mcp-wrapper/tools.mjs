@@ -239,7 +239,6 @@ async function relocateFile({ file_path, command, target, verb, done }) {
   if (isAnotherFile(result.newPath, result.oldPath)) {
     throw new ToolError(`Cannot ${verb} file: ${result.newPath} already exists`);
   }
-
   // The file itself moves last, after the edits. Whether it can move is found out now, while nothing has changed.
   assertCanRelocate(result.oldPath, result.newPath, verb);
 
@@ -774,7 +773,10 @@ export const tools = [
       }
 
       const client = await ensureClient(workspaceRoot);
-      await client.executeCommand("elm.notifyFileRenamed", [absOldPath, absNewPath]);
+      const result = await client.executeCommand("elm.notifyFileRenamed", [absOldPath, absNewPath]);
+      if (!result?.success) {
+        throw new ToolError(`Error: ${result?.error ?? "the language server did not take the change"}`);
+      }
       return `Notified LSP about file change: ${old_path} → ${new_path}`;
     },
   },
