@@ -168,8 +168,11 @@ export class ElmLspClient {
     return Promise.resolve();
   }
 
-  async openDocument(uri, content) {
-    await this.sendNotification("textDocument/didOpen", {
+  // The server takes its messages in the order they arrive, and it has
+  // indexed a document before it looks at the next message. A request can
+  // follow these two notifications at once.
+  openDocument(uri, content) {
+    return this.sendNotification("textDocument/didOpen", {
       textDocument: {
         uri,
         languageId: "elm",
@@ -177,23 +180,19 @@ export class ElmLspClient {
         text: content,
       },
     });
-    // Give time to parse
-    await new Promise((r) => setTimeout(r, 100));
   }
 
-  async notifyFileChanged(uri, content) {
+  notifyFileChanged(uri, content) {
     // Increment version for tracking changes
     this.documentVersions[uri] = (this.documentVersions[uri] || 1) + 1;
 
-    await this.sendNotification("textDocument/didChange", {
+    return this.sendNotification("textDocument/didChange", {
       textDocument: {
         uri,
         version: this.documentVersions[uri],
       },
       contentChanges: [{ text: content }],
     });
-    // Give time to re-index
-    await new Promise((r) => setTimeout(r, 50));
   }
 
   async getSymbols(uri) {
