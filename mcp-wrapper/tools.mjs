@@ -18,7 +18,14 @@ import { z } from "zod";
 import { ToolError } from "./errors.mjs";
 import { ensureClient } from "./lsp-client.mjs";
 import { moveFunction } from "./move-function.mjs";
-import { applyWorkspaceEdit, assertInWorkspace, findWorkspaceRoot, toFileUri, toolPath } from "./workspace.mjs";
+import {
+  applyWorkspaceEdit,
+  assertInWorkspace,
+  findWorkspaceRoot,
+  projectToolsHint,
+  toFileUri,
+  toolPath,
+} from "./workspace.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -316,10 +323,14 @@ export const tools = [
     input: { file_path: elmFile() },
     async run({ file_path }) {
       // The server does not implement formatting. execFile keeps the path out of a shell.
-      const env = { ...process.env, PATH: toolPath(dirname(resolve(file_path))) };
+      const directory = dirname(resolve(file_path));
+      const env = { ...process.env, PATH: toolPath(directory) };
       try {
         await execFileAsync("elm-format", ["--yes", file_path], { env });
       } catch (error) {
+        if (error.code === "ENOENT") {
+          throw new ToolError(`elm-format is not on PATH.${projectToolsHint(directory, ["elm-format"])}`);
+        }
         throw new ToolError(`Error formatting: ${error.message}`);
       }
       return `Successfully formatted ${file_path}`;
@@ -337,12 +348,13 @@ export const tools = [
       "Modules that import the file are not compiled, so ask for the project's entry module to check the whole project.",
     input: { file_path: elmFile() },
     async run({ file_path }) {
-      const { client, uri } = await connect(file_path);
+      const { client, uri, workspaceRoot } = await connect(file_path);
 
       const result = await client.getDiagnostics(uri);
       // Without a verdict from the compiler the answer must not read like a clean build
       if (!result || result.error) {
-        throw new ToolError(result?.error ?? "The language server sent no diagnostics");
+        const hint = result?.noCompiler ? projectToolsHint(workspaceRoot, ["elm", "lamdera"]) : "";
+        throw new ToolError((result?.error ?? "The language server sent no diagnostics") + hint);
       }
 
       const own = result.diagnostics.map((d) => {

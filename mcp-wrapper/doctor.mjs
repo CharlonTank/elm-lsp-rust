@@ -53,7 +53,10 @@ function checkTool(names, neededBy) {
     const path = findOnPath(name);
     if (path) return ["ok", path];
   }
-  return ["warn", `not on PATH. ${neededBy} still works in a project that has it in node_modules/.bin.`];
+  return [
+    "warn",
+    `not on PATH. ${neededBy} needs it there, or in the project's node_modules/.bin when the server runs with --project-tools.`,
+  ];
 }
 
 /**

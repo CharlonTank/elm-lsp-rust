@@ -5,7 +5,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::diagnostics::DiagnosticsProvider;
+use crate::diagnostics::{DiagnosticsProvider, NoVerdict};
 use crate::document::{Document, VariantInfo};
 use crate::parser::ElmParser;
 use crate::workspace::{BranchConfig, Workspace};
@@ -1521,12 +1521,19 @@ impl LanguageServer for ElmLanguageServer {
                 let report = self
                     .diagnostics_provider
                     .read()
-                    .map_err(|_| "The diagnostics provider is unavailable".to_string())
+                    .map_err(|_| {
+                        NoVerdict::Other("The diagnostics provider is unavailable".to_string())
+                    })
                     .and_then(|provider| provider.get_diagnostics(&uri));
                 let report = match report {
                     Ok(report) => report,
                     // No verdict from the compiler. The caller must not take that for a clean build.
-                    Err(error) => return Ok(Some(serde_json::json!({ "error": error }))),
+                    Err(no_verdict) => {
+                        return Ok(Some(serde_json::json!({
+                            "error": no_verdict.to_string(),
+                            "noCompiler": no_verdict == NoVerdict::NoCompiler
+                        })))
+                    }
                 };
 
                 // Convert diagnostics to JSON-serializable format

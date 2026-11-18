@@ -39,21 +39,39 @@ export function allowProjectTools() {
   projectToolsAllowed = true;
 }
 
-/**
- * The PATH for programs that are run on behalf of the project in `dir`.
- * After allowProjectTools(), every node_modules/.bin from `dir` up to the file
- * system root comes first, nearest first. npm scripts find a project's own
- * tools the same way, so the versions a project pins win over global ones.
- */
-export function toolPath(dir) {
-  if (!projectToolsAllowed) return process.env.PATH;
-
+// Every node_modules/.bin from `dir` up to the file system root, nearest first.
+function projectBins(dir) {
   const bins = [];
   for (let current = resolve(dir); ; current = dirname(current)) {
     bins.push(join(current, "node_modules", ".bin"));
     if (dirname(current) === current) break;
   }
-  return [...bins, process.env.PATH].filter(Boolean).join(delimiter);
+  return bins;
+}
+
+/**
+ * The PATH for programs that are run on behalf of the project in `dir`.
+ * After allowProjectTools(), the project's node_modules/.bin directories come
+ * first. npm scripts find a project's own tools the same way, so the versions
+ * a project pins win over global ones.
+ */
+export function toolPath(dir) {
+  if (!projectToolsAllowed) return process.env.PATH;
+  return [...projectBins(dir), process.env.PATH].filter(Boolean).join(delimiter);
+}
+
+/**
+ * What to add to the error when none of `names` was found on PATH: where the
+ * project in `dir` keeps its own copy, and how to allow it. Empty when the
+ * project has none or its tools are allowed already.
+ */
+export function projectToolsHint(dir, names) {
+  if (projectToolsAllowed) return "";
+  for (const bin of projectBins(dir)) {
+    const name = names.find((candidate) => existsSync(join(bin, candidate)));
+    if (name) return ` This project has ${name} in ${bin}. Pass --project-tools to use it.`;
+  }
+  return "";
 }
 
 function isInWorkspace(absPath, workspaceRoot) {

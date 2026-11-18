@@ -88,6 +88,26 @@ pub struct CompileReport {
     pub elsewhere: Vec<ProblemElsewhere>,
 }
 
+/// Why a build has no verdict.
+#[derive(Debug, PartialEq)]
+pub enum NoVerdict {
+    /// Neither elm nor lamdera could be started
+    NoCompiler,
+    /// Anything else, in words for the caller
+    Other(String),
+}
+
+impl std::fmt::Display for NoVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoVerdict::NoCompiler => f.write_str(
+                "Could not run the Elm compiler: neither elm nor lamdera could be started. Is one of them on PATH?",
+            ),
+            NoVerdict::Other(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Whether two paths name the same file. The compiler reports resolved paths,
 /// so a path that goes through a link, as everything under /tmp does on
 /// macOS, has to be resolved as well before the two are compared.
@@ -145,10 +165,10 @@ impl DiagnosticsProvider {
     ///
     /// An `Err` means there is no verdict: no compiler could be started, or
     /// its report could not be read. That must never look like a clean build.
-    pub fn get_diagnostics(&self, file_uri: &Url) -> Result<CompileReport, String> {
+    pub fn get_diagnostics(&self, file_uri: &Url) -> Result<CompileReport, NoVerdict> {
         let file_path = file_uri
             .to_file_path()
-            .map_err(|_| format!("{} is not a file", file_uri))?
+            .map_err(|_| NoVerdict::Other(format!("{} is not a file", file_uri)))?
             .to_string_lossy()
             .to_string();
 
@@ -156,7 +176,7 @@ impl DiagnosticsProvider {
             .workspace_root
             .clone()
             .or_else(|| Self::find_workspace_root(&file_path))
-            .ok_or_else(|| format!("No elm.json found for {}", file_path))?;
+            .ok_or_else(|| NoVerdict::Other(format!("No elm.json found for {}", file_path)))?;
 
         // The first compiler that can be started does the build
         let output = Self::compilers_for(&workspace_root)
@@ -169,10 +189,7 @@ impl DiagnosticsProvider {
                     .ok()
             });
 
-        let output = output.ok_or_else(|| {
-            "Could not run the Elm compiler: neither elm nor lamdera could be started. Is one of them on PATH?"
-                .to_string()
-        })?;
+        let output = output.ok_or(NoVerdict::NoCompiler)?;
 
         // If successful, no errors
         if output.status.success() {
@@ -182,6 +199,7 @@ impl DiagnosticsProvider {
         // elm make outputs JSON to stderr
         let stderr = String::from_utf8_lossy(&output.stderr);
         self.parse_elm_output(&stderr, &file_path, &workspace_root)
+            .map_err(NoVerdict::Other)
     }
 
     /// `root` is the directory the compiler ran in. Its relative paths start there.

@@ -238,6 +238,26 @@ test("elm_diagnostics fails when it has no verdict from a compiler", async (t) =
   });
 });
 
+test("a tool that is missing from PATH points at the project's own copy and --project-tools", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Main.elm");
+  const bin = join(project, "node_modules", ".bin");
+  installLocalTool(project, "elm", "exit 0");
+  installLocalTool(project, "elm-format", "exit 0");
+  const client = await connect(t, { cwd: project, env: { PATH: "/usr/bin:/bin" } });
+
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: file }), {
+    text:
+      "Could not run the Elm compiler: neither elm nor lamdera could be started. Is one of them on PATH?" +
+      ` This project has elm in ${bin}. Pass --project-tools to use it.`,
+    isError: true,
+  });
+  assert.deepEqual(await callTool(client, "elm_format", { file_path: file }), {
+    text: `elm-format is not on PATH. This project has elm-format in ${bin}. Pass --project-tools to use it.`,
+    isError: true,
+  });
+});
+
 test("elm_diagnostics knows its file under the path the compiler resolved", async (t) => {
   const project = copyFixture(t);
   const link = join(tempDir(t), "link");
