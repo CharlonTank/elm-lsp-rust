@@ -5,23 +5,12 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { copyFixture, installLocalTool, installTool, REPO, runNode, tempDir } from "./support.mjs";
+import { copyFixture, installLocalTool, installTool, REPO, runNode, tempDir, wrapperCopy } from "./support.mjs";
 
 const CLI = join(REPO, "mcp-wrapper/cli.mjs");
 const cli = (args, options) => runNode(CLI, args, options);
-
-// A copy of the wrapper in a directory where the language server was never built.
-function unbuiltCopy(t) {
-  const root = tempDir(t);
-  cpSync(join(REPO, "mcp-wrapper"), join(root, "mcp-wrapper"), {
-    recursive: true,
-    filter: (source) => !source.endsWith("node_modules"),
-  });
-  symlinkSync(join(REPO, "mcp-wrapper/node_modules"), join(root, "mcp-wrapper/node_modules"));
-  return { cli: join(root, "mcp-wrapper/cli.mjs"), binary: join(root, "target/release/elm_lsp") };
-}
 
 test("tools lists every tool, and --json describes their arguments", async () => {
   const listing = await cli(["tools"]);
@@ -192,7 +181,7 @@ test("doctor passes on a built checkout", async (t) => {
 });
 
 test("doctor fails when the language server is not built", async (t) => {
-  const { cli } = unbuiltCopy(t);
+  const { cli } = wrapperCopy(t);
 
   const { code, stdout } = await runNode(cli, ["doctor"]);
   assert.equal(code, 1);
@@ -200,7 +189,7 @@ test("doctor fails when the language server is not built", async (t) => {
 });
 
 test("a tool says in one line why the language server did not start", async (t) => {
-  const { cli, binary } = unbuiltCopy(t);
+  const { cli, binary } = wrapperCopy(t);
   const file = join(copyFixture(t), "src/Types.elm");
 
   const missing = await runNode(cli, ["symbols", "--file_path", file]);

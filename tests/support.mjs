@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { execFile, spawn } from "child_process";
 import { once } from "events";
 import { createServer } from "net";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -37,11 +37,63 @@ export function copyFixture(t, name = "fixture") {
   return dir;
 }
 
+/**
+ * A copy of the wrapper in a directory of its own, where no language server
+ * was built. A test puts a stand-in at `binary`.
+ */
+export function wrapperCopy(t) {
+  const root = tempDir(t);
+  cpSync(join(REPO, "mcp-wrapper"), join(root, "mcp-wrapper"), {
+    recursive: true,
+    filter: (source) => !source.endsWith("node_modules"),
+  });
+  symlinkSync(join(REPO, "mcp-wrapper/node_modules"), join(root, "mcp-wrapper/node_modules"));
+  return {
+    cli: join(root, "mcp-wrapper/cli.mjs"),
+    server: join(root, "mcp-wrapper/index.mjs"),
+    binary: join(root, "target/release/elm_lsp"),
+  };
+}
+
+/**
+ * Put a language server stand-in at `binary`. It writes its process id to
+ * `binary`.pid, answers each request with what `answer` returns for it and
+ * stays alive after its input has closed. `answer` is the source of a
+ * function from the request to its result.
+ */
+export function installLanguageServerStandIn(binary, answer = "() => null") {
+  mkdirSync(dirname(binary), { recursive: true });
+  writeFileSync(
+    binary,
+    `#!${process.execPath}
+const answer = ${answer};
+require("fs").writeFileSync(__filename + ".pid", String(process.pid));
+let buffer = Buffer.alloc(0);
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  for (;;) {
+    const bodyAt = buffer.indexOf("\\r\\n\\r\\n") + 4;
+    const length = Number(/Content-Length: (\\d+)/.exec(buffer.toString("latin1"))?.[1]);
+    if (bodyAt < 4 || buffer.length < bodyAt + length) return;
+    const message = JSON.parse(buffer.subarray(bodyAt, bodyAt + length));
+    buffer = buffer.subarray(bodyAt + length);
+    if (message.id !== undefined) {
+      const body = JSON.stringify({ jsonrpc: "2.0", id: message.id, result: answer(message) });
+      process.stdout.write("Content-Length: " + Buffer.byteLength(body) + "\\r\\n\\r\\n" + body);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`
+  );
+  chmodSync(binary, 0o755);
+}
+
 // Start the MCP server over stdio and connect a client to it.
-export async function connect(t, { args = [], cwd, env } = {}) {
+export async function connect(t, { args = [], cwd, env, server = SERVER } = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [SERVER, ...args],
+    args: [server, ...args],
     cwd,
     env,
     stderr: "ignore",

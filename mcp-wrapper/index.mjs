@@ -285,8 +285,12 @@ function shutDown() {
   process.exit(0);
 }
 
-// How long the server goes on working after its input has closed
+// How long the server goes on working after it was told to end
 const ANSWER_GRACE_MS = 60_000;
+
+// Resolves once the calls that are running have finished, or have had their time. A
+// refactoring among them has files left to write, and a file move its file left to move.
+const callsOver = () => Promise.race([callsDone(), new Promise((resolve) => setTimeout(resolve, ANSWER_GRACE_MS))]);
 
 // Start the server
 async function main() {
@@ -322,8 +326,15 @@ async function main() {
   if (flags.has("--project-tools")) {
     allowProjectTools();
   }
-  process.on("SIGTERM", shutDown);
-  process.on("SIGINT", shutDown);
+  // Asked to end, the server lets the calls that are running finish. Asked again, it ends at once.
+  let leaving = false;
+  for (const signal of ["SIGTERM", "SIGINT"]) {
+    process.on(signal, () => {
+      if (leaving) shutDown();
+      leaving = true;
+      callsOver().then(shutDown);
+    });
+  }
 
   if (http) {
     await startHttpServer({ host, port, serverOptions });
@@ -332,12 +343,14 @@ async function main() {
 
   const server = createMcpServer(serverOptions);
   await server.connect(new StdioServerTransport());
+  // A harness that is gone reads no answers. Writing one fails, and nobody is left to serve.
+  process.stdout.on("error", () => callsOver().then(shutDown));
   // A harness ends a stdio server by closing its input. It may still be
-  // reading the answer to its last call, and a refactoring under way has files
-  // left to write, so the calls that are running finish first. A call the
-  // client cancelled runs on as well: it gets no answer, and it still writes.
+  // reading the answer to its last call, so the calls that are running finish
+  // first. A call the client cancelled runs on as well: it gets no answer, and
+  // it still writes.
   process.stdin.on("end", async () => {
-    await Promise.race([callsDone(), new Promise((resolve) => setTimeout(resolve, ANSWER_GRACE_MS))]);
+    await callsOver();
     // The answers are sent in the turns after their calls settle. The callback
     // of the write runs once everything before it has left this process.
     setImmediate(() => process.stdout.write("", shutDown));

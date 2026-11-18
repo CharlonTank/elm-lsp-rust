@@ -34,6 +34,8 @@ export class ElmLspClient {
     this.pendingRequests = new Map(); // id -> { resolve, reject, timer }
     this.buffer = Buffer.alloc(0);
     this.documentVersions = {};
+    // Settles once the handshake is over. Set by start().
+    this.started = null;
     this.idleTimer = null;
     // Called when the server is told to stop, and once its process is gone, however it ended
     this.onExit = () => {};
@@ -41,7 +43,7 @@ export class ElmLspClient {
 
   // Spawn the server and complete the LSP handshake.
   start() {
-    return new Promise((resolve, reject) => {
+    this.started = new Promise((resolve, reject) => {
       if (!existsSync(RUST_LSP_PATH)) {
         reject(new ToolError(`Rust LSP binary not found at ${RUST_LSP_PATH}. Run scripts/setup.sh to build it.`));
         return;
@@ -92,6 +94,7 @@ export class ElmLspClient {
       this.stop();
       throw error;
     });
+    return this.started;
   }
 
   // Take a chunk of the server's output and settle every request whose
@@ -286,44 +289,40 @@ export class ElmLspClient {
   }
 }
 
-// One running language server per Elm project, started on first use and
-// stopped once it has been idle for IDLE_TIMEOUT_MS.
-// The promise settles once the server has answered the handshake.
-const clients = new Map(); // workspace root -> Promise<ElmLspClient>
+// One language server per Elm project, started on first use and stopped once
+// it has been idle for IDLE_TIMEOUT_MS.
+const clients = new Map(); // workspace root -> ElmLspClient
 
 /**
  * The language server for a project, with its index in step with the
  * project's files as they are on disk right now.
  */
 export async function ensureClient(workspaceRoot) {
-  let starting = clients.get(workspaceRoot);
-  if (!starting) {
-    const client = new ElmLspClient(workspaceRoot);
-    starting = client.start().then(() => client);
+  let client = clients.get(workspaceRoot);
+  if (!client) {
+    client = new ElmLspClient(workspaceRoot);
+    clients.set(workspaceRoot, client);
     // Drop a server that failed to start, is stopping or has exited, so the next call starts a new one
     const forget = () => {
-      if (clients.get(workspaceRoot) === starting) {
+      if (clients.get(workspaceRoot) === client) {
         clients.delete(workspaceRoot);
       }
     };
     client.onExit = forget;
-    starting.catch(forget);
-    clients.set(workspaceRoot, starting);
+    client.start().catch(forget);
   }
 
-  const client = await starting;
+  await client.started;
   client.keepAlive();
   await client.syncWithDisk();
   return client;
 }
 
-// Stop every language server, so a short-lived process can exit.
+// Stop every language server, so the process can exit. Each one has its
+// signal by the time this returns, including one that is still starting.
 export function stopClients() {
-  for (const starting of clients.values()) {
-    starting.then(
-      (client) => client.stop(),
-      () => {}
-    );
+  for (const client of clients.values()) {
+    client.stop();
   }
   clients.clear();
 }

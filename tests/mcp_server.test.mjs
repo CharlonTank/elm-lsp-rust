@@ -20,17 +20,20 @@ import {
 } from "fs";
 import { dirname, join } from "path";
 import { once } from "node:events";
+import { setTimeout as sleep } from "node:timers/promises";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import {
   callTool,
   connect,
   connectOverHttp,
   copyFixture,
+  installLanguageServerStandIn,
   installLocalTool,
   installTool,
   runNode,
   SERVER,
   tempDir,
+  wrapperCopy,
 } from "./support.mjs";
 
 // Root reads and writes every file, whatever its permissions say
@@ -465,18 +468,50 @@ test("a call the client cancelled does not keep the server once its input has cl
   assert.ok(Date.now() - started < 20000, `the server stayed for ${Date.now() - started} ms`);
 });
 
-test("the server ends when the harness closes its input, language servers included", async (t) => {
-  const project = copyFixture(t);
-  const client = await connect(t, { cwd: project });
-  // Starts a language server, whose process would otherwise keep the server alive
-  await callTool(client, "elm_symbols", { file_path: join(project, "src/Types.elm") });
-  const server = client.transport._process;
+const isRunning = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
-  const closed = once(server, "close");
-  server.stdin.end();
-  const [code, signal] = await closed;
-  assert.deepEqual({ code, signal }, { code: 0, signal: null });
-});
+// A harness that is gone without a word: its end of the output is closed, and a request is still on its way
+function stopReading(server) {
+  server.stdout.destroy();
+  server.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 99, method: "tools/list" }) + "\n");
+}
+
+for (const [how, end] of [
+  ["closes its input", (server) => server.stdin.end()],
+  ["sends SIGTERM", (server) => server.kill("SIGTERM")],
+  ["stops reading the answers", stopReading],
+]) {
+  test(`a language server is stopped when the harness ${how}, even one that would stay`, async (t) => {
+    // A stand-in that stays alive after its input has closed, which the real one does not
+    const { server, binary } = wrapperCopy(t);
+    installLanguageServerStandIn(binary);
+    const project = copyFixture(t);
+    const client = await connect(t, { server, cwd: project });
+    await callTool(client, "elm_symbols", { file_path: join(project, "src/Types.elm") });
+    const languageServer = Number(readFileSync(`${binary}.pid`, "utf-8"));
+    t.after(() => isRunning(languageServer) && process.kill(languageServer, "SIGKILL"));
+    assert.ok(isRunning(languageServer));
+
+    const wrapper = client.transport._process;
+    const closed = once(wrapper, "close");
+    end(wrapper);
+    const [code, signal] = await closed;
+    assert.deepEqual({ code, signal }, { code: 0, signal: null });
+
+    // The signal is on its way when the wrapper exits. Give it a moment to land.
+    for (let waited = 0; isRunning(languageServer) && waited < 2000; waited += 20) {
+      await sleep(20);
+    }
+    assert.equal(isRunning(languageServer), false, "the language server outlived the wrapper");
+  });
+}
 
 test("the HTTP server offers the same tools and honours --read-only", async (t) => {
   const project = copyFixture(t);
