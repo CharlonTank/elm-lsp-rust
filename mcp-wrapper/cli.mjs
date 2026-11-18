@@ -64,11 +64,11 @@ function findTool(name) {
 function readValue(name, kind, raw) {
   if (kind === "string") return raw;
   if (kind === "number") {
-    const number = Number(raw);
-    if (raw.trim() === "" || Number.isNaN(number)) {
-      throw new UsageError(`--${name} takes a number, got "${raw}"`);
+    // Every numeric argument is a line, a column or a count
+    if (!/^\d+$/.test(raw)) {
+      throw new UsageError(`--${name} takes a whole number, got "${raw}"`);
     }
-    return number;
+    return Number(raw);
   }
   try {
     return JSON.parse(raw);

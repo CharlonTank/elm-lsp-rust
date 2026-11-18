@@ -151,7 +151,12 @@ test("a wrong command line exits 2 and says what is wrong", async () => {
     [["symbols", "--wat", "1"], /elm_symbols has no argument --wat\. It takes: file_path, offset, limit/],
     [["symbols", "src/Main.elm"], /Expected --<argument>, got "src\/Main\.elm"/],
     [["symbols", "--file_path"], /--file_path needs a value/],
-    [["definition", "--file_path", "a.elm", "--line", "x", "--character", "0"], /--line takes a number, got "x"/],
+    [["definition", "--file_path", "a.elm", "--line", "x", "--character", "0"], /--line takes a whole number, got "x"/],
+    // Number() would read these three as 16, 100 and 2.5
+    [["definition", "--file_path", "a.elm", "--line", "0x10", "--character", "0"], /--line takes a whole number, got "0x10"/],
+    [["definition", "--file_path", "a.elm", "--line", "1e2", "--character", "0"], /--line takes a whole number, got "1e2"/],
+    [["definition", "--file_path", "a.elm", "--line", "1", "--character", "2.5"], /--character takes a whole number, got "2\.5"/],
+    [["definition", "--args", '{"file_path":"a.elm","line":-1,"character":2.5}'], /Invalid arguments for elm_definition:\n  line: .*\n  character: Expected integer, received float/],
     [["definition", "--file_path", "a.elm"], /Invalid arguments for elm_definition:\n  line: Required\n  character: Required/],
     [["symbols", "--args", "[1]"], /--args takes a JSON object/],
     [["add_variant", "--branches", "{oops"], /--branches takes JSON/],

@@ -43,22 +43,25 @@ const elmFile = (description = "Path to the Elm file") => z.string().describe(de
 // How many errors in other files elm_diagnostics lists before it only counts them
 const MAX_ERRORS_ELSEWHERE = 20;
 
+// A line, a column or a count. The server reads these as unsigned integers.
+const wholeNumber = (description) => z.number().int().min(0).describe(description);
+
 // The `line` and `character` fields that point at a symbol.
 function position(subject) {
   return {
-    line: z.number().describe(subject ? `Line number of the ${subject} (0-indexed)` : "Line number (0-indexed)"),
-    character: z
-      .number()
-      .describe(subject ? `Character position within the ${subject} (0-indexed)` : "Character position (0-indexed)"),
+    line: wholeNumber(subject ? `Line number of the ${subject} (0-indexed)` : "Line number (0-indexed)"),
+    character: wholeNumber(
+      subject ? `Character position within the ${subject} (0-indexed)` : "Character position (0-indexed)"
+    ),
   };
 }
 
 // The `start_*` and `end_*` fields that select a range.
 const rangeFields = {
-  start_line: z.number().describe("Start line (0-indexed)"),
-  start_char: z.number().describe("Start character (0-indexed)"),
-  end_line: z.number().describe("End line (0-indexed)"),
-  end_char: z.number().describe("End character (0-indexed)"),
+  start_line: wholeNumber("Start line (0-indexed)"),
+  start_char: wholeNumber("Start character (0-indexed)"),
+  end_line: wholeNumber("End line (0-indexed)"),
+  end_char: wholeNumber("End character (0-indexed)"),
 };
 
 // The path in the message shows the caller how a relative path was resolved.
@@ -276,8 +279,8 @@ export const tools = [
     description: "Get all symbols in an Elm file with optional pagination",
     input: {
       file_path: elmFile(),
-      offset: z.number().optional().describe("Number of symbols to skip (default: 0)"),
-      limit: z.number().optional().describe("Maximum number of symbols to return (default: 50)"),
+      offset: wholeNumber("Number of symbols to skip (default: 0)").optional(),
+      limit: wholeNumber("Maximum number of symbols to return (default: 50)").optional(),
     },
     async run({ file_path, offset = 0, limit = 50 }) {
       const { client, uri } = await openElmFile(file_path);
@@ -450,8 +453,8 @@ export const tools = [
     description: "Rename a record field across the entire project (type-aware). Fails if position is not on a field.",
     input: {
       file_path: elmFile(),
-      line: z.number().describe("Line number of the field (0-indexed)"),
-      character: z.number().describe("Character position within the field name (0-indexed)"),
+      line: wholeNumber("Line number of the field (0-indexed)"),
+      character: wholeNumber("Character position within the field name (0-indexed)"),
       old_name: z.string().describe("Expected current field name (must match what's at the position)"),
       newName: z.string().describe("The new name for the field"),
     },
@@ -483,8 +486,8 @@ export const tools = [
     description: "Move a function from one module to another, updating all imports and references",
     input: {
       file_path: elmFile("Path to the source file containing the function"),
-      line: z.number().describe("Line number of the function name (0-indexed)"),
-      character: z.number().describe("Character position of the function name (0-indexed)"),
+      line: wholeNumber("Line number of the function name (0-indexed)"),
+      character: wholeNumber("Character position of the function name (0-indexed)"),
       function_name: z.string().describe("Expected function name (must match what's at the position)"),
       target_module: z.string().describe('Path to the target module file (e.g., "src/Utils/Helpers.elm")'),
     },
