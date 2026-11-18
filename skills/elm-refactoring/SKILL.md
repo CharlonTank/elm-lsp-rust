@@ -263,6 +263,7 @@ type_name: "BackendModel"
 - **Line/character positions are 0-indexed** in arguments. Locations in results have 1-indexed lines.
 - **Pass absolute file paths.** A relative path resolves against the directory the server was started in. The one exception is `target_path` of `elm_move_file`, which starts at the project root.
 - **One refactoring at a time per project.** The server runs the calls for a project in the order they arrive, so two renames sent together are safe. A second server on the same project is not.
+- **A test file is not in the index until a tool is called on it.** A rename then reaches it. Call `elm_symbols` on the test files that use a symbol before you rename the symbol. This works with the MCP server, which keeps its language server between calls. From the command line every call starts a new one, so a rename there never reaches a file outside the source directories: update the tests yourself.
 - **Refactoring tools write to disk.** Read a file again before editing it further.
 - **Always verify compilation** after refactoring, with `elm_diagnostics` on the project's entry module or with the project's build command
 - **Lines with non-ASCII text before the symbol.** Columns are counted in bytes there, so a column in a result is larger than the count of characters. Pass it to a tool as the result gave it. Edits land where they belong. `elm_diagnostics` prints the compiler's own line and column, which count from 1 and by characters.

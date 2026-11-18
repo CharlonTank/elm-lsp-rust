@@ -113,6 +113,8 @@ When the harness closes the server's input, the server answers the requests it h
 ### Known limitations
 
 - **Columns on lines with non-ASCII text.** The language server counts columns in bytes. On a line with a non-ASCII character before the symbol, a column in a result is larger than the count of characters by the extra bytes: in `"café " ++ formatName name`, `formatName` is at column 12 and not at 11. Pass a column to a tool as a result gave it. Edits land where they belong, on such a line as on any other. `elm_diagnostics` is the exception: it prints the line and the column of the compiler's own report, which count from 1 and by characters.
+- **Linked directories.** A directory below a source directory that is a link to another directory is not followed, though the compiler follows it. The modules behind it are not in the index, and a rename passes them over. A link to a single file is followed.
+- **Source directories outside the project root.** A refactoring that starts inside the project changes the files in a directory such as `../shared` too. A call cannot name a file there itself, because the project is found from the path of the file a call names, and that path leads to no `elm.json`. Two projects that share such a directory are not kept from refactoring it at the same time.
 - **Windows.** File paths and the setup script assume a POSIX system.
 
 ## Features
