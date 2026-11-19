@@ -262,6 +262,19 @@ impl Workspace {
 
             let content = std::fs::read_to_string(&module.path)?;
 
+            // "Utils.greet" means the renamed module only in a file that imports it
+            // under its own name. With "import Utils as U" the file says "U.greet",
+            // and in a file without the import "Utils" is the alias of another module.
+            let imports_it_by_name = content.lines().any(|line| {
+                line.trim()
+                    .strip_prefix(&import_pattern)
+                    .is_some_and(|rest| {
+                        // "import UtilsTest" is the import of another module
+                        (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                            && !rest.trim_start().starts_with("as ")
+                    })
+            });
+
             // Find all import statements for the old module
             for (line_num, line) in content.lines().enumerate() {
                 let trimmed = line.trim();
@@ -297,7 +310,8 @@ impl Workspace {
                 // Also check for qualified references like "OldModule.function"
                 // This handles cases where the module is used with qualification
                 let qualified_pattern = format!("{}.", old_module);
-                if trimmed.contains(&qualified_pattern)
+                if imports_it_by_name
+                    && trimmed.contains(&qualified_pattern)
                     && !trimmed.starts_with("import ")
                     && after_the_word_module(line).is_none()
                 {

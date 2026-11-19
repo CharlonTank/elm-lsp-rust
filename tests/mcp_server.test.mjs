@@ -993,6 +993,22 @@ for (const [fate, settle] of [
   });
 }
 
+test("a renamed module leaves alone a file that calls another module by its name", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // Card.elm does not import Utils. It gives that name to Types. Label.elm imports Utils as U.
+  const card = 'module Card exposing (owner)\n\nimport Types as Utils\n\n\nowner : Utils.User\nowner =\n    Utils.defaultUser\n';
+  writeFileSync(at("Card.elm"), card);
+  writeFileSync(at("Label.elm"), 'module Label exposing (label)\n\nimport Utils as U\n\n\nlabel : String\nlabel =\n    U.helper "x"\n');
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_file", { file_path: at("Utils.elm"), new_name: "Helpers.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.equal(readFileSync(at("Card.elm"), "utf-8"), card);
+  assert.match(readFileSync(at("Label.elm"), "utf-8"), /^import Helpers as U\n\n\nlabel : String\nlabel =\n    U\.helper "x"$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
+});
+
 test("a port module is renamed and moved like any other module", async (t) => {
   const project = copyFixture(t);
   const at = (name) => join(project, "src", name);
