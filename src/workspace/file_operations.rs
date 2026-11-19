@@ -299,7 +299,7 @@ impl Workspace {
                 let qualified_pattern = format!("{}.", old_module);
                 if trimmed.contains(&qualified_pattern)
                     && !trimmed.starts_with("import ")
-                    && !trimmed.starts_with("module ")
+                    && after_the_word_module(line).is_none()
                 {
                     // Find all occurrences in the line
                     let mut search_start = 0;
@@ -349,11 +349,19 @@ impl Workspace {
     }
 }
 
+/// What stands behind the word "module" on a module line, for a module and
+/// for a port module. `None` for any other line.
+fn after_the_word_module(line: &str) -> Option<&str> {
+    let line = line.trim();
+    line.strip_prefix("port ")
+        .map_or(line, str::trim_start)
+        .strip_prefix("module ")
+}
+
 /// Extract module name from file content using simple string parsing
 pub(crate) fn extract_module_name_from_content(content: &str) -> Option<String> {
     for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(after_module) = trimmed.strip_prefix("module ") {
+        if let Some(after_module) = after_the_word_module(line) {
             // Find "exposing" to extract the module name
             if let Some(exposing_pos) = after_module.find(" exposing") {
                 let module_name = after_module[..exposing_pos].trim();
@@ -370,8 +378,7 @@ pub(crate) fn extract_module_name_from_content(content: &str) -> Option<String> 
 /// Find the range of the module declaration (just "module ModuleName exposing" part)
 pub(crate) fn find_module_declaration_range(content: &str) -> Option<Range> {
     for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if let Some(after_module) = trimmed.strip_prefix("module ") {
+        if let Some(after_module) = after_the_word_module(line) {
             if let Some(exposing_pos) = after_module.find(" exposing") {
                 let module_name = after_module[..exposing_pos].trim();
                 // Validate it's a proper module name

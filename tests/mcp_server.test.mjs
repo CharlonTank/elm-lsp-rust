@@ -993,6 +993,29 @@ for (const [fate, settle] of [
   });
 }
 
+test("a port module is renamed and moved like any other module", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // Ports has a port module below it. Main.elm imports both.
+  mkdirSync(at("Ports"));
+  writeFileSync(at("Ports.elm"), "port module Ports exposing (send)\n\n\nport send : String -> Cmd msg\n");
+  writeFileSync(at("Ports/Log.elm"), "port module Ports.Log exposing (log)\n\n\nport log : String -> Cmd msg\n");
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", "import Browser\nimport Ports\nimport Ports.Log\n"));
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_file", { file_path: at("Ports.elm"), new_name: "Outbox.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(at("Outbox.elm"), "utf-8"), /^port module Outbox exposing \(send\)$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Outbox\nimport Ports\.Log$/m);
+  // The module line of the port module below is no use of the renamed module
+  assert.match(readFileSync(at("Ports/Log.elm"), "utf-8"), /^port module Ports\.Log exposing \(log\)$/m);
+
+  const moved = await callTool(client, "elm_move_file", { file_path: at("Outbox.elm"), target_path: at("Js/Outbox.elm") });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(readFileSync(at("Js/Outbox.elm"), "utf-8"), /^port module Js\.Outbox exposing \(send\)$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Js\.Outbox\nimport Ports\.Log$/m);
+});
+
 test("a renamed module leaves the modules below it their names", async (t) => {
   const project = copyFixture(t);
   const main = join(project, "src/Main.elm");

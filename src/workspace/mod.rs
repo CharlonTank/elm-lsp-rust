@@ -4076,6 +4076,12 @@ mod tests {
             file_operations::extract_module_name_from_content(content3),
             None
         );
+
+        let ports = "port module Ports exposing (send)\n\n\nport send : String -> Cmd msg\n";
+        assert_eq!(
+            file_operations::extract_module_name_from_content(ports),
+            Some("Ports".to_string())
+        );
     }
 
     #[test]
@@ -4251,6 +4257,11 @@ value = help
         let range = range.unwrap();
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.character, 0);
+
+        // Of a port module, the range begins at the word "module" and ends behind "exposing"
+        let ports = "port module Ports exposing (send)\n";
+        let range = file_operations::find_module_declaration_range(ports).unwrap();
+        assert_eq!((range.start.character, range.end.character), (5, 26));
     }
 
     #[test]
