@@ -27,6 +27,7 @@ const CMD_REMOVE_FIELD: &str = "elm.removeField";
 const CMD_PREPARE_ADD_VARIANT: &str = "elm.prepareAddVariant";
 const CMD_ADD_VARIANT: &str = "elm.addVariant";
 const CMD_SYNC_WITH_DISK: &str = "elm.syncWithDisk";
+const CMD_UNREAD_RANGES: &str = "elm.unreadRanges";
 
 pub struct ElmLanguageServer {
     client: Client,
@@ -730,6 +731,7 @@ impl LanguageServer for ElmLanguageServer {
                         CMD_PREPARE_ADD_VARIANT.to_string(),
                         CMD_ADD_VARIANT.to_string(),
                         CMD_SYNC_WITH_DISK.to_string(),
+                        CMD_UNREAD_RANGES.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -2840,6 +2842,32 @@ impl LanguageServer for ElmLanguageServer {
                         "message": e.to_string()
                     }))),
                 }
+            }
+            CMD_UNREAD_RANGES => {
+                // Expected arguments: [file_uri], of an open file. The reply has
+                // "ranges", the stretches of it that the parser could not read.
+                let file_uri: String = params
+                    .arguments
+                    .first()
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?
+                    .unwrap_or_default();
+                let uri = Url::parse(&file_uri).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
+
+                let tree = self
+                    .documents
+                    .get(&uri)
+                    .and_then(|doc| self.parser.parse(&doc.text));
+                Ok(Some(match tree {
+                    Some(tree) => {
+                        serde_json::json!({ "ranges": self.parser.unread_ranges(&tree) })
+                    }
+                    None => serde_json::json!({ "error": format!("{} is not open", uri) }),
+                }))
             }
             _ => Ok(Some(serde_json::json!({
                 "error": format!("Unknown command: {}", params.command)

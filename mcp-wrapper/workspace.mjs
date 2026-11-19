@@ -235,7 +235,7 @@ export function writeEdited(files) {
 // The place in a line that the language server means by a column. It counts a column in bytes
 // of UTF-8, and a string is indexed in UTF-16 code units. The two part ways behind the first
 // character outside ASCII on a line: in `"café " ++ name`, `name` is at column 12 and index 11.
-function indexOfColumn(line, column) {
+export function indexOfColumn(line, column) {
   let bytes = 0;
   let index = 0;
   for (const character of line) {

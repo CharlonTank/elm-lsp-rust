@@ -16,6 +16,9 @@ const __dirname = dirname(__filename);
 // Path to the Rust LSP binary
 export const RUST_LSP_PATH = join(__dirname, "..", "target", "release", "elm_lsp");
 
+// What a call says when the binary lacks a command that this wrapper sends
+const OLDER_BINARY = `${RUST_LSP_PATH} is older than this wrapper. Run scripts/setup.sh to rebuild it.`;
+
 const REQUEST_TIMEOUT_MS = 30000;
 
 // A language server that no call has used for this long is stopped. The next call starts it again.
@@ -269,11 +272,21 @@ export class ElmLspClient {
     if (result?.synced === true) return;
     // The server says why it has no index, for instance an elm.json it cannot
     // read. A server built before this command existed answers something else.
-    throw new ToolError(
-      result?.synced === false
-        ? result.error
-        : `${RUST_LSP_PATH} is older than this wrapper. Run scripts/setup.sh to rebuild it.`
-    );
+    throw new ToolError(result?.synced === false ? result.error : OLDER_BINARY);
+  }
+
+  /**
+   * The stretches of an open file that the server's parser could not read, each
+   * with a start and an end like the range of a symbol. Around one of them the
+   * symbols of the file can lack a declaration, or begin and end one in the
+   * wrong place.
+   */
+  async getUnreadRanges(uri) {
+    const result = await this.executeCommand("elm.unreadRanges", [uri]);
+    if (Array.isArray(result?.ranges)) return result.ranges;
+    // A server built before this command existed answers that it does not know it
+    const unknown = !result?.error || result.error.startsWith("Unknown command");
+    throw new ToolError(unknown ? OLDER_BINARY : result.error);
   }
 
   // Start the idle countdown again. Called for every use of the client.

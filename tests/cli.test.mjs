@@ -199,15 +199,21 @@ test("doctor fails when the language server is not built", async (t) => {
 
 test("doctor fails when the language server is older than the wrapper", async (t) => {
   const { cli, binary } = wrapperCopy(t);
-  // Answers the handshake and does not know the command every tool call begins with
-  installLanguageServerStandIn(
-    binary,
-    `(message) => (message.method === "workspace/executeCommand" ? { success: false, error: "Unknown command" } : null)`
-  );
-
-  const { code, stdout } = await runNode(cli, ["doctor"]);
-  assert.equal(code, 1);
-  assert.match(stdout, /^fail\s+language server\s+.*elm_lsp is older than this wrapper\. Run scripts\/setup\.sh to rebuild it\.$/m);
+  // Each answers the handshake. The first does not know the command every tool call begins with,
+  // and the second knows that one and not the one a move asks with.
+  const servers = [
+    `(message) => (message.method === "workspace/executeCommand" ? { success: false, error: "Unknown command" } : null)`,
+    `(message) => {
+      if (message.method !== "workspace/executeCommand") return null;
+      return message.params.command === "elm.syncWithDisk" ? { synced: true } : { error: "Unknown command: " + message.params.command };
+    }`,
+  ];
+  for (const server of servers) {
+    installLanguageServerStandIn(binary, server);
+    const { code, stdout } = await runNode(cli, ["doctor"]);
+    assert.equal(code, 1);
+    assert.match(stdout, /^fail\s+language server\s+.*elm_lsp is older than this wrapper\. Run scripts\/setup\.sh to rebuild it\.$/m);
+  }
 });
 
 test("a tool says in one line why the language server did not start", async (t) => {
@@ -245,4 +251,24 @@ test("a tool says in one line why the language server did not start", async (t) 
     stdout: "",
     stderr: `${binary} is older than this wrapper. Run scripts/setup.sh to rebuild it.\n`,
   });
+
+  // And one from before the command that a move asks with, once it has found its function. What else a
+  // server has to say about that command is passed on as it is.
+  const complaints = [
+    ["Unknown command: elm.unreadRanges", `${binary} is older than this wrapper. Run scripts/setup.sh to rebuild it.`],
+    ["The file is not open", "The file is not open"],
+  ];
+  for (const [complaint, said] of complaints) {
+    installLanguageServerStandIn(
+      binary,
+      `(message) => {
+        const found = { name: "formatName", kind: 12, location: { range: { start: { line: 5, character: 0 }, end: { line: 7, character: 0 } } } };
+        if (message.method === "textDocument/documentSymbol") return [found];
+        if (message.method !== "workspace/executeCommand") return null;
+        return message.params.command === "elm.syncWithDisk" ? { synced: true } : { error: ${JSON.stringify(complaint)} };
+      }`
+    );
+    const move = ["move_function", "--file_path", join(file, "../Utils.elm"), "--line", "6", "--function_name", "formatName", "--target_module", file];
+    assert.deepEqual(await runNode(cli, move), { code: 1, stdout: "", stderr: `${said}\n` });
+  }
 });

@@ -10,7 +10,7 @@
 import { join } from "path";
 import { existsSync, readdirSync, statSync } from "fs";
 import { ToolError } from "./errors.mjs";
-import { projectDirectories, readForEdit, toFileUri, writeEdited } from "./workspace.mjs";
+import { indexOfColumn, projectDirectories, readForEdit, toFileUri, writeEdited } from "./workspace.mjs";
 
 // A module declaration up to the parenthesis that opens its exposing list, for a module and for
 // a port module. A part of the name holds letters of any script, digits and underscores.
@@ -172,43 +172,33 @@ function withoutItem(content, list, index) {
   return commaBehind ? above + inFront + content.slice(next.start).replace(/^[ \t]+/, "") : above + inFront + content.slice(item.nameEnd);
 }
 
-// First and last line of the function, including its type signature.
-function functionBounds(lines, functionName, funcLine) {
-  let start = funcLine;
-  let end = funcLine;
+// The line on which the doc comment of the declaration at line `first` opens, or `first` where
+// it has none. The doc comment of a declaration is the last one above it, with nothing but blank
+// lines and other comments in between. `before` is where the declaration before it ends, which
+// the language server gives. Without one this is the first declaration of its file, whose doc
+// comment has to be told from the module's.
+function withDocComment(lines, first, before) {
+  if (before) return docCommentsIn(lines, before.line + 1, first, depthBehindToken(lines, before)).at(-1)?.open ?? first;
+  const head = headOf(lines);
+  return head.to === first ? (head.firstDoc?.open ?? first) : first;
+}
 
-  // Look backwards for the type signature
-  for (let i = funcLine - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line === "") break;
-    if (line.startsWith(`${functionName} :`)) {
-      start = i;
-      break;
-    }
-    if (line.includes(" =") && !line.startsWith(`${functionName} `)) break;
+// The last line of a function with the comments that close its body. The language server ends a
+// function at its last token, a line and a column that it counts in bytes. Nothing but a comment
+// can stand behind that in a file that compiles. A branch that is commented out below, or a
+// note, is indented like the body and belongs to it. A block comment is taken whole, whatever
+// column its later lines start in, and it can open behind the last token on that token's line.
+// A comment that opens in the first column belongs to what follows.
+function withClosingComments(lines, last) {
+  let end = last.line;
+  let depth = depthBehindToken(lines, last);
+  for (let at = last.line + 1; at < lines.length; at++) {
+    if (depth === 0 && lines[at].trim() === "") continue;
+    if (depth === 0 && /^\S/.test(lines[at])) break;
+    depth = depthBehind(lines[at], depth);
+    end = at;
   }
-
-  // Look forwards until a blank line is followed by a new top-level definition
-  for (let i = funcLine + 1; i < lines.length; i++) {
-    if (lines[i].trim() === "") {
-      let j = i + 1;
-      while (j < lines.length && lines[j].trim() === "") j++;
-      if (j < lines.length) {
-        const nextLine = lines[j].trim();
-        if (nextLine.match(/^[a-z]/) || nextLine.startsWith("type ") || nextLine.startsWith("port ")) {
-          end = i - 1;
-          break;
-        }
-      }
-    }
-    end = i;
-  }
-
-  while (end > start && lines[end].trim() === "") {
-    end--;
-  }
-
-  return { start, end };
+  return end;
 }
 
 // How deep in block comments a line ends that begins `depth` deep. A block comment can hold
@@ -228,6 +218,10 @@ function depthBehind(line, depth) {
   return depth;
 }
 
+// How deep in block comments a line ends behind a token on it. The language server gives the
+// end of the token by its line and a column in bytes. Nothing but a comment can open there.
+const depthBehindToken = (lines, { line, character }) => depthBehind(lines[line].slice(indexOfColumn(lines[line], character)), 0);
+
 // The doc comments that open in the lines `from` to `to`, a stretch that holds nothing but
 // comments and begins `depth` deep in block comments. A doc comment opens with "{-|" in the
 // first column, outside of any other comment. Each is told by the lines on which it opens and
@@ -246,18 +240,104 @@ function docCommentsIn(lines, from, to, depth = 0) {
   return docs;
 }
 
+// Whether a place in a file lies before another. The language server gives a place by its line
+// and a column on it.
+const liesBefore = (one, other) => one.line < other.line || (one.line === other.line && one.character < other.character);
+
+// How an answer names the lines `low` to `high` of a file. An agent counts lines from 1 when it reads one.
+const linesOf = (low, high) => (low === high ? `line ${low + 1}` : `lines ${low + 1} to ${high + 1}`);
+
+// What a move answers where the language server could not read the lines `low` to `high` of a
+// file, which holds the function
+export function unreadError(file, functionName, low, high) {
+  return new ToolError(
+    `Cannot move function: the language server could not read ${linesOf(low, high)} of ${file}, so it cannot tell where "${functionName}" begins and ends. ` +
+      "No file was changed. Run elm_diagnostics on the file. Where it compiles, those lines are laid out in a way that the parser does not know, and elm_format rewrites them"
+  );
+}
+
+// What a move answers where the lines `low` to `high` above a function hold what the parser read
+// and the symbols lack: a type signature that has no definition, in a file that is being edited,
+// or what only a module of the core library declares, an operator or its effects. No layout is
+// to blame there, and elm-format changes nothing about it.
+function unlistedError(file, functionName, low, high) {
+  return new ToolError(
+    `Cannot move function: the language server finds no declaration in ${linesOf(low, high)} of ${file}, above "${functionName}", so it cannot tell where the function begins. ` +
+      "No file was changed. Run elm_diagnostics on the file. Where it compiles, those lines declare what only the core library can, an operator for one"
+  );
+}
+
+// What a move answers where the lines of a function hold another declaration, which the
+// language server reads as the lines `start` to `end`.
+export function sharedLinesError(file, functionName, otherName, { start, end }) {
+  return new ToolError(
+    `Cannot move function: "${functionName}" shares lines of ${file} with "${otherName}", which the language server reads as ${linesOf(start.line, end.line)}. ` +
+      `A type signature there stands apart from its definition, or a name is defined twice, so it cannot tell where "${functionName}" begins and ends. ` +
+      "No file was changed. Run elm_diagnostics on the file"
+  );
+}
+
+// What a move answers where the type signature of a function stands below its definition, at
+// line `signature`. The language server begins the function there and ends it with the
+// definition, above where it begins, so no line of the file lies in between.
+export function signatureBelowError(file, functionName, signature) {
+  return new ToolError(
+    `Cannot move function: the type signature of "${functionName}" stands below its definition, at line ${signature + 1} of ${file}, ` +
+      `so the language server cannot tell where "${functionName}" begins and ends. No file was changed. Run elm_diagnostics on the file`
+  );
+}
+
+// Stops the move of a function that the language server cannot place. Its parser does not know
+// every layout that the compiler accepts, and it reads on through a file that does not compile.
+// Around what it could not read, a declaration can run on into the next ones, lose its type
+// signature and its doc comment to the one above, or be missing from the symbols, and a move
+// by them would take the wrong lines. `unread` holds those stretches. One counts from the
+// declaration before the function down to the function's end. That declaration can be the
+// stretch itself, which then ends where the parser gave up. For the first declaration of a file
+// everything above it counts, since its doc comment is told from the module's by those lines.
+// Between the declaration before and the function nothing but comments can stand, so anything
+// else is a declaration that the symbols lack, and so is one above the first of them.
+function assertPlaced(lines, file, functionName, { first, last, before, unread }) {
+  const from = before ?? { line: 0, character: 0 };
+  const reached = unread
+    .filter(({ start, end }) => !liesBefore(end, from) && !liesBefore(last, start))
+    .flatMap(({ start, end }) => [start.line, end.line]);
+  const unlisted = [];
+  if (before) {
+    const above = [lines[before.line].slice(indexOfColumn(lines[before.line], before.character)), ...lines.slice(before.line + 1, first)];
+    unlisted.push(...withoutComments(above.join("\n")).split("\n").flatMap((line, at) => (line.trim() === "" ? [] : [before.line + at])));
+  } else {
+    const { to } = headOf(lines);
+    if (to !== first) unlisted.push(Math.min(to, first));
+  }
+  if (reached.length > 0) {
+    throw unreadError(file, functionName, Math.min(...reached, ...unlisted), Math.max(...reached, ...unlisted));
+  }
+  if (unlisted.length > 0) {
+    throw unlistedError(file, functionName, Math.min(...unlisted), Math.max(...unlisted));
+  }
+}
+
+// Where a module's doc comment lists names for the docs of a package
+const DOCS = /@docs(?![\p{L}\d_])/u;
+
 // What a file holds above its first declaration, which begins on line `to`: the module
 // declaration, the imports, and comments. `firstImport` is the line of the first import, and
 // `below` the line that an import can follow where there is none: the last one of the module
 // declaration, or of a comment that it opens. Of the doc comments, the compiler takes the first
-// one for the module's and the last one above a declaration for that declaration's. A single
-// doc comment could be either. It is taken for the declaration's where the declaration starts
-// right below it, and for the module's where anything stands in between, as elm-format lays
-// the two out.
+// one above the imports for the module's, and the last one above a declaration for that
+// declaration's. With no import in between, the compiler takes a single doc comment for the
+// module's as well. One that holds "@docs" documents the module, and a move takes it for the
+// module's too. The compiler reads "@docs" anywhere in the comment, where no letter, digit or
+// underscore follows it. Any other comment is taken for the declaration's where the
+// declaration starts right below it, and for the module's where anything stands in between.
+// That rule goes by the layout, the only sign there of what the author meant, and is a choice
+// where the compiler reads the comment as the module's.
 function headOf(lines) {
   const code = withoutComments(lines.join("\n"));
   const { lines: codeLines, from, to } = importLines(code);
   const firstImport = codeLines.findIndex((line, at) => at >= from && at < to && IMPORT.test(line));
+  const lastImport = codeLines.findLastIndex((line, at) => at >= from && at < to && line.trim() !== "");
 
   let [below, depth] = [from - 1, 0];
   if (from > 0) {
@@ -267,9 +347,17 @@ function headOf(lines) {
       depth = depthBehind(lines[++below], depth);
     }
   }
-  const docs = firstImport === -1 ? docCommentsIn(lines, below + 1, to) : [];
-  const ofDeclaration = from === 0 || docs[0]?.close + 1 === to;
-  return { firstImport, below, moduleDoc: ofDeclaration ? undefined : docs[0] };
+  if (lastImport !== -1) {
+    // No import holds a string, so the comments among the imports are counted as they stand
+    for (let at = below + 1; at <= lastImport; at++) {
+      depth = depthBehind(lines[at], depth);
+    }
+    return { to, firstImport, below, firstDoc: docCommentsIn(lines, lastImport + 1, to, depth).at(-1) };
+  }
+  const docs = docCommentsIn(lines, below + 1, to);
+  const listsDocs = docs[0] !== undefined && DOCS.test(lines.slice(docs[0].open, docs[0].close + 1).join("\n"));
+  const ofDeclaration = from === 0 || (docs[0]?.close + 1 === to && !listsDocs);
+  return { to, firstImport, below, moduleDoc: ofDeclaration ? undefined : docs[0], firstDoc: ofDeclaration || docs.length > 1 ? docs.at(-1) : undefined };
 }
 
 // The lines with one more import. It goes in front of the first import. In a file that has
@@ -358,15 +446,26 @@ function retargetImport(content, functionName, sourceModuleName, targetModuleNam
 }
 
 /**
- * Move the function whose definition starts on funcLine of absPath into
- * absTargetModule. Resolves with the summary shown to the agent.
+ * Move the function that stands in absPath from the line `first` to the
+ * place `last`, the end of its last token, into absTargetModule. `before`
+ * is where the declaration before it ends, if there is one, and `unread`
+ * holds the stretches of the file that the parser could not read. Resolves
+ * with the summary shown to the agent.
+ *
+ * All four are the language server's, which reads them from the parse
+ * tree, type signature included. A blank line inside the body ends nothing
+ * there, and neither does a comment in the first column, while the function
+ * that follows, its doc comment and a comment between sections are no part
+ * of it. The function's own doc comment is, and moves with it, and so does
+ * a comment that closes its body.
  */
-export async function moveFunction({ client, workspaceRoot, absPath, absTargetModule, sourceContent, functionName, funcLine }) {
+export async function moveFunction({ client, workspaceRoot, absPath, absTargetModule, sourceContent, functionName, first, last, before, unread }) {
   const sourceLines = sourceContent.split("\n");
+  assertPlaced(sourceLines, absPath, functionName, { first, last, before, unread });
   const targetContent = readForEdit(absTargetModule);
   const targetLines = targetContent.split("\n");
 
-  const { start, end } = functionBounds(sourceLines, functionName, funcLine);
+  const [start, end] = [withDocComment(sourceLines, first, before), withClosingComments(sourceLines, last)];
   const functionText = sourceLines.slice(start, end + 1).join("\n");
   const sourceModuleName = moduleNameOf(sourceContent, absPath);
   const targetModuleName = moduleNameOf(targetContent, absTargetModule);
@@ -380,24 +479,29 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
     );
   }
 
-  // Target: append the function after the last non-empty line and expose it
+  // Target: append the function two blank lines below the last line that holds something, and expose it
   let insertLine = targetLines.length;
   while (insertLine > 0 && targetLines[insertLine - 1].trim() === "") {
     insertLine--;
   }
-  const newTargetLines = [...targetLines];
-  newTargetLines.splice(insertLine, 0, "", "", functionText, "");
-  const appended = newTargetLines.join("\n");
+  const appended = [...targetLines.slice(0, insertLine), "", "", functionText, ""].join("\n");
   const targetList = declaredList(appended);
   const exposed = targetList && withItem(appended, targetList, functionName);
 
-  // Source: cut the function, collapse the blank lines it leaves behind,
-  // import it from the target instead, and stop exposing it
+  // Source: cut the function, import it from the target instead, and stop exposing it. The
+  // blank lines above the function and below it meet where it stood. The longer of the two runs
+  // stays, and at the end of the file no more than its last line end.
   const newSourceLines = [...sourceLines];
   newSourceLines.splice(start, end - start + 1);
-  while (newSourceLines[start]?.trim() === "" && newSourceLines[start + 1]?.trim() === "") {
-    newSourceLines.splice(start, 1);
+  let [above, below] = [start, start];
+  while (above > 0 && newSourceLines[above - 1].trim() === "") {
+    above--;
   }
+  while (below < newSourceLines.length && newSourceLines[below].trim() === "") {
+    below++;
+  }
+  const blank = below === newSourceLines.length ? Math.min(below - start, 1) : Math.max(start - above, below - start);
+  newSourceLines.splice(above, below - above, ...Array(blank).fill(""));
   // The head is read from the file as it was. With its first function gone, the doc comment of
   // the next one could pass for the module's, and the import would part the two.
   const cut = withExposed(newSourceLines.join("\n"), targetModuleName, functionName, headOf(sourceLines));

@@ -17,7 +17,7 @@ import { promisify } from "util";
 import { z } from "zod";
 import { ToolError } from "./errors.mjs";
 import { ensureClient } from "./lsp-client.mjs";
-import { moveFunction } from "./move-function.mjs";
+import { moveFunction, sharedLinesError, signatureBelowError, unreadError } from "./move-function.mjs";
 import {
   applyWorkspaceEdit,
   asSpelledOnDisk,
@@ -106,7 +106,8 @@ async function openElmFile(filePath) {
 }
 
 // documentSymbol answers with SymbolInformation (location.range) or DocumentSymbol (range)
-const symbolLine = (symbol) => symbol.location?.range?.start?.line ?? symbol.range?.start?.line;
+const symbolRange = (symbol) => symbol.location?.range ?? symbol.range;
+const symbolLine = (symbol) => symbolRange(symbol)?.start?.line;
 
 function formatLocation({ uri, range }) {
   return `${fileURLToPath(uri)}:${range.start.line + 1}:${range.start.character}`;
@@ -586,9 +587,9 @@ export const tools = [
       "run elm_diagnostics on the project's entry module afterwards",
     input: {
       file_path: elmFile("Path to the source file containing the function"),
-      line: wholeNumber("Line number of the function name (0-indexed)"),
-      character: wholeNumber("Character position of the function name (0-indexed)"),
-      function_name: z.string().describe("Expected function name (must match what's at the position)"),
+      line: wholeNumber("A line of the function, from its type signature to the end of its body (0-indexed)"),
+      character: wholeNumber("Character position on that line (0-indexed). Not needed: the function is found by its line").optional(),
+      function_name: z.string().describe("Expected function name (must match the function on that line)"),
       target_module: z.string().describe('Path to the target module file (e.g., "src/Utils/Helpers.elm")'),
     },
     async run({ file_path, line, function_name, target_module }) {
@@ -601,17 +602,57 @@ export const tools = [
       }
 
       const { client, uri, absPath, content } = await openElmFile(file_path);
-      const symbols = await client.getSymbols(uri);
-      if (!symbols || symbols.length === 0) {
+      const symbols = (await client.getSymbols(uri)) ?? [];
+      // In lines that the parser could not read, the symbols lack a function, or give its lines to another
+      // one. A bracket that is left open can leave a whole file without a symbol.
+      const unread = await client.getUnreadRanges(uri);
+      const around = symbols.length === 0 ? unread : unread.filter(({ start, end }) => start.line <= line && line <= end.line);
+      if (around.length > 0) {
+        throw unreadError(absPath, function_name, around[0].start.line, around.at(-1).end.line);
+      }
+      if (symbols.length === 0) {
         throw new ToolError("No symbols found in file");
       }
 
-      // A symbol starts at its type signature or at its definition, so accept a neighbouring line
-      const func = symbols.find((s) => Math.abs(symbolLine(s) - line) <= 1);
+      // A function is found by any of its lines, from its type signature to the end of its body.
+      // Only one that is declared at the top of the file can move. A type is none, and neither is
+      // a binding of a let, which the language server lists as a function too.
+      const func = symbols.find((s) => {
+        const { start, end } = symbolRange(s);
+        return SYMBOL_KIND_NAMES[s.kind] === "Function" && start.character === 0 && start.line <= line && line <= end.line;
+      });
       if (!func) {
+        // A function whose type signature stands below its definition begins below where it ends,
+        // so none of its lines is found
+        const below = symbols.find((s) => {
+          const { start, end } = symbolRange(s);
+          return SYMBOL_KIND_NAMES[s.kind] === "Function" && s.name === function_name && start.character === 0 && end.line < start.line;
+        });
+        if (below) throw signatureBelowError(absPath, function_name, symbolLine(below));
         throw new ToolError(`No function found at line ${line + 1}. Expected: ${function_name}`);
       }
       assertExpectedName("function", function_name, func.name, line);
+
+      // The language server puts a function together from its type signature and its definition by
+      // their name, wherever in the file the two stand. Where the signature stands apart from the
+      // definition, or the file defines the name twice, the function reaches over the declarations in
+      // between. No file that compiles has two declarations that share a line.
+      const { start, end } = symbolRange(func);
+      const sharing = symbols.find((other) => {
+        const range = symbolRange(other);
+        return other !== func && range.start.character === 0 && range.start.line <= end.line && start.line <= range.end.line;
+      });
+      if (sharing) {
+        throw sharedLinesError(absPath, func.name, sharing.name, symbolRange(sharing));
+      }
+
+      // Where the declaration above it ends. The comments of this one stand between the two.
+      const before = symbols
+        .map(symbolRange)
+        .filter(({ start, end }) => start.character === 0 && end.line < symbolLine(func))
+        .map(({ end }) => end)
+        .sort((one, other) => one.line - other.line || one.character - other.character)
+        .at(-1);
 
       return moveFunction({
         client,
@@ -620,7 +661,10 @@ export const tools = [
         absTargetModule,
         sourceContent: content,
         functionName: func.name,
-        funcLine: symbolLine(func),
+        first: symbolLine(func),
+        last: symbolRange(func).end,
+        before,
+        unread,
       });
     },
   },

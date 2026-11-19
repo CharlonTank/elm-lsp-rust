@@ -6,6 +6,7 @@ import { accessSync, constants, existsSync, mkdtempSync, rmSync, statSync } from
 import { tmpdir } from "os";
 import { delimiter, join } from "path";
 import { ElmLspClient, RUST_LSP_PATH } from "./lsp-client.mjs";
+import { toFileUri } from "./workspace.mjs";
 
 // The MCP SDK does not run on anything older
 const MIN_NODE_MAJOR = 18;
@@ -46,6 +47,10 @@ async function checkLanguageServer() {
     started = true;
     // Every tool call begins with this command, and an older binary does not have it
     await client.syncWithDisk();
+    // Nor the one that elm_move_function asks about a file. This file is open in the server and nowhere else.
+    const probe = toFileUri(join(emptyProject, "Probe.elm"));
+    await client.openDocument(probe, "module Probe exposing (..)\n");
+    await client.getUnreadRanges(probe);
     return ["ok", RUST_LSP_PATH];
   } catch (error) {
     return ["fail", started ? error.message : `${RUST_LSP_PATH} did not start: ${error.message}`];

@@ -1993,6 +1993,288 @@ test("a function moves between modules whatever their exposing lists look like",
   assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
 });
 
+test("a function moves whole, with its doc comment, and takes nothing else along", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // As elm-format lays a function out: a blank line between the bindings of a let, in front of an else and
+  // between the branches of a case. The string in three quotes has a line that starts in the first column,
+  // and so does a comment, which holds three quotes of its own. Two comments close the body: a branch
+  // that is commented out, and a block whose second line starts in the first column.
+  const describe = [
+    "{-| Says how many.",
+    "-}",
+    "describe : Int -> String",
+    "describe count =",
+    "    let",
+    "        one =",
+    '            "one"',
+    "",
+    "        many =",
+    '            "many"',
+    "    in",
+    "    if count > 1 then",
+    "        many",
+    '-- a note in the first column, with """ in it',
+    "",
+    "    else",
+    "        case count of",
+    "            1 ->",
+    "                one",
+    "",
+    "            other ->",
+    '                """',
+    "none",
+    '"""',
+    "",
+    "            -- 0 ->",
+    '            --     "nothing" {- for now',
+    "",
+    "    {- Told apart from what follows",
+    "by its first line alone",
+    "    -}",
+  ];
+  // Its signature takes two lines, so the definition stands two lines below the start of the function. A block
+  // comment opens behind its last token, a string that holds what opens one and a letter of two bytes. A blank
+  // line and a note part its doc comment from it, as they part the one of apart.
+  const keep = ["{-| Docs for keep.", "-}", "", "-- a note", "keep :", "    Int", "keep =", '    String.length "{-né"{- four letters,', "and a line in the first column", "    -}"];
+  const apart = ["{-| Docs for apart.", "-}", "", "{- a note -}", "apart : Int", "apart =", "    3"];
+  // What follows a function is no part of it: a comment between sections, a function with a doc comment of its
+  // own, one whose name starts with a letter outside ASCII. Shapes has a doc comment and no import.
+  const kinds = ["", "", "type Kind", "    = Kind", ""];
+  const rest = ["", "", "-- SECTION", "", "", ...keep, "", "", "étés : Int", "étés =", "    2", "", "", ...apart, ...kinds];
+  writeFileSync(at("Shapes.elm"), ["module Shapes exposing (describe, keep, étés, apart)", "", "{-| Shapes.", "-}", "", "", ...describe, ...rest].join("\n"));
+  writeFileSync(at("Told.elm"), "module Told exposing (told)\n\n\ntold : Int\ntold =\n    0\n");
+  writeFileSync(at("Tail.elm"), "module Tail exposing (head, tail)\n\n\nhead : Int\nhead =\n    1\n\n\ntail : Int\ntail =\n    2\n");
+  // Neither has an import. The one doc comment of First stands right above its first function, and
+  // the one of Lone apart from it, which makes it the module's.
+  const second = ["", "", "second : Int", "second =", "    2", ""];
+  writeFileSync(at("First.elm"), ["module First exposing (first, second)", "", "", "{-| The first.", "-}", "first : Int", "first =", "    1", ...second].join("\n"));
+  writeFileSync(at("Lone.elm"), ["module Lone exposing (lone, second)", "", "{-| About Lone.", "-}", "", "", "lone : Int", "lone =", "    1", ...second].join("\n"));
+  // The one doc comment of Listed stands right above its first function as well, and lists names with @docs
+  const listed = ["module Listed exposing (listed, second)", "", "{-| What the module is for.", "", "@docs listed, second", "", "-}"];
+  writeFileSync(at("Listed.elm"), [...listed, "listed : Int", "listed =", "    1", ...second].join("\n"));
+  // The compiler reads @docs anywhere in a comment: in the middle of a line in Spoken, on the one line of
+  // Brief's, indented in Indented's. Worded's names @docstrings, a word of its own.
+  const spoken = ["{-| What Spoken is for. See @docs spoken, second", "-}"];
+  writeFileSync(at("Spoken.elm"), ["module Spoken exposing (spoken, second)", "", "", ...spoken, "spoken : Int", "spoken =", "    1", ...second].join("\n"));
+  writeFileSync(at("Brief.elm"), ["module Brief exposing (brief, second)", "", "{-| @docs brief, second -}", "brief : Int", "brief =", "    1", ...second].join("\n"));
+  const indented = ["{-| What Indented is for.", "", "    @docs indented, second", "", "-}"];
+  writeFileSync(at("Indented.elm"), ["module Indented exposing (indented, second)", "", ...indented, "indented : Int", "indented =", "    1", ...second].join("\n"));
+  const worded = ["{-| Its @docstrings are elsewhere.", "-}", "worded : Int", "worded =", "    1"];
+  writeFileSync(at("Worded.elm"), ["module Worded exposing (worded, second)", "", ...worded, ...second].join("\n"));
+  // The doc comment of beta stands apart from it, and alpha is the first thing in a module without imports
+  const beta = ["", "", "{-| Doc of beta.", "-}", "", "beta : Int", "beta =", "    2", ""];
+  writeFileSync(at("Apart.elm"), ["module Apart exposing (alpha, beta)", "", "", "alpha : Int", "alpha =", "    1", ...beta].join("\n"));
+  // A comment that the last import opens, and one that the last token of a function opens. Each holds
+  // a line that reads like a doc comment, above a function that has none.
+  const noted = ["import Tail {- a note behind the last import", "{-| that reads like a doc comment -}", "-}"];
+  const trail = ["trail : Int", "trail =", "    5 {- and one behind the last token", "{-| that reads like one too -}", "    -}"];
+  const plain = ["plain : Int", "plain =", "    4"];
+  const kept = ["", "", "kept : Int", "kept =", "    6", ""];
+  writeFileSync(at("Trail.elm"), ["module Trail exposing (kept, plain, trail)", "", ...noted, "", "", ...trail, "", "", ...plain, ...kept].join("\n"));
+  const imports = ["Apart", "Brief", "First", "Indented", "Listed", "Lone", "Shapes", "Spoken", "Tail", "Told", "Trail", "Worded"].map((name) => `import ${name}\n`).join("");
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", `import Browser\n${imports}`));
+  const client = await connect(t, { cwd: project });
+  const move = (name, definition, from = "Shapes.elm") => {
+    const line = readFileSync(at(from), "utf-8").split("\n").indexOf(definition);
+    return callTool(client, "elm_move_function", { file_path: at(from), line, character: 0, function_name: name, target_module: at("Told.elm") });
+  };
+  const text = (name) => readFileSync(at(name), "utf-8");
+
+  // Only a function of the file's top level moves: no type, and no binding of a let
+  const untouched = sourcesOf(project);
+  assert.deepEqual(await move("Kind", "type Kind"), { text: `No function found at line ${text("Shapes.elm").split("\n").indexOf("type Kind") + 1}. Expected: Kind`, isError: true });
+  assert.match((await move("one", "        one =")).text, /^Safety check failed: Expected function 'one' but found 'describe' at line 12\./);
+  assert.deepEqual(sourcesOf(project), untouched);
+
+  // Each file is compared whole: two blank lines stand between what is declared, and one line end closes a file
+  const told = ["module Told exposing (told, describe)", "", "", "told : Int", "told =", "    0", "", "", ...describe];
+  assert.equal((await move("describe", "describe count =")).isError, false);
+  assert.equal(text("Told.elm"), [...told, ""].join("\n"));
+  // The import stands below the doc comment of the module, which an import above it would hand to keep
+  assert.equal(text("Shapes.elm"), ["module Shapes exposing (keep, étés, apart)", "", "{-| Shapes.", "-}", "", "import Told exposing (describe)", ...rest].join("\n"));
+
+  // The doc comment of a function is the last one above it, also behind a blank line and a note. With the
+  // imports above keep, and with a function above apart.
+  const section = ["", "", "-- SECTION", "", "", "étés : Int", "étés =", "    2"];
+  assert.equal((await move("keep", "keep =")).isError, false);
+  assert.equal(text("Told.elm"), [...told, "", "", ...keep, ""].join("\n").replace("(told, describe)", "(told, describe, keep)"));
+  assert.equal(text("Shapes.elm"), ["module Shapes exposing (étés, apart)", "", "{-| Shapes.", "-}", "", "import Told exposing (describe, keep)", ...section, "", "", ...apart, ...kinds].join("\n"));
+  assert.equal((await move("apart", "apart =")).isError, false);
+  assert.equal(text("Told.elm"), [...told, "", "", ...keep, "", "", ...apart, ""].join("\n").replace("(told, describe)", "(told, describe, keep, apart)"));
+  assert.equal(text("Shapes.elm"), ["module Shapes exposing (étés)", "", "{-| Shapes.", "-}", "", "import Told exposing (describe, keep, apart)", ...section, ...kinds].join("\n"));
+
+  // The last function of a file leaves the blank lines above it to no one
+  assert.equal((await move("tail", "tail =", "Tail.elm")).isError, false);
+  assert.equal(text("Tail.elm"), "module Tail exposing (head)\n\nimport Told exposing (tail)\n\n\nhead : Int\nhead =\n    1\n");
+
+  // The first function of a module takes the doc comment right above it along, and leaves the module its own
+  assert.equal((await move("first", "first =", "First.elm")).isError, false);
+  assert.equal(text("First.elm"), ["module First exposing (second)", "", "import Told exposing (first)", ...second].join("\n"));
+  assert.ok(text("Told.elm").endsWith("\n\n\n{-| The first.\n-}\nfirst : Int\nfirst =\n    1\n"), text("Told.elm"));
+  assert.equal((await move("lone", "lone =", "Lone.elm")).isError, false);
+  assert.equal(text("Lone.elm"), ["module Lone exposing (second)", "", "{-| About Lone.", "-}", "", "import Told exposing (lone)", ...second].join("\n"));
+  assert.ok(text("Told.elm").endsWith("\n    1\n\n\nlone : Int\nlone =\n    1\n"), text("Told.elm"));
+  // A doc comment with @docs is the module's, wherever the first function starts
+  assert.equal((await move("listed", "listed =", "Listed.elm")).isError, false);
+  assert.equal(text("Listed.elm"), [...listed.with(0, "module Listed exposing (second)"), "", "import Told exposing (listed)", ...second].join("\n"));
+  assert.ok(text("Told.elm").endsWith("\n    1\n\n\nlisted : Int\nlisted =\n    1\n"), text("Told.elm"));
+  assert.equal((await move("spoken", "spoken =", "Spoken.elm")).isError, false);
+  assert.equal(text("Spoken.elm"), ["module Spoken exposing (second)", "", "", ...spoken, "", "import Told exposing (spoken)", ...second].join("\n"));
+  assert.ok(text("Told.elm").endsWith("\n    1\n\n\nspoken : Int\nspoken =\n    1\n"), text("Told.elm"));
+  assert.equal((await move("brief", "brief =", "Brief.elm")).isError, false);
+  assert.equal(text("Brief.elm"), ["module Brief exposing (second)", "", "{-| @docs brief, second -}", "", "import Told exposing (brief)", ...second].join("\n"));
+  assert.ok(text("Told.elm").endsWith("\n    1\n\n\nbrief : Int\nbrief =\n    1\n"), text("Told.elm"));
+  assert.equal((await move("indented", "indented =", "Indented.elm")).isError, false);
+  assert.equal(text("Indented.elm"), ["module Indented exposing (second)", "", ...indented, "", "import Told exposing (indented)", ...second].join("\n"));
+  assert.ok(text("Told.elm").endsWith("\n    1\n\n\nindented : Int\nindented =\n    1\n"), text("Told.elm"));
+  // One without it is the function's where it stands right above it
+  assert.equal((await move("worded", "worded =", "Worded.elm")).isError, false);
+  assert.equal(text("Worded.elm"), ["module Worded exposing (second)", "", "import Told exposing (worded)", ...second].join("\n"));
+  assert.ok(text("Told.elm").endsWith(`\n    1\n\n\n${worded.join("\n")}\n`), text("Told.elm"));
+
+  // Without its first function, the doc comment of the next one is the first thing below the module
+  // line. It is no doc comment of the module for that, and the import does not part it from beta.
+  assert.equal((await move("alpha", "alpha =", "Apart.elm")).isError, false);
+  assert.equal(text("Apart.elm"), ["module Apart exposing (beta)", "", "import Told exposing (alpha)", ...beta].join("\n"));
+
+  // A line that reads like a doc comment is none inside another comment, wherever that one opens
+  assert.equal((await move("plain", "plain =", "Trail.elm")).isError, false);
+  assert.equal(text("Trail.elm"), ["module Trail exposing (kept, trail)", "", "import Told exposing (plain)", ...noted, "", "", ...trail, ...kept].join("\n"));
+  assert.ok(text("Told.elm").endsWith(`\n    1\n\n\n${plain.join("\n")}\n`), text("Told.elm"));
+  // The column says nothing about which function is meant, and is left out here
+  const line = text("Trail.elm").split("\n").indexOf("trail =");
+  assert.equal((await callTool(client, "elm_move_function", { file_path: at("Trail.elm"), line, function_name: "trail", target_module: at("Told.elm") })).isError, false);
+  assert.equal(text("Trail.elm"), ["module Trail exposing (kept)", "", "import Told exposing (plain, trail)", ...noted, ...kept].join("\n"));
+  assert.ok(text("Told.elm").endsWith(`\n    4\n\n\n${trail.join("\n")}\n`), text("Told.elm"));
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("a function stays in its file where the parser could not read the lines around it", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  const write = (name, lines) => writeFileSync(at(name), lines.join("\n") + "\n");
+  const number = (name, value) => ["", "", `{-| The number ${name}.`, "-}", `${name} : Int`, `${name} =`, `    ${value}`];
+  // The compiler takes a case in parentheses that close on the line of its last branch, as code that is laid
+  // out by hand has it. The parser does not. For it the function with that case goes on to the end of the
+  // file, and the two below it are none of the symbols.
+  const rounded = ["", "", "rounded : Int -> Int", "rounded number =", "    number", "        |> (\\n ->", "             case n of", "              1 -> 2", "              _ -> n)"];
+  write("Laid.elm", ["module Laid exposing (one, rounded, three, two)", ...number("one", 1), ...rounded, ...number("two", 2), ...number("three", 3)]);
+  // A file in the middle of an edit, with a string that is left open. The parser ends that declaration on the
+  // type signature of the next one, which stays without it and without its doc comment.
+  const open = ["", "", "open : String", "open =", '    "left open'];
+  write("Edited.elm", ["module Edited exposing (..)", ...number("one", 1), ...open, ...number("two", 2), ...number("three", 3)]);
+  // Two declarations that the symbols lack, above the first function and between two. Only a module of the
+  // core library declares an operator.
+  write("Kernel.elm", ["module Kernel exposing (..)", "", "", "infix right 5 (::) = one", ...number("one", 1), "", "", "infix left  6 (+)  = two", ...number("two", 2)]);
+  // A type signature that has lost its definition. The parser reads it, and the symbols have no function for it.
+  write("Bare.elm", ["module Bare exposing (..)", "", "", "lost : Int", ...number("one", 1)]);
+  // A branch that is missing, and a module line that never closes its list. Each leaves its file without a symbol.
+  write("Iffy.elm", ["module Iffy exposing (..)", "", "", "one : Int -> Int", "one number =", "    if number > 0 then", "        1", ...number("two", 2)]);
+  write("Listed.elm", ["module Listed exposing (one, two", ...number("one", 1), ...number("two", 2)]);
+  // One bracket that is left open, and the parser gives the file up: it has no symbol at all
+  write("Half.elm", ["module Half exposing (..)", "", "", "one : Maybe Int -> Int", "one maybe =", "    case maybe of", "        Nothing -> (", ...number("two", 2)]);
+  // A line of a body that starts in the first column. The function ends above it, for the parser and for the compiler.
+  const cut = ["", "", "cut : Int -> Int", "cut number =", "    case number of", "        1 ->", "            2"];
+  const rest = ['"left behind', "        _ ->", "            3"];
+  write("Cut.elm", ["module Cut exposing (..)", ...cut, ...rest, ...number("two", 2)]);
+  write("Told.elm", ["module Told exposing (told)", "", "", "told : Int", "told =", "    0"]);
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", "import Browser\nimport Laid\nimport Told\n"));
+  const client = await connect(t, { cwd: project });
+  const move = (from, name, line = `${name} =`) =>
+    callTool(client, "elm_move_function", { file_path: at(from), line: text(from).split("\n").indexOf(line), function_name: name, target_module: at("Told.elm") });
+  const text = (name) => readFileSync(at(name), "utf-8");
+  const unread = (lines, from, name) =>
+    new RegExp(`^Cannot move function: the language server could not read ${lines} of \\S*${from}\\.elm, so it cannot tell where "${name}" begins and ends\\. No file was changed\\.`);
+  const unlisted = (lines, from, name) =>
+    new RegExp(`^Cannot move function: the language server finds no declaration in ${lines} of \\S*${from}\\.elm, above "${name}", so it cannot tell where the function begins\\. No file was changed\\.`);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+
+  // The function that the parser could not read, by its signature and by its body, and the two that it took for
+  // a part of that one
+  const untouched = sourcesOf(project);
+  assert.match((await move("Laid.elm", "rounded", "rounded : Int -> Int")).text, unread("lines 12 to 31", "Laid", "rounded"));
+  assert.match((await move("Laid.elm", "rounded", "              1 -> 2")).text, unread("lines 12 to 31", "Laid", "rounded"));
+  assert.match((await move("Laid.elm", "two")).text, unread("lines 12 to 31", "Laid", "two"));
+  assert.match((await move("Laid.elm", "three", "three : Int")).text, unread("lines 12 to 31", "Laid", "three"));
+  // The function below a declaration that the parser could not read, which can end anywhere
+  assert.match((await move("Edited.elm", "two")).text, unread("lines 12 to 18", "Edited", "two"));
+  // And the one below a declaration that is none of the symbols
+  assert.match((await move("Kernel.elm", "one")).text, unlisted("line 4", "Kernel", "one"));
+  assert.match((await move("Kernel.elm", "two")).text, unlisted("line 14", "Kernel", "two"));
+  assert.match((await move("Bare.elm", "one")).text, unlisted("line 4", "Bare", "one"));
+  // A file without a symbol, by a line that the parser could not read and by one above those
+  assert.match((await move("Half.elm", "two")).text, unread("lines 5 to 14", "Half", "two"));
+  assert.match((await move("Half.elm", "one", "one : Maybe Int -> Int")).text, unread("lines 5 to 14", "Half", "one"));
+  assert.match((await move("Iffy.elm", "two")).text, unread("lines 5 to 14", "Iffy", "two"));
+  assert.match((await move("Listed.elm", "two")).text, unread("lines 1 to 15", "Listed", "two"));
+  assert.deepEqual(sourcesOf(project), untouched);
+
+  // What stands above those lines moves as ever, and so does what stands below the next declaration
+  const moved = (name, value) => `\n\n${number(name, value).slice(2).join("\n")}\n`;
+  assert.equal((await move("Laid.elm", "one")).isError, false);
+  assert.ok(text("Told.elm").endsWith(moved("one", 1)), text("Told.elm"));
+  assert.equal((await move("Edited.elm", "three")).isError, false);
+  assert.ok(text("Told.elm").endsWith(moved("three", 3)), text("Told.elm"));
+  assert.equal(text("Edited.elm"), ["module Edited exposing (..)", "", "import Told exposing (three)", ...number("one", 1), ...open, ...number("two", 2), ""].join("\n"));
+  // A function above such lines goes as far as the parser read it, and the rest of its body stays behind
+  assert.equal((await move("Cut.elm", "cut", "cut number =")).isError, false);
+  assert.ok(text("Told.elm").endsWith(`\n\n${cut.slice(2).join("\n")}\n`), text("Told.elm"));
+  assert.equal(text("Cut.elm"), ["module Cut exposing (..)", "", "import Told exposing (cut)", "", "", ...rest, ...number("two", 2), ""].join("\n"));
+
+  // elm-format lays the case out as the parser knows it
+  assert.equal((await callTool(client, "elm_format", { file_path: at("Laid.elm") })).isError, false);
+  assert.equal((await move("Laid.elm", "two")).isError, false);
+  assert.ok(text("Told.elm").endsWith(moved("two", 2)), text("Told.elm"));
+  assert.equal((await move("Laid.elm", "rounded", "rounded number =")).isError, false);
+  assert.match(text("Laid.elm"), /^module Laid exposing \(three\)\n\nimport Told exposing \(one, two, rounded\)\n\n\n\{-\| The number three\.\n/);
+});
+
+test("a function stays in its file where its lines hold another declaration", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  const write = (name, lines) => writeFileSync(at(name), lines.join("\n") + "\n");
+  const number = (name, value) => ["", "", `${name} : Int`, `${name} =`, `    ${value}`];
+  // A function that is defined twice, as a copy leaves it before it has a name of its own. The language server
+  // begins the second definition at the type signature of the first, over the two functions between them.
+  write("Twice.elm", ["module Twice exposing (bar, baz, foo)", ...number("foo", 1), ...number("bar", 1), ...number("baz", 1), "", "", "foo =", "    2"]);
+  // A type signature that an edit parted from its definition, with a function and its doc comment in between
+  const helper = ["", "", "{-| Helps.", "-}", "helper : Int", "helper =", "    1"];
+  write("Parted.elm", ["module Parted exposing (helper, view)", "", "", "view : Int -> Int", ...helper, "", "", "view n =", "    n + helper"]);
+  // The same with a declaration of one line in between
+  write("Lone.elm", ["module Lone exposing (helper, view)", "", "", "view : Int -> Int", "", "", "helper = 1", "", "", "view n =", "    n + helper"]);
+  // A type signature that an edit left below its definition, and a function laid out the ordinary way
+  write("Flipped.elm", ["module Flipped exposing (flipped, plain)", "", "", "flipped =", "    1", "", "", "flipped : Int", "", "", "plain : Int", "plain =", "    2"]);
+  write("Told.elm", ["module Told exposing (told)", "", "", "told : Int", "told =", "    0"]);
+  const client = await connect(t, { cwd: project });
+  const move = (from, name, line) =>
+    callTool(client, "elm_move_function", { file_path: at(from), line: readFileSync(at(from), "utf-8").split("\n").lastIndexOf(line), function_name: name, target_module: at("Told.elm") });
+  const shared = (from, name, other, lines) =>
+    new RegExp(
+      `^Cannot move function: "${name}" shares lines of \\S*${from}\\.elm with "${other}", which the language server reads as ${lines}\\. ` +
+        `A type signature there stands apart from its definition, or a name is defined twice, so it cannot tell where "${name}" begins and ends\\. No file was changed\\.`
+    );
+
+  // The second definition and the first, and a function between the two
+  const untouched = sourcesOf(project);
+  assert.match((await move("Twice.elm", "foo", "    2")).text, shared("Twice", "foo", "foo", "lines 4 to 6"));
+  assert.match((await move("Twice.elm", "foo", "foo : Int")).text, shared("Twice", "foo", "foo", "lines 4 to 20"));
+  assert.match((await move("Twice.elm", "baz", "baz =")).text, shared("Twice", "baz", "foo", "lines 4 to 20"));
+  // The function whose signature stands apart, by either of its two parts, and the one in between
+  assert.match((await move("Parted.elm", "view", "view : Int -> Int")).text, shared("Parted", "view", "helper", "lines 9 to 11"));
+  assert.match((await move("Parted.elm", "view", "view n =")).text, shared("Parted", "view", "helper", "lines 9 to 11"));
+  assert.match((await move("Parted.elm", "helper", "helper =")).text, shared("Parted", "helper", "view", "lines 4 to 15"));
+  assert.match((await move("Lone.elm", "view", "view n =")).text, shared("Lone", "view", "helper", "line 7"));
+  // The function whose signature stands below its definition, by either of its two parts
+  const below = /^Cannot move function: the type signature of "flipped" stands below its definition, at line 8 of \S*Flipped\.elm, so the language server cannot tell where "flipped" begins and ends\. No file was changed\./;
+  assert.match((await move("Flipped.elm", "flipped", "flipped =")).text, below);
+  assert.match((await move("Flipped.elm", "flipped", "flipped : Int")).text, below);
+  // A function laid out the ordinary way, called for on the blank line above its type signature, is not there
+  const blank = { file_path: at("Flipped.elm"), line: 9, function_name: "plain", target_module: at("Told.elm") };
+  assert.deepEqual(await callTool(client, "elm_move_function", blank), { text: "No function found at line 10. Expected: plain", isError: true });
+  assert.deepEqual(sourcesOf(project), untouched);
+});
+
 test("a function is moved in a project that holds a link to nothing and a dot-file", async (t) => {
   const project = copyFixture(t);
   symlinkSync("someone@host.1234", join(project, "src/.#Main.elm"));
