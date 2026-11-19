@@ -1,0 +1,12 @@
+{
+  "codebases": [
+    {
+      "label": "My app",
+      "repo": "/absolute/path/to/repository",
+      "elmRoot": ".",
+      "ref": "HEAD",
+      "check": ["./node_modules/.bin/elm", "make", "src/Main.elm", "--output=/dev/null"],
+      "link": ["node_modules"]
+    }
+  ]
+}

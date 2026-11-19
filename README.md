@@ -253,6 +253,7 @@ elm-lsp-rust/
 ├── scripts/
 │   └── setup.sh          # Builds the language server
 ├── skills/               # Agent skill
+├── benchmarks/           # Agent refactorings with the server and without it
 └── tests/                # Test suites
 ```
 
@@ -272,13 +273,17 @@ elm-lsp-rust/
 # Tools and language server, against the fixture and a real project
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
 
-# MCP server, command line and harness configuration
+# MCP server, command line, harness configuration and the benchmark
 node --test tests/*.test.mjs
 ```
 
-The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or newer, two major versions past what the server itself needs. The meetdown suite also needs `lamdera`.
+The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or newer, two major versions past what the server itself needs. The meetdown suite also needs `lamdera`. The benchmark's tests, which the last command runs with the others, need `git` and a `ps` that lists the machine's processes. They take a few minutes, and longer on a slow network, since the real compiler asks package.elm-lang.org again in each fresh checkout that they build.
 
 Tests cover: definition, references, symbols, rename (functions, types, variants, fields), diagnostics, code actions, move function, file rename/move, add/remove variant, add/remove field, and ERD generation.
+
+## Benchmark
+
+`benchmarks/` measures what the tools are worth to an agent. It gives Claude Code the same Elm refactorings with the language server and without it, on codebases you choose, and compares how often the result is right, what it costs and how long it takes. See [benchmarks/README.md](benchmarks/README.md).
 
 ## Related
 

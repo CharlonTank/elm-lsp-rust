@@ -22,11 +22,11 @@ Fast Elm Language Server (Rust) for coding agents. **Not for text editors** - ag
 cargo build --release --locked
 (cd tests && npm ci --ignore-scripts)                                   # once per clone
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs  # tools and language server
-node --test tests/*.test.mjs                                            # MCP server, CLI, harness config
+node --test tests/*.test.mjs                                            # MCP server, CLI, harness config, benchmark
 node mcp-wrapper/cli.mjs config --markdown > docs/harnesses.md          # after editing harnesses.mjs
 ```
 
-The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or newer. The meetdown suite also needs `lamdera`.
+The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or newer. The meetdown suite also needs `lamdera`. The benchmark's tests need `git` and a `ps` that lists the machine's processes.
 
 ## Key Files
 
@@ -42,6 +42,7 @@ The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or new
 - `mcp-wrapper/workspace.mjs` - Finds the Elm project of a file, checks that a path lies in it and writes the edits of a refactoring
 - `mcp-wrapper/errors.mjs` - `ToolError`, a failure that the agent is shown and can act on
 - `mcp-wrapper/harnesses.mjs` - How each harness registers the server, source of `docs/harnesses.md`
+- `benchmarks/` - Benchmark of an agent's Elm refactorings with the server and without it
 
 ## MCP Tools
 

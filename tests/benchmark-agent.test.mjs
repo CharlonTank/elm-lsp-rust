@@ -7,7 +7,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { summarizeTranscript } from "../benchmarks/lib/agent.mjs";
+import { readFileSync } from "fs";
+import { dirname, join, relative } from "path";
+import { BENCHMARK_SOURCES, summarizeTranscript } from "../benchmarks/lib/agent.mjs";
+import { REPO } from "./support.mjs";
+import { BENCH } from "./benchmark-support.mjs";
 
 const toolUse = (name) => ({ type: "assistant", message: { content: [{ type: "text", text: "On it." }, { type: "tool_use", name }] } });
 
@@ -134,4 +138,18 @@ test("a transcript is condensed into the session's figures", () => {
   // A server can be connected and hand the session none of its tools
   const toolless = [{ type: "system", subtype: "init", tools: ["Bash"], mcp_servers: [{ name: "elm-lsp", status: "connected" }] }];
   assert.deepEqual([summarizeTranscript(toolless, undefined, "lsp").lspStatus, summarizeTranscript(toolless, undefined, "lsp").lspTools], ["connected", 0]);
+});
+
+test("every module of this repository that the benchmark imports counts toward the state of its code", () => {
+  const seen = new Set();
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const path = relative(REPO, file);
+    assert.ok(BENCHMARK_SOURCES.some((source) => path === source || path.startsWith(`${source}/`)), `${path} is missing from BENCHMARK_SOURCES`);
+    for (const match of readFileSync(file, "utf-8").matchAll(/(?:from\s*|import\s*(?:\(\s*)?)["'](\.[^"']+)["']/g)) {
+      visit(join(dirname(file), match[1]));
+    }
+  };
+  visit(BENCH);
 });

@@ -3,7 +3,10 @@
  * that more than one of the tests/benchmark*.test.mjs files can use them.
  */
 
+import { join } from "path";
+import { REPO } from "./support.mjs";
 
+export const BENCH = join(REPO, "benchmarks/bench.mjs");
 
 export const SHAPES = [
   "module Shapes exposing (Shape(..), Point, area)",

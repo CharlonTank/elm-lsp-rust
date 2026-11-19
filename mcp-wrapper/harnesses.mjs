@@ -26,7 +26,7 @@ function shellQuote(word) {
   return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
 }
 
-const shell = (...words) => words.map(shellQuote).join(" ");
+export const shell = (...words) => words.map(shellQuote).join(" ");
 
 /**
  * @typedef {object} Harness
