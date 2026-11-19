@@ -1068,6 +1068,83 @@ test("a module is renamed and moved however its module line and its imports are 
   assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
 });
 
+// A definition is looked up by the bare name, and so are references. Until both go by the
+// module a name belongs to, this fails.
+test.todo("a definition is found in the module that a name is qualified with", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // Three modules with a function called helper, and Main.elm calls the one of Other
+  for (const name of ["Aaa", "Other"]) {
+    writeFileSync(at(`${name}.elm`), `module ${name} exposing (helper)\n\n\nhelper : String -> String\nhelper text =\n    text\n`);
+  }
+  const main = readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", "import Browser\nimport Other\n").replace("text (greet model.user)", "text (Other.helper (greet model.user))");
+  writeFileSync(at("Main.elm"), main);
+  const lines = main.split("\n");
+  const line = lines.findIndex((text) => text.includes("Other.helper"));
+  const client = await connect(t, { cwd: project });
+
+  const found = await callTool(client, "elm_definition", { file_path: at("Main.elm"), line, character: lines[line].indexOf("Other.helper") + "Other.".length });
+  assert.match(found.text, new RegExp(`${at("Other.elm")}:5:0`));
+});
+
+// Three refactorings write by the bare name as well. An application has a module for each page,
+// and each of them a Model with a title and a Msg with a NoOp. Shell wraps the messages of Home
+// and has a NoOp of its own. Until the three go by the module, these fail.
+function pagesOf(t) {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  const page = (name, field, variant) => [
+    `module Page.${name} exposing (Model, Msg(..), update)`,
+    ...["", "", "type alias Model =", "    { title : String", `    , ${field}`, "    }"],
+    ...["", "", "type Msg", "    = NoOp", `    | ${variant}`],
+    ...["", "", "update : Msg -> Model -> Model", "update msg model =", "    case msg of", "        NoOp ->", "            { model | title = model.title }"],
+    ...["", `        ${variant} ->`, "            model", ""],
+  ];
+  const shell = [
+    ...["module Shell exposing (Msg(..), step)", "", "import Page.Home", "", "", "type Msg", "    = NoOp", "    | Home Page.Home.Msg"],
+    ...["", "", "step : Msg -> Int -> Int", "step msg count =", "    case msg of", "        NoOp ->", "            count"],
+    ...["", "        Home Page.Home.NoOp ->", "            count", "", "        Home Page.Home.Bump ->", "            count + 1", ""],
+  ];
+  mkdirSync(at("Page"));
+  writeFileSync(at("Page/Home.elm"), page("Home", "count : Int", "Bump").join("\n"));
+  writeFileSync(at("Page/Settings.elm"), page("Settings", "dark : Bool", "Toggle").join("\n"));
+  writeFileSync(at("Shell.elm"), shell.join("\n"));
+  const text = (name) => readFileSync(at(name), "utf-8");
+  return { project, home: at("Page/Home.elm"), text, settings: text("Page/Settings.elm"), shell: text("Shell.elm") };
+}
+
+test.todo("a renamed variant leaves the variant of that name in another module alone", async (t) => {
+  const { project, home, text, settings, shell } = pagesOf(t);
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_variant", { file_path: home, line: 10, character: 6, old_name: "NoOp", newName: "Idle" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(text("Page/Home.elm"), /^        Idle ->$/m);
+  assert.equal(text("Page/Settings.elm"), settings);
+  assert.equal(text("Shell.elm"), shell.replace("Page.Home.NoOp", "Page.Home.Idle"));
+});
+
+test.todo("a variant added to a type is no branch by its bare name in a case over another type", async (t) => {
+  const { project, home, text } = pagesOf(t);
+  const client = await connect(t, { cwd: project });
+
+  const added = await callTool(client, "elm_add_variant", { file_path: home, type_name: "Msg", new_variant_name: "Reset" });
+  assert.equal(added.isError, false, added.text);
+  assert.match(text("Page/Home.elm"), /^        Reset ->$/m);
+  // Shell.step matches on the Msg of Shell, which has no Reset. What it lacks is a branch for Home Page.Home.Reset.
+  assert.doesNotMatch(text("Shell.elm"), /^        Reset ->$/m);
+});
+
+test.todo("a renamed field leaves the field of that name in another module's record alone", async (t) => {
+  const { project, home, text, settings } = pagesOf(t);
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_field", { file_path: home, line: 4, character: 6, old_name: "title", newName: "heading" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(text("Page/Home.elm"), /^            \{ model \| heading = model\.heading \}$/m);
+  assert.equal(text("Page/Settings.elm"), settings);
+});
+
 test("a port module is renamed and moved like any other module", async (t) => {
   const project = copyFixture(t);
   const at = (name) => join(project, "src", name);

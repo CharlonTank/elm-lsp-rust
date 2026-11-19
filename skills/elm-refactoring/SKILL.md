@@ -265,17 +265,18 @@ type_name: "BackendModel"
 - **One refactoring at a time per project.** The server runs the calls for a project in the order they arrive, so two renames sent together are safe. A second server on the same project is not.
 - **A test file is not in the index until a tool is called on it.** A rename then reaches it. Call `elm_symbols` on the test files that use a symbol before you rename the symbol. This works with the MCP server, which keeps its language server between calls. From the command line every call starts a new one, so a rename there never reaches a file outside the source directories: update the tests yourself.
 - **A copy of a module is no module until it has a name of its own.** A file that still declares the module of the file it was copied from is left alone by renames and by changes to a type, and a tool called on it is refused with both files named. Rename it with `elm_rename_file`, which rewrites its module line too. `elm_move_function` is the exception: it changes the import in every Elm file that lists the function, a copy included.
+- **A name that several modules have.** `elm_definition` and `elm_references` look a name up without the module it belongs to, so look at the path of an answer before you rely on it. `elm_rename_variant`, `elm_add_variant` and `elm_rename_field` write by the same lookup and report success: with a `NoOp` in every page module, or a `Model` with a `title` in two of them, they change the other module's code too, or stop short. Run `elm_diagnostics` on the project's entry module after one of the three.
 - **Refactoring tools write to disk.** Read a file again before editing it further.
 - **Always verify compilation** after refactoring, with `elm_diagnostics` on the project's entry module or with the project's build command
 - **Lines with non-ASCII text before the symbol.** Columns are counted in bytes there, so a column in a result is larger than the count of characters. Pass it to a tool as the result gave it. Edits land where they belong. `elm_diagnostics` prints the compiler's own line and column, which count from 1 and by characters.
-- These tools understand Elm's scope and semantics - safer than text replace
+- These tools read Elm's syntax and tell a function from a type, a variant or a field of the same name, which a text replace does not
 
 ## Why Use LSP Tools
 
 | Manual Edit | LSP Tool |
 |-------------|----------|
-| Misses references | Finds ALL references |
+| Misses references | Finds the references in every source file of the project |
 | Breaks qualified imports | Updates `Module.func` correctly |
-| Can rename wrong symbols | Scope-aware, precise |
+| Renames a text wherever it stands | Renames a symbol of one kind, and is unsure only of a name that several modules have |
 | Multiple file edits | Single operation |
-| Error-prone | Safe and verified |
+| Error-prone | One call, and `elm_diagnostics` to verify it |
