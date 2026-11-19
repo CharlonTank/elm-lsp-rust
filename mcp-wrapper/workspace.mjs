@@ -158,6 +158,20 @@ export function writeEdited(files) {
   }
 }
 
+// The place in a line that the language server means by a column. It counts a column in bytes
+// of UTF-8, and a string is indexed in UTF-16 code units. The two part ways behind the first
+// character outside ASCII on a line: in `"café " ++ name`, `name` is at column 12 and index 11.
+function indexOfColumn(line, column) {
+  let bytes = 0;
+  let index = 0;
+  for (const character of line) {
+    if (bytes >= column) break;
+    bytes += Buffer.byteLength(character);
+    index += character.length;
+  }
+  return index;
+}
+
 // Write the text edits of an LSP WorkspaceEdit to disk and tell the language
 // server about the new contents. Returns one { path, edits } entry per file.
 // Every file is read before the first is written.
@@ -191,8 +205,9 @@ export async function applyWorkspaceEdit(changes, client, workspaceRoot) {
 
     for (const edit of sortedEdits) {
       const { start, end } = edit.range;
-      const before = (lines[start.line] || "").substring(0, start.character);
-      const after = (lines[end.line] || "").substring(end.character);
+      const [first, last] = [lines[start.line] || "", lines[end.line] || ""];
+      const before = first.substring(0, indexOfColumn(first, start.character));
+      const after = last.substring(indexOfColumn(last, end.character));
 
       lines[start.line] = before + edit.newText + after;
       if (end.line > start.line) {

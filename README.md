@@ -110,7 +110,7 @@ When the harness closes the server's input, the server answers the requests it h
 
 ### Known limitations
 
-- **Columns on lines with non-ASCII text.** The language server counts columns in bytes, and the wrapper applies them as character positions. On a line with a non-ASCII character before the symbol, a column in a result is too large by the extra bytes, and an edit lands that far off. A rename of `formatName` in `"café " ++ formatName name` damages that line. Read such a line again after a refactoring has changed it.
+- **Columns on lines with non-ASCII text.** The language server counts columns in bytes. On a line with a non-ASCII character before the symbol, a column in a result is larger than the count of characters by the extra bytes: in `"café " ++ formatName name`, `formatName` is at column 12 and not at 11. Pass a column to a tool as a result gave it. Edits land where they belong, on such a line as on any other. `elm_diagnostics` is the exception: it prints the line and the column of the compiler's own report, which count from 1 and by characters.
 - **Windows.** File paths and the setup script assume a POSIX system.
 
 ## Features

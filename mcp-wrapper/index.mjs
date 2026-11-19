@@ -82,8 +82,8 @@ const INSTRUCTIONS =
   "and that differs between harnesses. " +
   "Lines and characters in arguments are 0-indexed. Locations in results have 1-indexed lines. " +
   "Refactoring tools write their edits to disk, so read a file again before you edit it further. " +
-  "On a line with non-ASCII text before the symbol, columns in results count bytes and an edit can land a few characters off, " +
-  "so check such a line after a tool has changed it.";
+  "On a line with non-ASCII text before the symbol, columns in results count bytes. Pass such a column to a tool as the result gave it. " +
+  "elm_diagnostics prints the compiler's own line and column, which count from 1 and by characters.";
 
 // The tool calls that are running now. A refactoring among them has files left
 // to write, so the server does not leave before they are done.

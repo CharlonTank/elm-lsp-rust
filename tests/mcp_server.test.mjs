@@ -420,22 +420,40 @@ test("with --project-tools, tools at the root of a monorepo are found from the E
   assert.equal(readFileSync(record, "utf-8"), `--yes ${file}\n`);
 });
 
-// The language server counts columns in bytes and the wrapper applies them as
-// character positions. Until the server settles on one unit, this fails.
-test.todo("a rename lands on its symbol on a line with non-ASCII text before it", async (t) => {
+// The language server counts columns in bytes, and a string is indexed in UTF-16 code units
+test("a rename lands on its symbol on a line with non-ASCII text before it", async (t) => {
   const project = copyFixture(t);
-  const main = join(project, "src/Main.elm");
-  writeFileSync(main, readFileSync(main, "utf-8").replace('" - Formatted: "', '"café: "'));
+  const at = (name) => join(project, "src", name);
+  // Two bytes for one code unit, and four bytes for two, in front of the name. Together more bytes than the
+  // name has letters, so a column taken for a count of characters points past the name.
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace('" - Formatted: "', '"café \u{1F600}\u{1F600}\u{1F600}\u{1F600}: "'));
+  // A module whose own name holds such letters has them on its module line and in every import of it
+  writeFileSync(
+    at("\u00c9t\u00e9.elm"),
+    "module \u00c9t\u00e9 exposing (first, greeting, last)\n\n\nfirst =\n    1\n\n\ngreeting =\n    2\n\n\nlast =\n    3\n\n\n\u00e9t\u00e9 =\n    last\n\n\nagain =\n    \u00e9t\u00e9\n"
+  );
+  writeFileSync(at("Types.elm"), readFileSync(at("Types.elm"), "utf-8").replace("\n\n", "\n\nimport \u00c9t\u00e9 exposing (first, greeting, last)\n"));
   const client = await connect(t, { cwd: project });
 
-  await callTool(client, "elm_rename_function", {
-    file_path: join(project, "src/Utils.elm"),
-    line: 6,
-    character: 0,
-    old_name: "formatName",
-    newName: "shout",
-  });
-  assert.match(readFileSync(main, "utf-8"), /"café: " \+\+ shout model\.user\.name/);
+  // A column that a result gives is one that a tool takes: the use behind those characters, back to its definition
+  const uses = await callTool(client, "elm_references", { file_path: at("Utils.elm"), line: 6, character: 0 });
+  const line = readFileSync(at("Main.elm"), "utf-8").split("\n").findIndex((text) => text.includes("café"));
+  const [, column] = uses.text.match(new RegExp(`${at("Main.elm")}:${line + 1}:(\\d+)$`, "m")) ?? [];
+  assert.ok(column, uses.text);
+  const found = await callTool(client, "elm_definition", { file_path: at("Main.elm"), line, character: Number(column) });
+  assert.match(found.text, new RegExp(`${at("Utils.elm")}:\\d+:0`));
+  // A column inside a letter of two bytes means that letter: the second byte of the last letter of the use of été
+  const within = await callTool(client, "elm_definition", { file_path: at("\u00c9t\u00e9.elm"), line: 20, character: 8 });
+  assert.match(within.text, new RegExp(`${at("\u00c9t\u00e9.elm")}:16:0`));
+
+  const renamed = await callTool(client, "elm_rename_function", { file_path: at("Utils.elm"), line: 6, character: 0, old_name: "formatName", newName: "shout" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /"café \u{1F600}{4}: " \+\+ shout model\.user\.name/u);
+
+  const inside = await callTool(client, "elm_rename_function", { file_path: at("\u00c9t\u00e9.elm"), line: 7, character: 0, old_name: "greeting", newName: "welcome" });
+  assert.equal(inside.isError, false, inside.text);
+  assert.match(readFileSync(at("\u00c9t\u00e9.elm"), "utf-8"), /^module \u00c9t\u00e9 exposing \(first, welcome, last\)$/m);
+  assert.match(readFileSync(at("Types.elm"), "utf-8"), /^import \u00c9t\u00e9 exposing \(first, welcome, last\)$/m);
 });
 
 test("an answer that quotes non-ASCII source text arrives", async (t) => {

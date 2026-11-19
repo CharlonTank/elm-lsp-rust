@@ -130,31 +130,35 @@ impl ElmLanguageServer {
         col: usize,
         include_dots: bool,
     ) -> Option<String> {
-        // `col` counts characters, so compare it to the character count.
-        // `line.len()` is the byte length, which is larger on a line with
-        // non-ASCII text and let a column past the end index out of bounds.
-        let chars: Vec<char> = line.chars().collect();
-        if col >= chars.len() {
+        // `col` is a column in bytes, as every column of the language server
+        // is: a result gives it so, and it comes back so. One past the end of
+        // the line names no word. One inside a character of several bytes
+        // means that character.
+        if col >= line.len() {
             return None;
         }
-
-        // Find word boundaries
-        let mut start = col;
-        let mut end = col;
+        let col = (0..=col)
+            .rev()
+            .find(|&at| line.is_char_boundary(at))
+            .unwrap_or(0);
 
         let is_word_char =
             |c: char| -> bool { c.is_alphanumeric() || c == '_' || (include_dots && c == '.') };
 
-        while start > 0 && is_word_char(chars[start - 1]) {
-            start -= 1;
-        }
-
-        while end < chars.len() && is_word_char(chars[end]) {
-            end += 1;
-        }
+        // Find word boundaries
+        let start = line[..col]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word_char(*c))
+            .last()
+            .map_or(col, |(at, _)| at);
+        let end = line[col..]
+            .char_indices()
+            .find(|(_, c)| !is_word_char(*c))
+            .map_or(line.len(), |(at, _)| col + at);
 
         if start < end {
-            Some(chars[start..end].iter().collect())
+            Some(line[start..end].to_string())
         } else {
             None
         }
