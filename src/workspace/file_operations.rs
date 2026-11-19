@@ -321,11 +321,10 @@ impl Workspace {
                         let actual_pos = search_start + pos;
 
                         // Make sure it's not part of a larger identifier
-                        let before_ok = actual_pos == 0
-                            || !line
-                                .chars()
-                                .nth(actual_pos - 1)
-                                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
+                        let before_ok = !line[..actual_pos]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
 
                         // "Utils.Extra.pad" names the module Utils.Extra, which lies below
                         // the renamed one and keeps its name: an upper-case word with a

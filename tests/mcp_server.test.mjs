@@ -1009,6 +1009,26 @@ test("a renamed module leaves alone a file that calls another module by its name
   assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
 });
 
+test("a module is renamed on lines that hold letters outside ASCII", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // A use of the module behind such a letter, and then a module whose own name holds two
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("text (greet model.user)", 'text ("café " ++ Utils.helper (greet model.user))'));
+  const client = await connect(t, { cwd: project });
+
+  const there = await callTool(client, "elm_rename_file", { file_path: at("Utils.elm"), new_name: "Été.elm" });
+  assert.equal(there.isError, false, there.text);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Été exposing \(formatName, greet\)$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /text \("café " \+\+ Été\.helper \(greet model\.user\)\)/);
+
+  const back = await callTool(client, "elm_rename_file", { file_path: at("Été.elm"), new_name: "Helpers.elm" });
+  assert.equal(back.isError, false, back.text);
+  assert.match(readFileSync(at("Helpers.elm"), "utf-8"), /^module Helpers exposing \(formatName, greet, helper\)$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /text \("café " \+\+ Helpers\.helper \(greet model\.user\)\)/);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
 test("a port module is renamed and moved like any other module", async (t) => {
   const project = copyFixture(t);
   const at = (name) => join(project, "src", name);
