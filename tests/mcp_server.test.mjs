@@ -1047,6 +1047,27 @@ test("a module is renamed on lines that hold letters outside ASCII", async (t) =
   assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
 });
 
+test("a module is renamed and moved however its module line and its imports are laid out", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // Two spaces, and the word "exposing" on a line of its own, as an old elm-format wrote it. The compiler takes both.
+  // The comment above holds a line that reads like a declaration and is none.
+  const utils = readFileSync(at("Utils.elm"), "utf-8");
+  writeFileSync(at("Utils.elm"), utils.replace(/^module Utils exposing \(([^)]*)\)/, "{- Once this was\nmodule Notes exposing (..)\n-}\nmodule  Utils\n    exposing\n        ($1)"));
+  writeFileSync(at("Types.elm"), readFileSync(at("Types.elm"), "utf-8").replace(/^module Types exposing/, "module   Types   exposing"));
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Utils exposing", "import  Utils\n    exposing"));
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_file", { file_path: at("Utils.elm"), new_name: "Helpers.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(at("Helpers.elm"), "utf-8"), /^\{- Once this was\nmodule Notes exposing \(\.\.\)\n-\}\nmodule  Helpers\n    exposing\n        \(formatName, greet, helper\)/);
+  const moved = await callTool(client, "elm_move_file", { file_path: at("Types.elm"), target_path: "src/Data/Types.elm" });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(readFileSync(at("Data/Types.elm"), "utf-8"), /^module   Data\.Types   exposing /);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Data\.Types exposing \(User, defaultUser\)\nimport  Helpers\n    exposing \(formatName, greet\)$/m);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
 test("a port module is renamed and moved like any other module", async (t) => {
   const project = copyFixture(t);
   const at = (name) => join(project, "src", name);

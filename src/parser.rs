@@ -230,7 +230,7 @@ impl ElmParser {
         &source[node.byte_range()]
     }
 
-    fn node_to_range(&self, node: tree_sitter::Node) -> Range {
+    pub(crate) fn node_to_range(&self, node: tree_sitter::Node) -> Range {
         let start = node.start_position();
         let end = node.end_position();
         Range {

@@ -4082,6 +4082,93 @@ mod tests {
             file_operations::extract_module_name_from_content(ports),
             Some("Ports".to_string())
         );
+
+        let laid_out = "module  Data.RataDie\n    exposing\n        ( RataDie\n        )\n";
+        assert_eq!(
+            file_operations::extract_module_name_from_content(laid_out),
+            Some("Data.RataDie".to_string())
+        );
+
+        // A line in a comment that reads like a declaration is none
+        let below_a_comment =
+            "{- Once this was\nmodule Notes exposing (..)\n-}\nmodule Main exposing (..)\n";
+        assert_eq!(
+            file_operations::extract_module_name_from_content(below_a_comment),
+            Some("Main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_every_name_that_a_tool_gives_a_module_is_one_the_parser_reads() {
+        for name in [
+            "Utils",
+            "\u{c9}t\u{e9}",
+            "Caf\u{e9}2_b",
+            "A\u{1c5}",
+            "A\u{2b0}",
+            "A\u{5d0}",
+        ] {
+            assert!(is_module_segment(name), "{name}");
+            assert_eq!(
+                file_operations::extract_module_name_from_content(&format!(
+                    "module {name} exposing (..)\n"
+                )),
+                Some(name.to_string())
+            );
+        }
+        // The compiler takes a name that starts with two capitals in one letter. The parser does not.
+        let two_in_one = "\u{1c5}ungla";
+        assert!(!is_module_segment(two_in_one));
+        assert_eq!(
+            file_operations::extract_module_name_from_content(&format!(
+                "module {two_in_one} exposing (..)\n"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn test_an_import_is_found_however_it_is_laid_out() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let src = temp_dir.path().join("src");
+        fs::write(
+            src.join("Utils.elm"),
+            "module Utils exposing (helper)\n\n\nhelper =\n    1\n",
+        )
+        .unwrap();
+        let importer = |name: &str, top: &str| {
+            let path = src.join(format!("{name}.elm"));
+            let text = format!("module {name} exposing (..)\n\n{top}\n\n\nvalue =\n    1\n");
+            fs::write(&path, text).unwrap();
+            Url::from_file_path(path).unwrap()
+        };
+        // Two spaces, and "exposing" on a line of its own. The compiler takes both.
+        let spaced = importer("Spaced", "import  Utils exposing (helper)");
+        let split = importer("Split", "import Utils\n    exposing (helper)");
+        // A line in a comment or in a string that reads like an import is none
+        let quoted = importer(
+            "Quoted",
+            "{- import Utils -}\n-- import Utils\ntext =\n    \"\"\"\nimport Utils\n\"\"\"",
+        );
+        workspace.initialize().unwrap();
+
+        let utils = Url::from_file_path(src.join("Utils.elm")).unwrap();
+        let result = workspace.rename_file(&utils, "Helpers.elm").unwrap();
+        let edits = |uri: &Url| {
+            result.changes.get(uri).map(|edits| {
+                edits
+                    .iter()
+                    .map(|edit| {
+                        let Range { start, end } = edit.range;
+                        (start.line, start.character, end.character)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(edits(&spaced), Some(vec![(2, 8, 13)]));
+        assert_eq!(edits(&split), Some(vec![(2, 7, 12)]));
+        assert_eq!(edits(&quoted), None);
+        assert_eq!(result.files_updated, 2);
     }
 
     #[test]
@@ -4249,19 +4336,37 @@ value = help
     }
 
     #[test]
-    fn test_find_module_declaration_range() {
-        let content = "module MyModule exposing (..)\n\nvalue = 42";
-        let range = file_operations::find_module_declaration_range(content);
-
-        assert!(range.is_some());
-        let range = range.unwrap();
-        assert_eq!(range.start.line, 0);
-        assert_eq!(range.start.character, 0);
-
-        // Of a port module, the range begins at the word "module" and ends behind "exposing"
-        let ports = "port module Ports exposing (send)\n";
-        let range = file_operations::find_module_declaration_range(ports).unwrap();
-        assert_eq!((range.start.character, range.end.character), (5, 26));
+    fn test_find_module_name_range() {
+        let range = |content: &str| {
+            file_operations::find_module_name_range(content)
+                .map(|range| (range.start.line, range.start.character, range.end.character))
+        };
+        assert_eq!(
+            range("module MyModule exposing (..)\n\nvalue = 42"),
+            Some((0, 7, 15))
+        );
+        assert_eq!(
+            range("port module Ports exposing (send)\n"),
+            Some((0, 12, 17))
+        );
+        // Columns count bytes, as everywhere in the language server: "Été" is five of them
+        assert_eq!(range("module Été exposing (..)\n"), Some((0, 7, 12)));
+        // The compiler takes any number of spaces, and the word "exposing" on
+        // the next line, where an old elm-format put it
+        assert_eq!(range("module  Utils   exposing (..)\n"), Some((0, 8, 13)));
+        assert_eq!(
+            range("-- a date\nmodule RataDie\n    exposing\n        ( RataDie\n        )\n"),
+            Some((1, 7, 14))
+        );
+        // A line in a comment above the declaration that reads like one
+        assert_eq!(
+            range("{-\nmodule Notes exposing (..)\n-}\nmodule Main exposing (..)\n"),
+            Some((3, 7, 11))
+        );
+        // A line that only begins like a module line
+        assert_eq!(range("module Utils is the one to read\n"), None);
+        assert_eq!(range("module Utils\n\nexposing nothing\n"), None);
+        assert_eq!(range("module utils exposing (..)\n"), None);
     }
 
     #[test]
