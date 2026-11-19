@@ -567,8 +567,8 @@ export const tools = [
     description:
       "Move a function from one module to another. Imports that list it by name, as in " +
       "`import Utils exposing (greet)`, are pointed at the new module. Uses by qualified name, " +
-      "through an alias or through `exposing (..)` stay as they were, and so do the imports the " +
-      "function needs and the functions of its old module that it calls: " +
+      "through an alias or through `exposing (..)` stay as they were, and so do the target module's " +
+      "own import of the function, the imports the function needs and the functions of its old module that it calls: " +
       "run elm_diagnostics on the project's entry module afterwards",
     input: {
       file_path: elmFile("Path to the source file containing the function"),

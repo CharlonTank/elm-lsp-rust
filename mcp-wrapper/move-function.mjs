@@ -12,12 +12,164 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { ToolError } from "./errors.mjs";
 import { projectDirectories, readForEdit, toFileUri, writeEdited } from "./workspace.mjs";
 
-// The name that a file declares, as a module or as a port module. A part of it holds letters
-// of any script, digits and underscores.
+// A module declaration up to the parenthesis that opens its exposing list, for a module and for
+// a port module. A part of the name holds letters of any script, digits and underscores.
+const MODULE_DECLARATION = /^(?:port\s+)?module\s+([\p{L}\d_.]+)\s+exposing\s*\(/mu;
+
+// The text with every comment turned into spaces, so that each character keeps its place. A
+// block comment can hold another, and a line comment ends with its line. What a comment holds is
+// then no part of what is read: a parenthesis, a comma, a line that reads like an import. A
+// string is not told from code, which does no harm here, because the module declaration and the
+// imports stand above the first string of a file, and nothing below them is read.
+function withoutComments(text) {
+  let code = "";
+  let depth = 0;
+  let at = 0;
+  while (at < text.length) {
+    if (text.startsWith("{-", at)) {
+      depth++;
+      code += "  ";
+      at += 2;
+    } else if (depth > 0 && text.startsWith("-}", at)) {
+      depth--;
+      code += "  ";
+      at += 2;
+    } else if (depth === 0 && text.startsWith("--", at)) {
+      const lineEnd = text.indexOf("\n", at);
+      const end = lineEnd === -1 ? text.length : lineEnd;
+      code += " ".repeat(end - at);
+      at = end;
+    } else {
+      code += depth > 0 && text[at] !== "\n" ? " " : text[at];
+      at++;
+    }
+  }
+  return code;
+}
+
+// The name that a file declares, as a module or as a port module.
 function moduleNameOf(content, file) {
-  const match = content.match(/^(?:port\s+)?module\s+([\p{L}\d_.]+)\s+exposing/mu);
+  const match = withoutComments(content).match(MODULE_DECLARATION);
   if (!match) throw new ToolError(`Cannot move function: ${file} declares no module`);
   return match[1];
+}
+
+// The exposing list whose parenthesis opens at `open` in `code`, a text without its comments:
+// where its parentheses stand, and each item with the place it takes up between the commas and
+// the place of its name in there. The list can lie on one line or on several, and an item such
+// as Msg(..) has parentheses of its own. Nothing where the list does not close.
+function listAt(code, open) {
+  const items = [];
+  let depth = 0;
+  let start = open + 1;
+  for (let at = open; at < code.length; at++) {
+    if (code[at] === "(") depth++;
+    if (code[at] === ")") depth--;
+    if (depth === 0 || (depth === 1 && code[at] === ",")) {
+      const text = code.slice(start, at);
+      items.push({ start, end: at, name: text.trim(), nameStart: at - text.trimStart().length, nameEnd: start + text.trimEnd().length });
+      start = at + 1;
+    }
+    if (depth === 0) return { open, close: at, items };
+  }
+  return null;
+}
+
+// The exposing list of a module declaration, in a text without its comments
+function declaredListIn(code) {
+  const declaration = code.match(MODULE_DECLARATION);
+  return declaration ? listAt(code, declaration.index + declaration[0].length - 1) : null;
+}
+
+// The exposing list of a file's module declaration
+const declaredList = (content) => declaredListIn(withoutComments(content));
+
+// A line that begins an import
+const IMPORT = /^import(\s|$)/;
+
+// Where the imports of a file stand, in a text without its comments: its lines, the first one
+// below the module declaration, which ends where its exposing list closes, and the one on which
+// the first declaration begins. That one starts in the first column and is no import. A line
+// further down that reads like an import stands in a string.
+function importLines(code) {
+  const lines = code.split("\n");
+  const list = declaredListIn(code);
+  const from = list ? code.slice(0, list.close).split("\n").length : 0;
+  const to = lines.findIndex((line, at) => at >= from && /^\S/.test(line) && !IMPORT.test(line));
+  return { lines, from, to: to === -1 ? lines.length : to };
+}
+
+// The exposing lists of a file's imports of a module, each with the place where the word
+// "exposing" stands. A file can import a module more than once, and an import can give the
+// module another name on the way. One without such a list is none of these.
+function importedLists(content, moduleName) {
+  const code = withoutComments(content);
+  const { lines, to } = importLines(code);
+  const name = moduleName.replaceAll(".", "\\.");
+  const imports = lines.slice(0, to).join("\n").matchAll(new RegExp(`^import\\s+${name}(?:\\s+as\\s+[\\p{L}\\d_]+)?\\s+(exposing\\s*\\()`, "gmu"));
+  return [...imports].flatMap((found) => {
+    const list = listAt(code, found.index + found[0].length - 1);
+    return list ? [{ ...list, exposing: found.index + found[0].length - found[1].length }] : [];
+  });
+}
+
+const indexIn = (list, name) => list.items.findIndex((item) => item.name === name);
+
+// The text with `name` at the end of a list, or nothing where the list needs no change: it
+// exposes everything, or the name already. Where the closing parenthesis has a line to itself,
+// as elm-format lays out a long list, the name gets a line of its own above it. Elsewhere it
+// follows the last name, in front of whatever stands between that one and the parenthesis.
+function withItem(content, list, name) {
+  if (list.items.some((item) => item.name === ".." || item.name === name)) return null;
+  const lineStart = content.lastIndexOf("\n", list.close) + 1;
+  const indent = content.slice(lineStart, list.close);
+  const { nameEnd } = list.items.at(-1);
+  return lineStart > list.open && indent.trim() === ""
+    ? `${content.slice(0, lineStart)}${indent}, ${name}\n${content.slice(lineStart)}`
+    : `${content.slice(0, nameEnd)}, ${name}${content.slice(nameEnd)}`;
+}
+
+// The text without the item at `index` of a list that holds more than this one. The comma in
+// front of the item goes with it. Where the two have a line to themselves, as elm-format lays
+// out a long list, that line goes too, with a comment that stands behind the name on it. The
+// lines below stay: a list can hold comments, such as names that are commented out or the title
+// of a group. An item that shares its line with another leaves the line and its end as they
+// were, so that a list in groups keeps its groups. The first item of a list has no comma in
+// front, so the comma behind it goes, and the next item moves up to the parenthesis. Where
+// comments stand between the two, they stay on their lines, and so does the next item.
+// Where the comma in front stands on a line above the name, what follows it there stays, as
+// the other comment lines do: a comment behind the name above, in a list with its commas at
+// the ends of the lines, or a comment that the comma puts in front of the name. The comma
+// behind the name goes instead where it stands on the line of the name, and the comma in front
+// stays with the name above. Elsewhere the comma in front goes after all: at the last name of
+// such a list, and where the comma behind begins the line below, as in a list whose commas end
+// some lines and begin others.
+function withoutItem(content, list, index) {
+  const item = list.items[index];
+  // Where the line of the name ends, if the name is the last on it. A block comment that opens
+  // behind the name and closes further down keeps the line in place.
+  const lineEnd = content.indexOf("\n", item.nameEnd);
+  const endsLine = lineEnd !== -1 && lineEnd < item.end && depthBehind(content.slice(item.nameEnd, lineEnd), 0) === 0;
+  if (index === 0) {
+    const next = list.items[1];
+    const between = content.slice(endsLine ? lineEnd : item.nameEnd, item.end);
+    if (between.trim() === "") return content.slice(0, item.nameStart) + content.slice(next.start).trimStart();
+    return content.slice(0, item.nameStart).replace(/[ \t]+$/, "") + between + " " + content.slice(next.start);
+  }
+  const comma = item.start - 1;
+  const lineStart = content.lastIndexOf("\n", comma) + 1;
+  const nameLine = content.lastIndexOf("\n", item.nameStart) + 1;
+  if (endsLine && nameLine === lineStart && content.slice(lineStart, comma).trim() === "") return content.slice(0, lineStart) + content.slice(lineEnd + 1);
+  if (nameLine <= comma) return content.slice(0, comma) + content.slice(item.nameEnd);
+
+  const next = list.items[index + 1];
+  const commaBehind = next !== undefined && (lineEnd === -1 || item.end < lineEnd);
+  const above = commaBehind ? content.slice(0, nameLine) : content.slice(0, comma) + content.slice(comma + 1, nameLine);
+  // Nothing else on the line of the name: no other name in front of it or behind it, and no parenthesis
+  const alone = content.slice(nameLine, item.nameStart).trim() === "" && lineEnd !== -1 && lineEnd < (next?.nameStart ?? list.close);
+  if (alone && depthBehind(content.slice(item.nameEnd, lineEnd), 0) === 0) return above + content.slice(lineEnd + 1);
+  const inFront = content.slice(nameLine, item.nameStart);
+  return commaBehind ? above + inFront + content.slice(next.start).replace(/^[ \t]+/, "") : above + inFront + content.slice(item.nameEnd);
 }
 
 // First and last line of the function, including its type signature.
@@ -59,21 +211,86 @@ function functionBounds(lines, functionName, funcLine) {
   return { start, end };
 }
 
-// Index for a new import line. It goes before the first import, or two lines
-// below the module declaration when the file has no imports yet.
-function importInsertIndex(lines) {
-  const firstImport = lines.findIndex((line) => line.trim().startsWith("import "));
-  if (firstImport > 0) return firstImport;
-
-  const moduleLine = lines.findIndex((line) => line.includes("module "));
-  return moduleLine === -1 ? 0 : moduleLine + 2;
+// How deep in block comments a line ends that begins `depth` deep. A block comment can hold
+// another, and outside of one "--" makes a comment of the rest of the line.
+function depthBehind(line, depth) {
+  for (let at = 0; at < line.length; at++) {
+    if (line.startsWith("{-", at)) {
+      depth++;
+      at++;
+    } else if (depth > 0 && line.startsWith("-}", at)) {
+      depth--;
+      at++;
+    } else if (depth === 0 && line.startsWith("--", at)) {
+      break;
+    }
+  }
+  return depth;
 }
 
-// Index of the single-line module declaration with an explicit exposing list,
-// or -1 when the module exposes everything or has no such line.
-function exposingLineIndex(lines) {
-  const index = lines.findIndex((line) => line.includes("module ") && line.includes(" exposing "));
-  return index !== -1 && !lines[index].includes("exposing (..)") ? index : -1;
+// The doc comments that open in the lines `from` to `to`, a stretch that holds nothing but
+// comments and begins `depth` deep in block comments. A doc comment opens with "{-|" in the
+// first column, outside of any other comment. Each is told by the lines on which it opens and
+// closes.
+function docCommentsIn(lines, from, to, depth = 0) {
+  const docs = [];
+  for (let at = from; at < to; at++) {
+    const open = depth === 0 && lines[at].startsWith("{-|") ? at : -1;
+    depth = depthBehind(lines[at], depth);
+    if (open === -1) continue;
+    while (depth > 0 && at + 1 < to) {
+      depth = depthBehind(lines[++at], depth);
+    }
+    docs.push({ open, close: at });
+  }
+  return docs;
+}
+
+// What a file holds above its first declaration, which begins on line `to`: the module
+// declaration, the imports, and comments. `firstImport` is the line of the first import, and
+// `below` the line that an import can follow where there is none: the last one of the module
+// declaration, or of a comment that it opens. Of the doc comments, the compiler takes the first
+// one for the module's and the last one above a declaration for that declaration's. A single
+// doc comment could be either. It is taken for the declaration's where the declaration starts
+// right below it, and for the module's where anything stands in between, as elm-format lays
+// the two out.
+function headOf(lines) {
+  const code = withoutComments(lines.join("\n"));
+  const { lines: codeLines, from, to } = importLines(code);
+  const firstImport = codeLines.findIndex((line, at) => at >= from && at < to && IMPORT.test(line));
+
+  let [below, depth] = [from - 1, 0];
+  if (from > 0) {
+    const close = declaredListIn(code).close;
+    depth = depthBehind(lines[below].slice(close - code.lastIndexOf("\n", close)), 0);
+    while (depth > 0 && below + 1 < to) {
+      depth = depthBehind(lines[++below], depth);
+    }
+  }
+  const docs = firstImport === -1 ? docCommentsIn(lines, below + 1, to) : [];
+  const ofDeclaration = from === 0 || docs[0]?.close + 1 === to;
+  return { firstImport, below, moduleDoc: ofDeclaration ? undefined : docs[0] };
+}
+
+// The lines with one more import. It goes in front of the first import. In a file that has
+// none it goes below the module declaration and below the doc comment of the module: an import
+// above that comment would make it the comment of the first declaration. A blank line stands
+// in between. A caller that has changed the lines since hands in what headOf found before:
+// without its first declaration, a file can read otherwise.
+function withImport(lines, importLine, { firstImport, below, moduleDoc } = headOf(lines)) {
+  if (firstImport !== -1) return [...lines.slice(0, firstImport), importLine, ...lines.slice(firstImport)];
+  if (below === -1) return [importLine, ...lines];
+  const last = moduleDoc?.close ?? below;
+  return [...lines.slice(0, last + 1), "", importLine, ...lines.slice(last + 1)];
+}
+
+// The text with a name exposed from an import of a module: in the first exposing list of such
+// an import, unless one of them has the name or everything already, and in an import of its own
+// where the file has no such list.
+function withExposed(content, moduleName, name, head) {
+  const lists = importedLists(content, moduleName);
+  if (lists.length === 0) return withImport(content.split("\n"), `import ${moduleName} exposing (${name})`, head).join("\n");
+  return lists.map((list) => withItem(content, list, name)).includes(null) ? content : withItem(content, lists[0], name);
 }
 
 // What the disk knows a regular file by, whatever name leads to it: a link to a file and a
@@ -126,36 +343,18 @@ function elmFilesIn(dir, seen) {
 // Point an importing file at the function's new module. Returns the new
 // content, or null when the file does not expose the function from the source.
 function retargetImport(content, functionName, sourceModuleName, targetModuleName) {
-  const importRegex = new RegExp(`import\\s+${sourceModuleName}\\s+exposing\\s*\\(([^)]+)\\)`);
-  const match = content.match(importRegex);
-  const exposed = match ? match[1].split(",").map((s) => s.trim()) : [];
-  if (!exposed.includes(functionName)) return null;
+  const source = importedLists(content, sourceModuleName).find((list) => indexIn(list, functionName) !== -1);
+  if (!source) return null;
 
-  let newContent = content;
+  // Drop the function from the source import. One that exposed nothing else stays without its
+  // list, because the file can name the module by itself as well, as in Utils.greet.
+  const without =
+    source.items.length > 1
+      ? withoutItem(content, source, indexIn(source, functionName))
+      : content.slice(0, source.exposing).trimEnd() + content.slice(source.close + 1);
 
-  // Drop the function from the source import, or the whole line if it was alone
-  const remaining = exposed.filter((s) => s !== functionName);
-  if (remaining.length > 0) {
-    newContent = newContent.replace(importRegex, `import ${sourceModuleName} exposing (${remaining.join(", ")})`);
-  } else {
-    newContent = newContent.replace(new RegExp(`import\\s+${sourceModuleName}\\s+exposing\\s*\\([^)]+\\)\\n?`), "");
-  }
-
-  // Expose it from the target import, adding that import when missing
-  const targetImportRegex = new RegExp(`import\\s+${targetModuleName}\\s+exposing\\s*\\(([^)]+)\\)`);
-  const targetMatch = newContent.match(targetImportRegex);
-  if (!targetMatch) {
-    const lines = newContent.split("\n");
-    lines.splice(importInsertIndex(lines), 0, `import ${targetModuleName} exposing (${functionName})`);
-    return lines.join("\n");
-  }
-
-  const targetItems = targetMatch[1].split(",").map((s) => s.trim());
-  if (!targetItems.includes(functionName)) {
-    targetItems.push(functionName);
-    newContent = newContent.replace(targetImportRegex, `import ${targetModuleName} exposing (${targetItems.join(", ")})`);
-  }
-  return newContent;
+  // Expose it from an import of the target instead
+  return withExposed(without, targetModuleName, functionName);
 }
 
 /**
@@ -188,39 +387,25 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
   }
   const newTargetLines = [...targetLines];
   newTargetLines.splice(insertLine, 0, "", "", functionText, "");
-
-  const targetExposing = exposingLineIndex(newTargetLines);
-  if (targetExposing !== -1) {
-    const line = newTargetLines[targetExposing];
-    const closeParenIdx = line.lastIndexOf(")");
-    if (closeParenIdx !== -1) {
-      newTargetLines[targetExposing] = line.slice(0, closeParenIdx) + ", " + functionName + ")";
-    }
-  }
+  const appended = newTargetLines.join("\n");
+  const targetList = declaredList(appended);
+  const exposed = targetList && withItem(appended, targetList, functionName);
 
   // Source: cut the function, collapse the blank lines it leaves behind,
-  // stop exposing it, and import it from the target instead
+  // import it from the target instead, and stop exposing it
   const newSourceLines = [...sourceLines];
   newSourceLines.splice(start, end - start + 1);
   while (newSourceLines[start]?.trim() === "" && newSourceLines[start + 1]?.trim() === "") {
     newSourceLines.splice(start, 1);
   }
-
-  const sourceExposing = exposingLineIndex(newSourceLines);
-  if (sourceExposing !== -1) {
-    const match = newSourceLines[sourceExposing].match(/exposing\s*\(([^)]+)\)/);
-    if (match) {
-      const items = match[1].split(",").map((s) => s.trim()).filter((s) => s !== functionName);
-      if (items.length > 0) {
-        newSourceLines[sourceExposing] = newSourceLines[sourceExposing].replace(
-          /exposing\s*\([^)]+\)/,
-          `exposing (${items.join(", ")})`
-        );
-      }
-    }
-  }
-
-  newSourceLines.splice(importInsertIndex(newSourceLines), 0, `import ${targetModuleName} exposing (${functionName})`);
+  // The head is read from the file as it was. With its first function gone, the doc comment of
+  // the next one could pass for the module's, and the import would part the two.
+  const cut = withExposed(newSourceLines.join("\n"), targetModuleName, functionName, headOf(sourceLines));
+  const sourceList = declaredList(cut);
+  const exposedAt = sourceList ? indexIn(sourceList, functionName) : -1;
+  // A list has to hold something, so the only name in one stays
+  const stays = exposedAt !== -1 && sourceList.items.length === 1;
+  const hidden = exposedAt === -1 || stays ? cut : withoutItem(cut, sourceList, exposedAt);
 
   // Every other file that exposed the function from the source module. All of
   // them are read before the first file is written, so that a file that cannot
@@ -235,18 +420,22 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
     .filter(([, newContent]) => newContent !== null);
   const filesUpdated = retargeted.length;
 
-  const written = [[absPath, newSourceLines.join("\n")], [absTargetModule, newTargetLines.join("\n")], ...retargeted];
+  const written = [[absPath, hidden], [absTargetModule, exposed ?? appended], ...retargeted];
   writeEdited(written);
   for (const [filePath, content] of written) {
     await client.notifyFileChanged(toFileUri(filePath), content);
   }
 
-  return (
-    `Successfully moved "${functionName}" from ${sourceModuleName} to ${targetModuleName}.\n` +
-    `- Removed function from source file\n` +
-    `- Added function to target file\n` +
-    `- Updated source module's exposing list\n` +
-    `- Updated target module's exposing list\n` +
-    `- Updated imports in ${filesUpdated} other file(s).`
-  );
+  // A list that needed no change gets no line, such as one that exposes everything or one that never held the function
+  const left = `- Left "${functionName}" in source module's exposing list, where it is the only name. A list cannot be empty, so change it yourself`;
+  return [
+    `Successfully moved "${functionName}" from ${sourceModuleName} to ${targetModuleName}.`,
+    "- Removed function from source file",
+    "- Added function to target file",
+    exposedAt !== -1 && (stays ? left : "- Updated source module's exposing list"),
+    exposed && "- Updated target module's exposing list",
+    `- Updated imports in ${filesUpdated} other file(s).`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

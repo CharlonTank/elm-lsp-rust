@@ -1694,6 +1694,205 @@ test("a function is moved into a port module whose name holds a digit", async (t
   assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Step2 exposing \(formatName\)$/m);
 });
 
+test("a module without an import gets its first one above its declarations, whatever a string below holds", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // A template in a string, with a line that reads like an import in the first column and one that is indented
+  const page = ["page : String", "page =", '    """', "import Html exposing (text)", "    import Html.Attributes", '"""'];
+  writeFileSync(at("Templates.elm"), ["module Templates exposing (page, title)", "", "", ...page, "", "", "title : String", "title =", '    "Title"', ""].join("\n"));
+  writeFileSync(at("Told.elm"), "module Told exposing (told)\n\n\ntold : Int\ntold =\n    0\n");
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", "import Browser\nimport Templates\nimport Told\n"));
+  const client = await connect(t, { cwd: project });
+
+  const moved = await callTool(client, "elm_move_function", { file_path: at("Templates.elm"), line: 12, character: 0, function_name: "title", target_module: at("Told.elm") });
+  assert.equal(moved.isError, false, moved.text);
+  const left = readFileSync(at("Templates.elm"), "utf-8");
+  assert.ok(left.startsWith(["module Templates exposing (page)", "", "import Told exposing (title)", "", "", ...page, ""].join("\n")), left);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("a function moves between modules whatever their exposing lists look like", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  const write = (name, lines) => writeFileSync(at(name), lines.join("\n") + "\n");
+  const kind = (name) => ["", "", `type ${name}`, `    = ${name}`];
+  const word = (name, body = "text") => ["", "", `${name} : String -> String`, `${name} text =`, `    ${body}`];
+  // A list that elm-format does not get on one line, with an item that has parentheses of its own, and with
+  // comments that hold what a list is made of. The comment on top reads like a module line and is none.
+  // Words imports nothing, so its first import goes below the list, and not into the comment that reads like one.
+  const once = ["{- Once this was", "module Notes exposing (shout)", "-}"];
+  write("Words.elm", [
+    ...once,
+    "module Words exposing",
+    "    ( shout -- loud, (very)",
+    "    , Kind(..)",
+    "    , whisper {- , quiet ( -}",
+    "    )",
+    "",
+    "{- The words.",
+    "import Later (one day)",
+    "-}",
+    ...kind("Kind"),
+    ...word("shout"),
+    ...word("whisper", "shout text"),
+  ]);
+  write("Text.elm", ["module Text exposing", "    ( Case(..) -- every case (for now), and more", "    , lower {- ) -}", "    )", ...kind("Case"), ...word("lower")]);
+  write("Solo.elm", ["module Solo exposing (Flag(..), only {- ) -})", ...kind("Flag"), ...word("only")]);
+  write("Note.elm", ["module Note exposing (keep {- ) -}) -- (", ...word("keep")]);
+  write("One.elm", ["module One exposing (single)", ...word("single")]);
+  // No import, and a doc comment that belongs to the first declaration and not to the module
+  write("Doc.elm", ["module Doc exposing (said, told)", "", "", "{-| What was said.", "-}", "said : String -> String", "said text =", "    text", ...word("told")]);
+  // No import either, and the doc comment of the module below two other comments, each of which holds what opens one
+  const legal = ["", "-- Licensed to no one {-| in particular", "{- All rights", "{-| reserved -}", "-}", "", "{-| The small print.", "-}"];
+  write("Legal.elm", ["module Legal exposing (fine, print)", ...legal, "", "", "{-| What is fine.", "-}", "fine : String -> String", "fine text =", "    text", ...word("print")]);
+  // The module line opens a comment that goes on below it, and the first function is used by the second
+  write("Stamp.elm", ["module Stamp exposing (ink, stamp) {- Licensed", "to no one", "-}", ...word("ink"), ...word("stamp", "ink text")]);
+  // Two doc comments, the module's and the first declaration's, with two other comments between them
+  const noted = ["-- A note.", "{- And another. -}", "{-| Documentation for kept. -}", "kept : String -> String"];
+  write("Noted.elm", ["module Noted exposing (kept, sent)", "", "{-| Module documentation. -}", ...noted, "kept text =", "    text", ...word("sent")]);
+  // A list in groups, as a package lays one out beside its docs: two names to a line
+  write("Grouped.elm", ["module Grouped exposing", "    ( one, two", "    , three, four", "    )", ...word("one"), ...word("two"), ...word("three"), ...word("four")]);
+  // A list with comments on lines of their own, a name that is commented out and the title of a group, and with
+  // comments behind three of its names, one of which closes on the line below
+  const shelved = ["    ( top -- on top", "    -- , gone", "    , middle -- in the middle", "    -- The rest", "    , bottom {- at the", "      bottom -}", "    , under", "    , floor", "    )"];
+  write("Shelf.elm", ["module Shelf exposing", ...shelved, ...["top", "middle", "bottom", "under", "floor"].flatMap((name) => word(name))]);
+  // A list with spaces inside its parentheses, one that closes on the line of its last name, and one with a
+  // comment between a comma and the name behind it
+  write("Wide.elm", ["module Wide exposing ( wide )", ...word("wide")]);
+  write("Closed.elm", ["module Closed exposing", "    ( near", "    , far )", ...word("near"), ...word("far")]);
+  write("Front.elm", ["module Front exposing (ahead, {- then -} behind)", ...word("ahead"), ...word("behind")]);
+  // A list with its commas at the ends of the lines, a comment behind one of them and two names on one line
+  const ends = ["alpha", "beta", "gamma", "delta", "epsilon", "omega"];
+  write("Ends.elm", ["module Ends exposing (alpha,", "    beta, -- about beta", "    gamma,", "    delta, epsilon,", "    omega", "    )", ...ends.flatMap((name) => word(name))]);
+  // A list whose commas end some lines and begin others, with a comment between a comma and the name behind it,
+  // and an import that lists two of its names in the same way
+  const seasons = ["spring", "summer", "autumn", "winter"];
+  write("Seasons.elm", ["module Seasons exposing (spring,", "    summer", "    , -- the fall", "      autumn", "    , winter", "    )", ...seasons.flatMap((name) => word(name))]);
+  write("Calendar.elm", ["module Calendar exposing (year)", "", "import Seasons exposing (spring,", "    summer", "    , winter", "    )", "", "", "year : String", "year =", '    summer (winter "x")']);
+  // A string with a line that reads like an import of shout, in a file that imports nothing
+  const page = ["module Gen exposing (page)", "", "", "page : String", "page =", '    """module Page exposing (view)', "import Words exposing (shout)", '"""'];
+  write("Gen.elm", page);
+  // Four files that take shout from Words. The first has an item with parentheses of its own in front of it,
+  // and in its import of Text. The second has all of Text already, and names Words by itself as well. The third
+  // gives Words another name, and the fourth imports it twice.
+  write("Reader.elm", ["module Reader exposing (read)", "", "import Text exposing (Case(..), lower)", "import Words exposing (Kind(..), shout)", "", "", "read : String", "read =", '    shout (lower "x")']);
+  write("Keeper.elm", ["module Keeper exposing (kept)", "", "import Text exposing (..)", "import Words exposing (shout)", "", "", "kept : ( String, Words.Kind )", "kept =", '    ( shout (lower "x"), Words.Kind )']);
+  write("Aliased.elm", ["module Aliased exposing (loud)", "", "import Words as W exposing (shout)", "", "", "loud : String", "loud =", '    shout "x"']);
+  write("Twice.elm", ["module Twice exposing (twice)", "", "import Words exposing (Kind(..))", "import Words exposing (shout)", "", "", "twice : ( String, Kind )", "twice =", '    ( shout "x", Kind )']);
+  // A build of Main.elm compiles each module it imports
+  const imports = ["Aliased", "Calendar", "Closed", "Doc", "Ends", "Front", "Keeper", "Legal", "Note", "Noted", "Reader", "Seasons", "Shelf", "Solo", "Stamp", "Text", "Twice", "Wide", "Words"].map((name) => `import ${name}\n`).join("");
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", `import Browser\n${imports}`));
+  const client = await connect(t, { cwd: project });
+  const move = (from, name, target = "Text.elm") => {
+    const line = readFileSync(at(from), "utf-8").split("\n").indexOf(`${name} text =`);
+    return callTool(client, "elm_move_function", { file_path: at(from), line, character: 0, function_name: name, target_module: at(target) });
+  };
+  const text = (name) => readFileSync(at(name), "utf-8");
+  const top = (name, lines) => assert.equal(text(name).split("\n").slice(0, lines.length).join("\n"), lines.join("\n"));
+  const lists = ["- Updated source module's exposing list", "- Updated target module's exposing list"];
+
+  // The first name of a list, then its last
+  const first = await move("Words.elm", "shout");
+  assert.deepEqual(first.text.split("\n").slice(3), [...lists, "- Updated imports in 4 other file(s)."]);
+  top("Words.elm", [...once, "module Words exposing", "    ( Kind(..)", "    , whisper {- , quiet ( -}", "    )", "", "import Text exposing (shout)", "", "{- The words."]);
+  top("Text.elm", ["module Text exposing", "    ( Case(..) -- every case (for now), and more", "    , lower {- ) -}", "    , shout", "    )"]);
+  // An import that exposed nothing else stays, since its file can name the module by itself
+  top("Reader.elm", ["module Reader exposing (read)", "", "import Text exposing (Case(..), lower, shout)", "import Words exposing (Kind(..))", ""]);
+  top("Keeper.elm", ["module Keeper exposing (kept)", "", "import Text exposing (..)", "import Words", ""]);
+  top("Aliased.elm", ["module Aliased exposing (loud)", "", "import Text exposing (shout)", "import Words as W", ""]);
+  top("Twice.elm", ["module Twice exposing (twice)", "", "import Text exposing (shout)", "import Words exposing (Kind(..))", "import Words", ""]);
+  assert.equal(text("Gen.elm"), page.join("\n") + "\n");
+  // Words imports Text by now, and takes the second function into that import
+  const last = await move("Words.elm", "whisper");
+  assert.equal(last.isError, false, last.text);
+  top("Words.elm", [...once, "module Words exposing", "    ( Kind(..)", "    )", "", "import Text exposing (shout, whisper)", "", "{- The words."]);
+  top("Text.elm", ["module Text exposing", "    ( Case(..) -- every case (for now), and more", "    , lower {- ) -}", "    , shout", "    , whisper", "    )"]);
+
+  // A list on one line, with the parentheses of another item in front of the name and one more in a comment.
+  // The comment stays where it is in both lists: the name leaves the one in front of it, and joins the other
+  // behind the last name
+  const behind = await move("Solo.elm", "only", "Note.elm");
+  assert.equal(behind.isError, false, behind.text);
+  top("Solo.elm", ["module Solo exposing (Flag(..) {- ) -})", "", "import Note exposing (only)"]);
+  top("Note.elm", ["module Note exposing (keep, only {- ) -}) -- ("]);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+
+  // A list cannot be empty, so the only name in one stays, and the answer says so
+  const only = await move("One.elm", "single");
+  assert.deepEqual(only.text.split("\n").slice(3), [
+    '- Left "single" in source module\'s exposing list, where it is the only name. A list cannot be empty, so change it yourself',
+    lists[1],
+    "- Updated imports in 0 other file(s).",
+  ]);
+  top("One.elm", ["module One exposing (single)", "", "import Text exposing (single)"]);
+
+  // A name that leaves a group leaves the lines of the list as they were
+  const groups = (...list) => text("Grouped.elm").split("\n").slice(1, 1 + list.length);
+  assert.equal((await move("Grouped.elm", "two")).isError, false);
+  assert.deepEqual(groups("", "", ""), ["    ( one", "    , three, four", "    )"]);
+  assert.equal((await move("Grouped.elm", "four")).isError, false);
+  assert.deepEqual(groups("", "", ""), ["    ( one", "    , three", "    )"]);
+  assert.equal((await move("Grouped.elm", "three")).isError, false);
+  assert.deepEqual(groups("", ""), ["    ( one", "    )"]);
+
+  // A name that has a line to itself takes the comment behind it along, and leaves the lines below as they were
+  const shelf = (...list) => assert.deepEqual(text("Shelf.elm").split("\n").slice(1, 2 + list.length), ["    (" + list[0], ...list.slice(1), "    )"]);
+  const rest = ["    -- , gone", "    -- The rest"];
+  assert.equal((await move("Shelf.elm", "middle")).isError, false);
+  shelf(" top -- on top", ...rest, "    , bottom {- at the", "      bottom -}", "    , under", "    , floor");
+  // A comment that goes on below the name stays whole, and keeps the line
+  assert.equal((await move("Shelf.elm", "bottom")).isError, false);
+  shelf(" top -- on top", ...rest, "     {- at the", "      bottom -}", "    , under", "    , floor");
+  // Behind the first name, the comments stay on their lines too, and the next name on its own
+  assert.equal((await move("Shelf.elm", "top")).isError, false);
+  shelf("", ...rest, "     {- at the", "      bottom -}", "      under", "    , floor");
+  // A name joins a list behind its last name, and not behind the space in front of the parenthesis
+  assert.equal((await move("Shelf.elm", "under", "Wide.elm")).isError, false);
+  shelf("", ...rest, "     {- at the", "      bottom -}", "      floor");
+  top("Wide.elm", ["module Wide exposing ( wide, under )"]);
+  // The last name of a list leaves the parenthesis that closes the list on its line
+  assert.equal((await move("Closed.elm", "far")).isError, false);
+  top("Closed.elm", ["module Closed exposing", "    ( near", "     )", "", "import Text exposing (far)"]);
+  // And the first name leaves the comment in front of the next one
+  assert.equal((await move("Front.elm", "ahead")).isError, false);
+  top("Front.elm", ["module Front exposing ({- then -} behind)", "", "import Text exposing (ahead)"]);
+
+  // Where the commas end the lines, a name takes the comma behind it along, and the comment of the name above stays
+  assert.equal((await move("Ends.elm", "gamma")).isError, false);
+  top("Ends.elm", ["module Ends exposing (alpha,", "    beta, -- about beta", "    delta, epsilon,", "    omega", "    )"]);
+  // A name that shares its line leaves the other one on it
+  assert.equal((await move("Ends.elm", "delta")).isError, false);
+  top("Ends.elm", ["module Ends exposing (alpha,", "    beta, -- about beta", "    epsilon,", "    omega", "    )"]);
+  // The last name has no comma behind it, so the one in front goes, from in front of a comment as well
+  assert.equal((await move("Ends.elm", "omega")).isError, false);
+  top("Ends.elm", ["module Ends exposing (alpha,", "    beta, -- about beta", "    epsilon", "    )"]);
+  assert.equal((await move("Ends.elm", "epsilon")).isError, false);
+  top("Ends.elm", ["module Ends exposing (alpha,", "    beta -- about beta", "    )"]);
+  assert.equal((await move("Ends.elm", "beta")).isError, false);
+  top("Ends.elm", ["module Ends exposing (alpha", "    )"]);
+  // Where the comma behind begins the line below, the comma in front goes, in the module line and in an import
+  assert.equal((await move("Seasons.elm", "summer")).isError, false);
+  top("Seasons.elm", ["module Seasons exposing (spring", "    , -- the fall", "      autumn", "    , winter", "    )"]);
+  top("Calendar.elm", ["module Calendar exposing (year)", "", "import Text exposing (summer)", "import Seasons exposing (spring", "    , winter", "    )", ""]);
+  // A comment between a comma and the name behind it stays on its line, though the comma goes
+  assert.equal((await move("Seasons.elm", "autumn")).isError, false);
+  top("Seasons.elm", ["module Seasons exposing (spring", "     -- the fall", "    , winter", "    )"]);
+
+  // The first import of a module goes above the doc comment of its first declaration
+  assert.equal((await move("Doc.elm", "told")).isError, false);
+  top("Doc.elm", ["module Doc exposing (said)", "", "import Text exposing (told)", "", "", "{-| What was said.", "-}", "said : String -> String"]);
+  // And below the doc comment of the module, which is the first one that is no part of another comment
+  assert.equal((await move("Legal.elm", "print")).isError, false);
+  top("Legal.elm", ["module Legal exposing (fine)", ...legal, "", "import Text exposing (print)", "", "", "{-| What is fine.", "-}", "fine : String -> String"]);
+  // Of two doc comments the first is the module's, whatever stands between the two
+  assert.equal((await move("Noted.elm", "sent")).isError, false);
+  top("Noted.elm", ["module Noted exposing (kept)", "", "{-| Module documentation. -}", "", "import Text exposing (sent)", ...noted]);
+  // And below the comment that the module line opens, which an import inside it would be a part of
+  assert.equal((await move("Stamp.elm", "ink")).isError, false);
+  top("Stamp.elm", ["module Stamp exposing (stamp) {- Licensed", "to no one", "-}", "", "import Text exposing (ink)", ""]);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
 test("a function is moved in a project that holds a link to nothing and a dot-file", async (t) => {
   const project = copyFixture(t);
   symlinkSync("someone@host.1234", join(project, "src/.#Main.elm"));
