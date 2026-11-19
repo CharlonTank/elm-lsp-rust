@@ -12,9 +12,12 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { ToolError } from "./errors.mjs";
 import { projectDirectories, readForEdit, toFileUri, writeEdited } from "./workspace.mjs";
 
-function extractModuleName(content) {
-  const match = content.match(/^module\s+([A-Za-z.]+)\s+exposing/m);
-  return match ? match[1] : "Unknown";
+// The name that a file declares, as a module or as a port module. A part of it holds letters
+// of any script, digits and underscores.
+function moduleNameOf(content, file) {
+  const match = content.match(/^(?:port\s+)?module\s+([\p{L}\d_.]+)\s+exposing/mu);
+  if (!match) throw new ToolError(`Cannot move function: ${file} declares no module`);
+  return match[1];
 }
 
 // First and last line of the function, including its type signature.
@@ -166,8 +169,8 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
 
   const { start, end } = functionBounds(sourceLines, functionName, funcLine);
   const functionText = sourceLines.slice(start, end + 1).join("\n");
-  const sourceModuleName = extractModuleName(sourceContent);
-  const targetModuleName = extractModuleName(targetContent);
+  const sourceModuleName = moduleNameOf(sourceContent, absPath);
+  const targetModuleName = moduleNameOf(targetContent, absTargetModule);
 
   const targetUri = toFileUri(absTargetModule);
   await client.openDocument(targetUri, targetContent);

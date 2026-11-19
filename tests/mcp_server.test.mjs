@@ -1556,6 +1556,28 @@ test("while a directory of sources cannot be listed every tool says so", { skip:
   }
 });
 
+test("a function is moved into a port module whose name holds a digit", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  writeFileSync(at("Step2.elm"), "port module Step2 exposing (send)\n\n\nport send : String -> Cmd msg\n");
+  writeFileSync(at("Bare.elm"), "one =\n    1\n");
+  const client = await connect(t, { cwd: project });
+  const move = (target) =>
+    callTool(client, "elm_move_function", { file_path: at("Utils.elm"), line: 6, character: 0, function_name: "formatName", target_module: at(target) });
+  const before = sourcesOf(project);
+
+  // A file without a module line has no name to import the function from
+  assert.deepEqual(await move("Bare.elm"), { text: `Cannot move function: ${at("Bare.elm")} declares no module`, isError: true });
+  assert.deepEqual(sourcesOf(project), before);
+
+  const moved = await move("Step2.elm");
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(readFileSync(at("Step2.elm"), "utf-8"), /^port module Step2 exposing \(send, formatName\)$/m);
+  // Utils.elm still calls the function, and Main.elm listed it in its import of Utils
+  assert.match(readFileSync(at("Utils.elm"), "utf-8"), /^import Step2 exposing \(formatName\)$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Step2 exposing \(formatName\)$/m);
+});
+
 test("a function is moved in a project that holds a link to nothing and a dot-file", async (t) => {
   const project = copyFixture(t);
   symlinkSync("someone@host.1234", join(project, "src/.#Main.elm"));
