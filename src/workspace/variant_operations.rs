@@ -504,7 +504,9 @@ impl Workspace {
                     let mut search_start = 0;
                     while let Some(rel_col) = line[search_start..].find(pattern.as_str()) {
                         let col = search_start + rel_col;
-                        search_start = col + 1; // Move past this match for next iteration
+                        // Move past this match for next iteration, by its first
+                        // character, which can be more than one byte
+                        search_start = col + pattern.chars().next().map_or(1, char::len_utf8);
 
                         // For qualified patterns, calculate where the variant name starts
                         let variant_col = if pattern.contains('.') {
@@ -521,7 +523,7 @@ impl Workspace {
 
                         // Check if it's actually our variant (word boundary check)
                         let after_match = col + pattern.len();
-                        let char_after = line.chars().nth(after_match);
+                        let char_after = line[after_match..].chars().next();
                         let is_word_boundary = char_after
                             .map(|c| !c.is_alphanumeric() && c != '_')
                             .unwrap_or(true);
@@ -532,7 +534,7 @@ impl Workspace {
 
                         // Also check char before for word boundary (avoid matching inside another identifier)
                         if col > 0 {
-                            let char_before = line.chars().nth(col - 1);
+                            let char_before = line[..col].chars().next_back();
                             let is_start_boundary = char_before
                                 .map(|c| !c.is_alphanumeric() && c != '_')
                                 .unwrap_or(true);

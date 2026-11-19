@@ -577,6 +577,106 @@ test.todo("a moved function takes along the imports it needs", async (t) => {
   assert.match(readFileSync(target, "utf-8"), /^import Types exposing \(User\)$/m);
 });
 
+test("the uses of a variant that starts with a letter outside ASCII are found", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Saison.elm");
+  // ÀÉté holds the variant's name behind a letter of two bytes, and is another variant
+  const lines = [
+    "module Saison exposing (Saison(..), nom)",
+    "",
+    "",
+    "type Saison",
+    "    = Été",
+    "    | Hiver",
+    "    | Automne",
+    "",
+    "",
+    "nom : Saison -> String",
+    "nom saison =",
+    "    case saison of",
+    "        Été ->",
+    '            "été"',
+    "",
+    "        Hiver ->",
+    '            "hiver"',
+    "",
+    "        Automne ->",
+    '            "automne"',
+    "",
+    "",
+    "type Durée",
+    "    = ÀÉté",
+    "",
+    "",
+    "durée : Durée",
+    "durée =",
+    "    ÀÉté",
+    "",
+  ];
+  writeFileSync(file, lines.join("\n"));
+  const client = await connect(t, { cwd: project });
+
+  const preview = await callTool(client, "elm_prepare_remove_variant", { file_path: file, line: 4, character: 6, variant_name: "Été" });
+  assert.equal(preview.isError, false, preview.text);
+  assert.match(preview.text, /^Variant: Été \(1\/3 in type Saison\)/);
+  assert.match(preview.text, /^Pattern usages \(auto-removable\): 1\nCan remove: Yes$/m);
+  const removed = await callTool(client, "elm_remove_variant", { file_path: file, line: 4, character: 6, variant_name: "Été" });
+  assert.equal(removed.isError, false, removed.text);
+  assert.equal(readFileSync(file, "utf-8"), [...lines.slice(0, 4), "    = Hiver", ...lines.slice(6, 12), ...lines.slice(14)].join("\n"));
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: file }), { text: "No errors or warnings", isError: false });
+});
+
+test("a function and a variant take a name that starts with a letter outside ASCII", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Saison.elm");
+  // étés holds the name été, and is another function
+  const lines = [
+    ...["module Saison exposing (Saison(..), saison, étés)", "", "", "type Saison", "    = Hiver", "    | Automne", "", ""],
+    ...["saison : Saison", "saison =", "    Hiver", "", "", "étés : Int", "étés =", "    2", "", ""],
+    ...["type alias Jour =", "    { nom : String }", ""],
+  ];
+  writeFileSync(file, lines.join("\n"));
+  const client = await connect(t, { cwd: project });
+  const rename = (kind, line, character, from, to) => callTool(client, `elm_rename_${kind}`, { file_path: file, line, character, old_name: from, newName: to });
+
+  // What is no name does not reach the language server: nothing, two words, a letter of the wrong case
+  for (const [kind, line, character, from, to] of [
+    ["function", 9, 0, "saison", ""],
+    ["function", 9, 0, "saison", "Format Name"],
+    ["function", 9, 0, "saison", "Été"],
+    ["variant", 4, 6, "Hiver", "été"],
+    ["type", 3, 5, "Saison", "saison"],
+    ["field", 19, 6, "nom", "Nom"],
+  ]) {
+    assert.deepEqual(await rename(kind, line, character, from, to), {
+      text: `"${to}" is no name for a ${kind}. It has to start with ${["function", "field"].includes(kind) ? "a lower-case" : "an upper-case"} letter and hold only letters, digits and underscores`,
+      isError: true,
+    });
+  }
+  // Nor does a word that the compiler keeps for itself
+  for (const [kind, line, character, from, to] of [
+    ["function", 9, 0, "saison", "type"],
+    ["field", 19, 6, "nom", "of"],
+  ]) {
+    assert.deepEqual(await rename(kind, line, character, from, to), { text: `"${to}" is no name for a ${kind}. It is one of Elm's reserved words`, isError: true });
+  }
+  // A new variant is named the same way. What it holds is another argument, and no part of its name.
+  for (const tool of ["elm_prepare_add_variant", "elm_add_variant"]) {
+    assert.deepEqual(await callTool(client, tool, { file_path: file, type_name: "Saison", new_variant_name: "Été Int" }), {
+      text: '"Été Int" is no name for a variant. It has to start with an upper-case letter and hold only letters, digits and underscores',
+      isError: true,
+    });
+  }
+  assert.equal(readFileSync(file, "utf-8"), lines.join("\n"));
+
+  // The name of another function in the file is taken, and a name that only begins like it is free
+  assert.deepEqual(await rename("function", 9, 0, "saison", "étés"), { text: "Error: Rename not possible for this function", isError: true });
+  assert.equal((await rename("function", 9, 0, "saison", "été")).isError, false);
+  assert.equal((await rename("variant", 4, 6, "Hiver", "Été")).isError, false);
+  assert.equal(readFileSync(file, "utf-8"), lines.join("\n").replaceAll("saison", "été").replaceAll("Hiver", "Été"));
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: file }), { text: "No errors or warnings", isError: false });
+});
+
 test("an answer that quotes non-ASCII source text arrives", async (t) => {
   const project = copyFixture(t);
   const file = join(project, "src/Drinks.elm");

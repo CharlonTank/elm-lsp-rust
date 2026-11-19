@@ -128,6 +128,24 @@ function assertExpectedName(kind, expected, found, line, reason) {
   }
 }
 
+// A new name is written into every file that uses the old one, so what is no name stops here.
+// The compiler takes a first letter of the right case, then letters of any script, the digits 0
+// to 9 and underscores. It keeps fourteen words for itself, and none of them names anything.
+const NAMES = {
+  lower: [/^\p{Ll}[\p{L}0-9_]*$/u, "a lower-case letter"],
+  upper: [/^\p{Lu}[\p{L}0-9_]*$/u, "an upper-case letter"],
+};
+const RESERVED_WORDS = new Set(["if", "then", "else", "case", "of", "let", "in", "type", "module", "where", "import", "exposing", "as", "port"]);
+function assertName(kind, name, letterCase) {
+  const [pattern, first] = NAMES[letterCase];
+  if (!pattern.test(name)) {
+    throw new ToolError(`"${name}" is no name for a ${kind}. It has to start with ${first} and hold only letters, digits and underscores`);
+  }
+  if (RESERVED_WORDS.has(name)) {
+    throw new ToolError(`"${name}" is no name for a ${kind}. It is one of Elm's reserved words`);
+  }
+}
+
 async function applyEdits(changes, client, workspaceRoot) {
   const applied = await applyWorkspaceEdit(changes, client, workspaceRoot);
   return {
@@ -159,7 +177,7 @@ function formatConstructorUsages(usages) {
 
 // elm_rename_variant, elm_rename_type and elm_rename_function differ only in
 // the server command and in wording.
-function renameTool({ kind, command, description, fileDescription, validateNewName }) {
+function renameTool({ kind, command, description, fileDescription }) {
   return {
     name: `elm_rename_${kind}`,
     title: `Rename ${kind}`,
@@ -172,7 +190,7 @@ function renameTool({ kind, command, description, fileDescription, validateNewNa
       newName: z.string().describe(`The new name for the ${kind}`),
     },
     async run({ file_path, line, character, old_name, newName }) {
-      validateNewName?.(newName);
+      assertName(kind, newName, kind === "function" ? "lower" : "upper");
       const { client, uri, workspaceRoot } = await openElmFile(file_path);
 
       const result = await client.executeCommand(command, [uri, line, character, newName]);
@@ -505,11 +523,6 @@ export const tools = [
     description:
       "Rename a custom type variant (constructor) across the entire project. Fails if position is not on a variant.",
     fileDescription: "Path to the Elm file containing the type definition",
-    validateNewName(newName) {
-      if (!newName || !/^[A-Z]/.test(newName)) {
-        throw new ToolError("Variant names must start with an uppercase letter");
-      }
-    },
   }),
 
   renameTool({
@@ -540,6 +553,7 @@ export const tools = [
       newName: z.string().describe("The new name for the field"),
     },
     async run({ file_path, line, character, old_name, newName }) {
+      assertName("field", newName, "lower");
       const { client, uri, workspaceRoot } = await openElmFile(file_path);
 
       // prepareRename reports what sits at the position without changing anything
@@ -919,6 +933,7 @@ export const tools = [
       new_variant_name: z.string().describe("Name of the new variant to add (e.g., 'Purple')"),
     },
     async run({ file_path, type_name, new_variant_name }) {
+      assertName("variant", new_variant_name, "upper");
       const { client, uri } = await openElmFile(file_path);
 
       const result = await client.executeCommand("elm.prepareAddVariant", [uri, type_name, new_variant_name]);
@@ -990,6 +1005,8 @@ export const tools = [
         .describe("Array of branch configs. Must match casesNeedingBranch count exactly."),
     },
     async run({ file_path, type_name, new_variant_name, variant_args, branches }) {
+      // What the variant holds goes into variant_args, and a name with it in would be written as it is
+      assertName("variant", new_variant_name, "upper");
       const { client, uri, workspaceRoot } = await openElmFile(file_path);
 
       // The server reads its arguments by position, so branches needs variant_args before it

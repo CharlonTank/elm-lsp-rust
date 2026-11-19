@@ -349,14 +349,15 @@ impl ElmLanguageServer {
                 let mut search_pos = 0;
                 while let Some(pos) = content[search_pos..].find(new_name) {
                     let abs_pos = search_pos + pos;
-                    let before_ok = abs_pos == 0 || {
-                        let c = content.as_bytes()[abs_pos - 1] as char;
-                        !c.is_alphanumeric() && c != '_'
-                    };
-                    let after_ok = abs_pos + new_name.len() >= content.len() || {
-                        let c = content.as_bytes()[abs_pos + new_name.len()] as char;
-                        !c.is_alphanumeric() && c != '_'
-                    };
+                    let in_a_name = |c: char| c.is_alphanumeric() || c == '_';
+                    let before_ok = !content[..abs_pos]
+                        .chars()
+                        .next_back()
+                        .is_some_and(in_a_name);
+                    let after_ok = !content[abs_pos + new_name.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(in_a_name);
                     if before_ok && after_ok {
                         // Found a match - this would cause shadowing
                         let line_num = content[..abs_pos].matches('\n').count() + 1;
@@ -368,7 +369,8 @@ impl ElmLanguageServer {
                         );
                         return Ok(None);
                     }
-                    search_pos = abs_pos + 1;
+                    // On behind the first character of this match, which can be more than one byte
+                    search_pos = abs_pos + new_name.chars().next().map_or(1, char::len_utf8);
                 }
             }
         }
