@@ -81,6 +81,16 @@ test("a clone path with a space is quoted in shell commands and kept whole in co
   assert.ok(aider.includes(`aider --read '/opt/my tools/elm-lsp-rust/skills/elm-refactoring/SKILL.md'`), aider);
 });
 
+test("a clone path with a backtick or a dollar sign in it is kept whole in the plain-text instructions", () => {
+  // The Markdown of a sentence goes before the paths come in, or it takes the path's own backtick along.
+  // And a path is put in as it is: "$&" and "$$" in it are no patterns of a replacement.
+  for (const clone of ["/opt/my`tools/elm-lsp-rust", "/opt/my$&tools$$/elm-lsp-rust"]) {
+    const aider = renderText(findHarness("aider"), installAt(clone));
+    assert.ok(aider.includes(`/run node '${clone}/mcp-wrapper/cli.mjs' doctor`), aider);
+    assert.ok(aider.includes(`aider --read '${clone}/skills/elm-refactoring/SKILL.md'`), aider);
+  }
+});
+
 test("an unknown harness is a usage error that names the known ones", async () => {
   const { code, stderr } = await runNode(CLI, ["config", "emacs"]);
   assert.equal(code, 2);

@@ -215,9 +215,15 @@ export function findHarness(id) {
   return harnesses.find((harness) => harness.id === id);
 }
 
-// The parts of one harness's instructions, with this install's paths filled in.
-function instructions(harness, install) {
-  const fill = (text) => text.replaceAll("{cli}", shellQuote(install.cli)).replaceAll("{skill}", shellQuote(install.skill));
+// The parts of one harness's instructions, with this install's paths filled in. `worded` turns
+// the Markdown of a sentence into what its reader wants, before the paths go in: a path can hold
+// a backtick or two asterisks of its own. It can hold a dollar sign too, which a replacement
+// that is given as text would read as a pattern.
+function instructions(harness, install, worded = (markdown) => markdown) {
+  const fill = (text) =>
+    worded(text)
+      .replaceAll("{cli}", () => shellQuote(install.cli))
+      .replaceAll("{skill}", () => shellQuote(install.skill));
   const config = harness.config?.(install);
   return {
     files: Object.entries(harness.files || {}),
@@ -234,8 +240,8 @@ function instructions(harness, install) {
 
 // Instructions for one harness as plain text, for a terminal or an agent.
 export function renderText(harness, install) {
-  const { files, config, add, run, verify, notes, tested } = instructions(harness, install);
   const plain = (markdown) => markdown.replaceAll("**", "").replaceAll("`", "");
+  const { files, config, add, run, verify, notes, tested } = instructions(harness, install, plain);
   const lines = [harness.name, ""];
 
   if (config) {
@@ -249,7 +255,7 @@ export function renderText(harness, install) {
     lines.push("Call a tool from the chat:", "", `  ${run}`, "");
   }
 
-  lines.push(`Verify: ${plain(verify)}`, ...notes.map((note) => `Note: ${plain(note)}`), `Docs: ${harness.docs}`, tested);
+  lines.push(`Verify: ${verify}`, ...notes.map((note) => `Note: ${note}`), `Docs: ${harness.docs}`, tested);
   return lines.join("\n");
 }
 
