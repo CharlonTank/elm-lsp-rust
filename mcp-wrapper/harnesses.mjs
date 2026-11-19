@@ -8,7 +8,7 @@
 
 // Name under which the server is registered. Harnesses prefix tool names with
 // it, for example mcp__elm-lsp__elm_references.
-const SERVER_NAME = "elm-lsp";
+export const SERVER_NAME = "elm-lsp";
 
 // Where one clone of this repository keeps the files a harness needs.
 export function installAt(root) {
