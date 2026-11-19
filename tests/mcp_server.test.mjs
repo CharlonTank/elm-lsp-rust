@@ -181,6 +181,24 @@ test("a file is never renamed or moved onto an existing file", async (t) => {
 
   // Neither file was touched, not even by the import edits that precede the move
   assert.deepEqual({ utils: readFileSync(utils, "utf-8"), types: readFileSync(types, "utf-8") }, before);
+
+  // Two links to one file are two files of the project, and neither replaces the other
+  const shared = join(project, "shared.elm");
+  const [first, second] = ["First.elm", "Second.elm"].map((name) => join(project, "src", name));
+  writeFileSync(shared, "module First exposing (one)\n\n\none =\n    1\n");
+  for (const link of [first, second]) symlinkSync(shared, link);
+  const onto = await callTool(client, "elm_rename_file", { file_path: first, new_name: "Second.elm" });
+  assert.deepEqual(onto, { text: `Cannot rename file: ${second} already exists`, isError: true });
+  assert.deepEqual([first, second].map((link) => existsSync(link)), [true, true]);
+
+  // Two names of one file are two entries as well. Renaming one to the other would change nothing and report success.
+  const [third, fourth] = ["Third.elm", "Fourth.elm"].map((name) => join(project, "src", name));
+  const text = "module Third exposing (one)\n\n\none =\n    1\n";
+  writeFileSync(third, text);
+  linkSync(third, fourth);
+  const ontoName = await callTool(client, "elm_rename_file", { file_path: third, new_name: "Fourth.elm" });
+  assert.deepEqual(ontoName, { text: `Cannot rename file: ${fourth} already exists`, isError: true });
+  assert.deepEqual([third, fourth].map((name) => readFileSync(name, "utf-8")), [text, text]);
 });
 
 test("a file is never renamed or moved out of its project", async (t) => {

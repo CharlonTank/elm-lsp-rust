@@ -194,13 +194,13 @@ function renameTool({ kind, command, description, fileDescription, validateNewNa
   };
 }
 
-// True when path exists and is not the file at `original`. On a file system
-// that ignores case, Api.elm and API.elm name one file, and renaming it from
-// one spelling to the other must stay possible.
+// True when something is at `path` and it is not the entry at `original`. On
+// a file system that ignores case, Api.elm and API.elm name one file, and
+// renaming it from one spelling to the other must stay possible: the disk
+// spells the two alike. Two links to one file are two entries, and so are two
+// names of one file. Neither may replace the other.
 function isAnotherFile(path, original) {
-  if (!existsSync(path)) return false;
-  const [found, own] = [statSync(path), statSync(original)];
-  return found.ino !== own.ino || found.dev !== own.dev;
+  return lstatSync(path, { throwIfNoEntry: false }) !== undefined && asSpelledOnDisk(path) !== asSpelledOnDisk(original);
 }
 
 // Taking an entry out of a directory and putting one into another both need
