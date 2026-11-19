@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::*;
 
 use super::{
-    composed, is_module_segment, normalized, FileOperationResult, Workspace,
+    composed, is_module_segment, is_same_file, normalized, FileOperationResult, Workspace,
     LAMDERA_PROTECTED_FILES,
 };
 
@@ -82,15 +82,6 @@ impl Workspace {
             ));
         }
 
-        // The new module name keeps the same path prefix, just changes the final component
-        let old_parts: Vec<&str> = old_module_name.split('.').collect();
-        let new_module_name = if old_parts.len() > 1 {
-            let prefix: Vec<&str> = old_parts[..old_parts.len() - 1].to_vec();
-            format!("{}.{}", prefix.join("."), new_module_base)
-        } else {
-            new_module_base.to_string()
-        };
-
         // Compute new path
         let new_path = with_new_names_composed(
             &old_path
@@ -98,6 +89,25 @@ impl Workspace {
                 .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?
                 .join(new_name),
         );
+
+        // The compiler finds a module by its path below a source directory, so that
+        // path is the module's name, whatever the file declared so far: a copy in
+        // src/Backup that still says "module Utils" becomes Backup.Helpers. A file
+        // that lies where its name says stays in its directory and keeps the first
+        // parts of the name. With "src" and "src/Sub" in elm.json, Sub.Utils in
+        // src/Sub becomes Sub.Helpers, where the inner directory alone would call
+        // it Helpers. A file in no source directory keeps the first parts of the
+        // name it declares too.
+        let keeps_its_place =
+            self.is_at_home(&old_path, &old_module_name) || !self.is_in_source_directory(&new_path);
+        let new_module_name = if keeps_its_place {
+            match old_module_name.rsplit_once('.') {
+                Some((prefix, _)) => format!("{}.{}", prefix, new_module_base),
+                None => new_module_base.to_string(),
+            }
+        } else {
+            self.module_name_at(&new_path)?
+        };
 
         // Collect all edits
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
@@ -116,8 +126,13 @@ impl Workspace {
         }
 
         // 2. Update all imports across the workspace
-        let files_updated =
-            self.update_imports_for_rename(&old_module_name, &new_module_name, uri, &mut changes)?;
+        let files_updated = self.update_imports_of_file(
+            &old_path,
+            &old_module_name,
+            &new_module_name,
+            uri,
+            &mut changes,
+        )?;
 
         Ok(FileOperationResult {
             old_module_name,
@@ -180,8 +195,13 @@ impl Workspace {
         }
 
         // 2. Update all imports across the workspace
-        let files_updated =
-            self.update_imports_for_rename(&old_module_name, &new_module_name, uri, &mut changes)?;
+        let files_updated = self.update_imports_of_file(
+            &old_path,
+            &old_module_name,
+            &new_module_name,
+            uri,
+            &mut changes,
+        )?;
 
         Ok(FileOperationResult {
             old_module_name,
@@ -191,6 +211,28 @@ impl Workspace {
             files_updated,
             changes,
         })
+    }
+
+    /// Update the imports of the module in the file at `path`, when that file
+    /// is the one the module's importers mean. A copy that still declares the
+    /// module of the file it was made from waits for that name, and nothing
+    /// imports it: the importers of the name are the other file's.
+    fn update_imports_of_file(
+        &self,
+        path: &Path,
+        old_module: &str,
+        new_module: &str,
+        skip_uri: &Url,
+        changes: &mut HashMap<Url, Vec<TextEdit>>,
+    ) -> anyhow::Result<usize> {
+        let holds_the_name = self
+            .modules
+            .get(old_module)
+            .is_some_and(|module| is_same_file(&module.path, path));
+        if !holds_the_name {
+            return Ok(0);
+        }
+        self.update_imports_for_rename(old_module, new_module, skip_uri, changes)
     }
 
     /// Update all imports of old_module to new_module across the workspace

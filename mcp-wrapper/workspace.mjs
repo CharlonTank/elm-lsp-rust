@@ -2,8 +2,8 @@
  * Finding the Elm project a file belongs to, and writing edits into it.
  */
 
-import { delimiter, dirname, join, relative, resolve } from "path";
-import { accessSync, constants, existsSync, readFileSync, realpathSync, writeFileSync } from "fs";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { ToolError } from "./errors.mjs";
 
@@ -76,6 +76,80 @@ export function projectToolsHint(dir, names) {
 
 const isInside = (path, directory) => path === directory || path.startsWith(directory + "/");
 
+// A path with every part of it that exists spelled as the disk spells it. A file system that
+// ignores letter case takes src/utils.elm for src/Utils.elm, and the language server knows a file
+// by one spelling. A link on the way keeps its place in the path and its own name. What is not
+// there yet, as in the target of a move, stays as it is written.
+export function asSpelledOnDisk(absPath) {
+  const parts = absPath.split(sep).filter(Boolean);
+  let spelled = sep;
+  for (const [at, part] of parts.entries()) {
+    const here = join(spelled, part);
+    const entry = entryAt(here);
+    if (!entry) return join(spelled, ...parts.slice(at));
+    // What is there says under its real name how that is spelled. The real name of a link is
+    // the name of what it leads to, so a link's own name is read from the directory it lies in.
+    spelled = join(spelled, entry.isSymbolicLink() ? nameListedIn(spelled, part, entry) : basename(realpathSync.native(here)));
+  }
+  return spelled;
+}
+
+// What is at a path, a link counted as itself, or nothing: where no entry of that name is, and
+// where the path goes on below a file, as a mistyped target of a move can.
+function entryAt(path) {
+  try {
+    return lstatSync(path, { throwIfNoEntry: false });
+  } catch (error) {
+    if (error.code === "ENOTDIR") return undefined;
+    throw error;
+  }
+}
+
+// The name that a directory lists for `entry`, which was found in it under `name`. A file system
+// can find an entry under spellings it does not list. The given name stands where the directory
+// cannot be listed.
+function nameListedIn(directory, name, entry) {
+  let names = [];
+  try {
+    names = readdirSync(directory);
+  } catch {
+    return name;
+  }
+  if (names.includes(name)) return name;
+  const isIt = (listed) => {
+    const other = lstatSync(join(directory, listed), { throwIfNoEntry: false });
+    return other?.ino === entry.ino && other?.dev === entry.dev;
+  };
+  return names.find(isIt) ?? name;
+}
+
+// The place that a source directory of elm.json names, as the language server works it out, so
+// that the two agree on which files belong to a project. ".." is read as the file system reads
+// it: behind a link it is the directory above the one the link leads to. With home/app a link to
+// data/app, "../shared" is data/shared, which is where the compiler looks. A link to nothing leads
+// to no directory, and ".." behind it is read from the text of the path.
+function sourceDirectory(root, listed) {
+  let place = isAbsolute(listed) ? sep : root;
+  for (const part of listed.split(sep)) {
+    if (part === "" || part === ".") continue;
+    if (part !== "..") place = join(place, part);
+    else {
+      if (entryAt(place)?.isSymbolicLink()) place = realPlaceOf(place) ?? place;
+      place = dirname(place);
+    }
+  }
+  return asSpelledOnDisk(place);
+}
+
+// Where a link leads in the end, or nothing for a link that leads nowhere
+function realPlaceOf(link) {
+  try {
+    return realpathSync.native(link);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The directories that hold a project's files: its root, and the source
  * directories of its elm.json. One of those can lie outside the root, as
@@ -89,7 +163,7 @@ export function projectDirectories(workspaceRoot) {
   } catch {
     // The language server reports an elm.json that cannot be read. The root is all there is to go by.
   }
-  return [root, ...listed.filter((directory) => typeof directory === "string").map((directory) => resolve(root, directory))];
+  return [root, ...listed.filter((directory) => typeof directory === "string").map((directory) => sourceDirectory(root, directory))];
 }
 
 // The real place of a path whose last parts may not exist yet: links in the part that exists are followed.

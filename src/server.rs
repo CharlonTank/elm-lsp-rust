@@ -84,6 +84,50 @@ impl ElmLanguageServer {
         // first. Clients ask for them with the elm.getDiagnostics command.
     }
 
+    /// Refuse a request that starts from a file which waits for its module
+    /// name, such as a copy that still declares the module it was made from.
+    /// The index holds nothing of that file, so the answer would come from
+    /// other files: a rename that starts in the copy would edit the original.
+    /// The symbols of the file itself are refused with the rest, because
+    /// moving a function starts from them and goes on to the importers of
+    /// the module, which are the other file's.
+    fn refuse_a_waiting_file(&self, uri: &Url) -> Result<()> {
+        let Ok(path) = uri.to_file_path() else {
+            return Ok(());
+        };
+        let waiting = self.workspace.read().ok().and_then(|ws| {
+            let workspace = ws.as_ref()?;
+            let (module_name, holder) = workspace.waits_behind(&path)?;
+            Some((
+                module_name.to_string(),
+                holder.to_path_buf(),
+                workspace.is_in_source_directory(&path),
+            ))
+        });
+        let Some((module_name, holder, among_the_sources)) = waiting else {
+            return Ok(());
+        };
+        // Below a source directory the compiler never reads such a file, so it is a
+        // copy, or misnamed. Elsewhere it can be a program of its own that the
+        // compiler builds when given its path, and has to be told so with more care.
+        let message = if among_the_sources {
+            format!(
+                "{} declares module {}, which is the module of {}. Give it a name of its own with elm_rename_file, or edit its module line, and repeat the call.",
+                path.display(),
+                module_name,
+                holder.display()
+            )
+        } else {
+            format!(
+                "{} declares module {}, and so does {}, which lies where a source directory spells that name. The index keeps one file for each module name, so it keeps nothing of this file, which is in no source directory, and no tool can start from it. If it is a copy, give it a name of its own with elm_rename_file and repeat the call.",
+                path.display(),
+                module_name,
+                holder.display()
+            )
+        };
+        Err(tower_lsp::jsonrpc::Error::invalid_params(message))
+    }
+
     /// Drop a file that is gone from the open documents and from the index.
     fn forget_file(&self, uri: &Url) {
         self.documents.remove(uri);
@@ -773,6 +817,7 @@ impl LanguageServer for ElmLanguageServer {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // First try local document
         if let Some(doc) = self.documents.get(uri) {
@@ -821,6 +866,7 @@ impl LanguageServer for ElmLanguageServer {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // Get document content for type-aware lookups
         let content = if let Some(doc) = self.documents.get(uri) {
@@ -949,6 +995,7 @@ impl LanguageServer for ElmLanguageServer {
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // Get file content for type-aware field finding
         let content = if let Some(doc) = self.documents.get(uri) {
@@ -1075,6 +1122,7 @@ impl LanguageServer for ElmLanguageServer {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
+        self.refuse_a_waiting_file(uri)?;
 
         if let Some(doc) = self.documents.get(uri) {
             let symbols: Vec<SymbolInformation> = doc
@@ -1144,6 +1192,7 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let mut items = Vec::new();
         let mut seen_labels: HashSet<String> = HashSet::new();
+        self.refuse_a_waiting_file(uri)?;
 
         // Limit to prevent timeout on large workspaces
         const MAX_COMPLETION_ITEMS: usize = 1000;
@@ -1216,6 +1265,7 @@ impl LanguageServer for ElmLanguageServer {
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = &params.text_document.uri;
         let position = params.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // First check if this is a field rename
         if let Some(doc) = self.documents.get(uri) {
@@ -1271,6 +1321,7 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
         let new_name = params.new_name;
+        self.refuse_a_waiting_file(uri)?;
 
         // First check if this is a field rename
         if let Some(doc) = self.documents.get(uri) {
@@ -1371,6 +1422,7 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document.uri;
         let range = params.range;
         let mut actions = Vec::new();
+        self.refuse_a_waiting_file(uri)?;
 
         // Get word at start of range
         if let Some(word) = self.get_word_at_position(uri, range.start) {
@@ -1439,6 +1491,26 @@ impl LanguageServer for ElmLanguageServer {
         params: ExecuteCommandParams,
     ) -> Result<Option<serde_json::Value>> {
         tracing::info!("execute_command: {:?}", params.command);
+
+        // A command that starts from a file names it first. The ones that take any
+        // file are the two that give a waiting file a name of its own, the build,
+        // and the two that speak of the disk and not of a module.
+        let takes_any_file = matches!(
+            params.command.as_str(),
+            CMD_RENAME_FILE
+                | CMD_MOVE_FILE
+                | CMD_GET_DIAGNOSTICS
+                | CMD_NOTIFY_FILE_RENAMED
+                | CMD_SYNC_WITH_DISK
+        );
+        let named_first = params
+            .arguments
+            .first()
+            .and_then(|first| first.as_str())
+            .and_then(|text| Url::parse(text).ok());
+        if let (false, Some(uri)) = (takes_any_file, named_first) {
+            self.refuse_a_waiting_file(&uri)?;
+        }
 
         match params.command.as_str() {
             CMD_MOVE_FUNCTION => {
@@ -1637,8 +1709,8 @@ impl LanguageServer for ElmLanguageServer {
                         .unwrap_or_default()
                 };
 
-                // Deletions first. A module that moved to another directory keeps
-                // its name, and its old symbols are found by that name.
+                // Deletions first, so that a file which is gone has given up its
+                // module name before the files that changed are read.
                 for path in &changes.deleted {
                     if let Ok(uri) = Url::from_file_path(path) {
                         self.forget_file(&uri);

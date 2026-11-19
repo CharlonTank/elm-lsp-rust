@@ -1,6 +1,7 @@
 use icu_normalizer::ComposingNormalizerBorrowed;
 use icu_properties::{props::GeneralCategory, CodePointMapData};
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tower_lsp::lsp_types::*;
@@ -32,8 +33,6 @@ pub fn depends_on_lamdera(elm_json: &serde_json::Value) -> bool {
 }
 
 /// The path without its "." and ".." parts, worked out from the text alone.
-/// A source directory such as "../shared" is then spelled the way every
-/// other path of the project is, so a file has one name in the index.
 pub(crate) fn normalized(path: &Path) -> PathBuf {
     let mut plain = PathBuf::new();
     for component in path.components() {
@@ -46,6 +45,94 @@ pub(crate) fn normalized(path: &Path) -> PathBuf {
         }
     }
     plain
+}
+
+/// The place that `listed` names when it is read from the directory `from`,
+/// without "." and ".." in it, so a file there has one name in the index.
+/// ".." is read as the file system reads it, and as the compiler therefore
+/// does: behind a link it is the directory above the one the link leads to,
+/// where the text alone says it is the one the link lies in. With
+/// home/app a link to data/app, "../shared" is data/shared.
+pub(crate) fn resolved_from(from: &Path, listed: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut place = from.to_path_buf();
+    for component in listed.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if place.is_symlink() {
+                    if let Ok(real) = place.canonicalize() {
+                        place = real;
+                    }
+                }
+                place.pop();
+            }
+            Component::Normal(part) => place.push(part),
+            // A path that starts at the root of the file system leaves `from` behind
+            start => place = PathBuf::from(start.as_os_str()),
+        }
+    }
+    place
+}
+
+/// What tells a file from every other on this machine, however its path is
+/// spelled. A link has one of its own, apart from the file it leads to.
+/// `None` where nothing is at the path, and on a system that has no such
+/// thing to tell.
+#[cfg(unix)]
+fn identity_of(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let entry = path.symlink_metadata().ok()?;
+    Some((entry.dev(), entry.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity_of(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// True when two paths name one file: they are one path, or two spellings of
+/// it on a file system that ignores letter case, or the form an accent is
+/// written in. A file is no copy of itself, whatever a client calls it.
+pub(crate) fn is_same_file(one: &Path, other: &Path) -> bool {
+    one == other || identity_of(one).is_some_and(|identity| identity_of(other) == Some(identity))
+}
+
+/// `path` with its parts as the disk spells them, from where it leaves
+/// `known`, a path that is spelled as its files are. A file system that
+/// ignores case reads "SRC" in elm.json as the directory src, and the index
+/// knows a file by one spelling, the one a client names it by.
+pub(crate) fn as_spelled_on_disk(path: &Path, known: &Path) -> PathBuf {
+    let shared = path
+        .components()
+        .zip(known.components())
+        .take_while(|(ours, theirs)| ours == theirs)
+        .count();
+    let mut spelled: PathBuf = path.components().take(shared).collect();
+    for component in path.components().skip(shared) {
+        let part = component.as_os_str();
+        let listed = name_listed_in(&spelled, part);
+        spelled.push(listed.as_deref().unwrap_or(part));
+    }
+    spelled
+}
+
+/// The name that a directory lists for the entry it also finds under `name`,
+/// another spelling of it. `None` where the directory lists `name` itself,
+/// and where nothing is found under it: a file system that tells "SRC" from
+/// "src" has no SRC to offer when it holds a src.
+fn name_listed_in(directory: &Path, name: &OsStr) -> Option<OsString> {
+    let wanted = identity_of(&directory.join(name))?;
+    let mut listed = Vec::new();
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        if entry.file_name() == name {
+            return None;
+        }
+        listed.push(entry.file_name());
+    }
+    listed
+        .into_iter()
+        .find(|other| identity_of(&directory.join(other)) == Some(wanted))
 }
 
 /// Whether a directory or a file, without its extension, can be one part of
@@ -76,6 +163,24 @@ pub(crate) fn is_module_segment(name: &str) -> bool {
                         | OtherLetter
                 )
         })
+}
+
+/// The module name that a path below a source directory spells, with dots
+/// for the separators and every accent as one letter. The error is the part
+/// that can be no part of a name, or nothing where the path names no file.
+fn module_name_below(below: &Path) -> Result<String, Option<String>> {
+    let segments: Vec<String> = below
+        .with_extension("")
+        .components()
+        .map(|component| composed(&component.as_os_str().to_string_lossy()))
+        .collect();
+    if let Some(odd) = segments.iter().find(|segment| !is_module_segment(segment)) {
+        return Err(Some(odd.clone()));
+    }
+    if segments.is_empty() {
+        return Err(None);
+    }
+    Ok(segments.join("."))
 }
 
 /// A name with every accent written as one letter, the form a module's name
@@ -259,6 +364,9 @@ pub struct Workspace {
     file_stamps: HashMap<PathBuf, Option<FileStamp>>,
     /// elm.json as it was read, or `None` when there was none
     elm_json_text: Option<String>,
+    /// The source directories as elm.json lists them, to be spelled again
+    /// when the disk may have changed
+    listed_source_dirs: Vec<String>,
     /// Source files that could not be read, each with the reason. The index
     /// knows nothing of them, so a refactoring would pass them over.
     unreadable: BTreeMap<PathBuf, String>,
@@ -266,6 +374,11 @@ pub struct Workspace {
     /// with the reason: a directory it could not list, or a file it could not
     /// tell from a missing one. What lies there is unknown to the index.
     hidden: Vec<(PathBuf, String)>,
+    /// Files that wait for a module name which another file holds, each with
+    /// that name. Two files can declare one module for a while, a copy that
+    /// is not yet renamed for one, and `modules` has room for one of them.
+    /// A waiting file is known to the index and not read into it.
+    displaced: BTreeMap<PathBuf, String>,
 }
 
 impl Workspace {
@@ -283,8 +396,10 @@ impl Workspace {
             external_symbols: HashMap::new(),
             file_stamps: HashMap::new(),
             elm_json_text: None,
+            listed_source_dirs: Vec::new(),
             unreadable: BTreeMap::new(),
             hidden: Vec::new(),
+            displaced: BTreeMap::new(),
         }
     }
 
@@ -348,7 +463,8 @@ impl Workspace {
             self.parse_elm_json(&content)?;
         } else {
             // Default to src/ if no elm.json
-            self.source_dirs = vec![self.root_path.join("src")];
+            self.listed_source_dirs = vec!["src".to_string()];
+            self.spell_source_directories();
         }
 
         // Index all .elm files
@@ -358,6 +474,28 @@ impl Workspace {
         self.index_external_packages()?;
 
         Ok(())
+    }
+
+    /// A source directory as the index names it: the place the file system
+    /// finds for what elm.json lists, spelled as the disk spells it from
+    /// where it leaves the project root.
+    fn source_directory(&self, dir: &str) -> PathBuf {
+        as_spelled_on_disk(
+            &resolved_from(&self.root_path, Path::new(dir)),
+            &self.root_path,
+        )
+    }
+
+    /// Work out the source directories from what elm.json lists. That is
+    /// done again at each comparison with the disk: a directory for generated
+    /// code can come into being later, in another letter case than elm.json
+    /// has for it.
+    fn spell_source_directories(&mut self) {
+        self.source_dirs = self
+            .listed_source_dirs
+            .iter()
+            .map(|dir| self.source_directory(dir))
+            .collect();
     }
 
     fn parse_elm_json(&mut self, content: &str) -> anyhow::Result<()> {
@@ -373,17 +511,18 @@ impl Workspace {
         // list and keeps its modules in src. A directory that is not there yet
         // is kept as well: generated sources appear after the server started,
         // and the walk passes over what does not exist.
-        self.source_dirs = match json
+        self.listed_source_dirs = match json
             .get("source-directories")
             .and_then(|dirs| dirs.as_array())
         {
             Some(dirs) => dirs
                 .iter()
                 .filter_map(|dir| dir.as_str())
-                .map(|dir| normalized(&self.root_path.join(dir)))
+                .map(str::to_string)
                 .collect(),
-            None => vec![self.root_path.join("src")],
+            None => vec!["src".to_string()],
         };
+        self.spell_source_directories();
 
         // Parse dependencies for external package support
         self.parse_dependencies(&json);
@@ -638,6 +777,7 @@ impl Workspace {
     /// Compare the source files on disk with what the index last read, and
     /// remember how they look now. The caller brings the index up to date.
     pub fn take_disk_changes(&mut self) -> DiskChanges {
+        self.spell_source_directories();
         let mut current: HashMap<PathBuf, Option<FileStamp>> = self
             .source_files()
             .into_iter()
@@ -656,6 +796,7 @@ impl Workspace {
             .values()
             .map(|module| &module.path)
             .chain(self.unreadable.keys())
+            .chain(self.displaced.keys())
             .filter(|path| !current.contains_key(*path))
             .cloned()
             .collect();
@@ -703,8 +844,9 @@ impl Workspace {
 
     /// The indexed files that a walk of the source directories does not
     /// return, such as a test a document was opened for. One of them that
-    /// could not be read is in no module, and is a file of the index all the
-    /// same: the index that is built after this one has to ask for it again.
+    /// could not be read is in no module, and neither is one whose module
+    /// name another file took. Both are files of the index all the same: the
+    /// index that is built after this one has to ask for them again.
     pub fn files_beyond_the_walk(&mut self) -> Vec<PathBuf> {
         let walked: std::collections::HashSet<PathBuf> = self.source_files().into_iter().collect();
         let mut beyond: Vec<PathBuf> = self
@@ -712,6 +854,7 @@ impl Workspace {
             .values()
             .map(|module| &module.path)
             .chain(self.unreadable.keys())
+            .chain(self.displaced.keys())
             .filter(|path| !walked.contains(*path))
             .cloned()
             .collect();
@@ -769,21 +912,14 @@ impl Workspace {
             );
         };
 
-        let segments: Vec<String> = below
-            .with_extension("")
-            .components()
-            .map(|component| composed(&component.as_os_str().to_string_lossy()))
-            .collect();
-        if let Some(odd) = segments.iter().find(|segment| !is_module_segment(segment)) {
-            anyhow::bail!(
+        match module_name_below(below) {
+            Ok(name) => Ok(name),
+            Err(Some(odd)) => anyhow::bail!(
                 "\"{}\" cannot be part of a module name. Below the source directory, every directory and the file need a name that starts with an upper-case letter and holds only letters, digits and underscores",
                 odd
-            );
+            ),
+            Err(None) => anyhow::bail!("{} names no file", path.display()),
         }
-        if segments.is_empty() {
-            anyhow::bail!("{} names no file", path.display());
-        }
-        Ok(segments.join("."))
     }
 
     /// Index all .elm files in the workspace
@@ -798,6 +934,7 @@ impl Workspace {
         tracing::info!("Indexing {} Elm files", files_to_index.len());
 
         self.unreadable.clear();
+        self.displaced.clear();
         for path in files_to_index {
             if let Err(e) = self.index_file(&path) {
                 tracing::warn!("Failed to index {:?}: {}", path, e);
@@ -828,10 +965,14 @@ impl Workspace {
         let uri = Url::from_file_path(path).map_err(|_| anyhow::anyhow!("Invalid path"))?;
 
         if let Some(tree) = self.parser.parse(&content) {
-            let symbols = self.parser.extract_symbols(&tree, &content);
             let module_name = self
                 .extract_module_name(&tree, &content)
                 .unwrap_or_else(|| self.path_to_module_name(path));
+            if self.has_to_wait(path, &module_name) {
+                self.displaced.insert(path.to_path_buf(), module_name);
+                return Ok(());
+            }
+            let symbols = self.parser.extract_symbols(&tree, &content);
             let imports = self.extract_imports(&tree, &content);
             let exposing = self.extract_exposing(&tree, &content);
 
@@ -875,10 +1016,126 @@ impl Workspace {
                 exposing,
             };
 
-            self.modules.insert(module_name, module);
+            self.enter_module(module);
         }
 
         Ok(())
+    }
+
+    /// True when the file at `path` lies where a module of this name belongs:
+    /// below a source directory, at the path that spells the name. That is
+    /// where the compiler looks for the module. Source directories can lie
+    /// inside one another, and any of them will do: with "src" and "src/Sub"
+    /// in elm.json, src/Sub/Utils.elm is the home of Utils and of Sub.Utils.
+    fn is_at_home(&self, path: &Path, module_name: &str) -> bool {
+        self.source_dirs
+            .iter()
+            .filter_map(|dir| path.strip_prefix(dir).ok())
+            .any(|below| module_name_below(below).is_ok_and(|spelled| spelled == module_name))
+    }
+
+    /// True when another file holds this module name with the better claim to
+    /// it: that file lies where the name says, and the one at `path` does
+    /// not. A copy that still declares the module it was made from is such a
+    /// file. The compiler reads the other one and never this.
+    fn has_to_wait(&self, path: &Path, module_name: &str) -> bool {
+        self.modules.get(module_name).is_some_and(|holder| {
+            !is_same_file(&holder.path, path)
+                && self.is_at_home(&holder.path, module_name)
+                && !self.is_at_home(path, module_name)
+        })
+    }
+
+    /// True when `path` lies below a source directory of elm.json, where the
+    /// compiler finds a file by the module name its path spells.
+    pub fn is_in_source_directory(&self, path: &Path) -> bool {
+        self.source_dirs.iter().any(|dir| path.starts_with(dir))
+    }
+
+    /// The module that the file at `path` declares and waits for, with the
+    /// file that holds it. `None` for a file that is in the index, and for one
+    /// the index does not know.
+    pub fn waits_behind(&self, path: &Path) -> Option<(&str, &Path)> {
+        let module_name = self.displaced.get(path)?;
+        let holder = self.modules.get(module_name)?;
+        Some((module_name.as_str(), holder.path.as_path()))
+    }
+
+    /// Take the symbols, the references and the types of one file out of the
+    /// index. They are told by the file they come from, not by the name of
+    /// their module, which another file can declare as well.
+    fn drop_contents(&mut self, uri: &Url) {
+        for symbols in self.symbols.values_mut() {
+            symbols.retain(|s| s.definition_uri != *uri);
+        }
+        self.type_checker.invalidate_file(uri.as_str());
+        for refs in self.references.values_mut() {
+            refs.retain(|r| r.uri != *uri);
+        }
+        self.references.retain(|_, refs| !refs.is_empty());
+    }
+
+    /// Take a file out of the index, with the module name if it holds one,
+    /// which is returned.
+    fn drop_file(&mut self, uri: &Url, path: &Path) -> Option<String> {
+        let module_name = self
+            .modules
+            .iter()
+            .find(|(_, m)| m.path == path)
+            .map(|(name, _)| name.clone());
+        if let Some(module_name) = &module_name {
+            self.modules.remove(module_name);
+        }
+        self.displaced.remove(path);
+        self.drop_contents(uri);
+        module_name
+    }
+
+    /// Enter a module under its name. A file that held the name until now
+    /// leaves the index and is remembered, so that it is read again when
+    /// this one lets go of the name. The index holds the symbols of the files
+    /// in `modules` and of no other. The same file under another spelling
+    /// leaves nothing to remember: it is this one.
+    fn enter_module(&mut self, module: ElmModule) {
+        let path = module.path.clone();
+        if let Some(before) = self.modules.insert(module.module_name.clone(), module) {
+            if before.path != path {
+                if let Ok(uri) = Url::from_file_path(&before.path) {
+                    self.drop_contents(&uri);
+                }
+                if !is_same_file(&before.path, &path) {
+                    self.displaced.insert(before.path, before.module_name);
+                }
+            }
+        }
+    }
+
+    /// Give a module name that no file holds any more to a file that waits
+    /// for it, one that lies where the name says before any other. A waiting
+    /// file did not change on disk, so nothing else would read it, and its
+    /// module would be missing from every answer.
+    fn restore_displaced(&mut self, module_name: &str) {
+        while !self.modules.contains_key(module_name) {
+            let waiting = self
+                .displaced
+                .iter()
+                .filter(|(_, name)| name.as_str() == module_name)
+                .map(|(path, _)| path.clone())
+                .max_by_key(|path| self.is_at_home(path, module_name));
+            let Some(path) = waiting else {
+                return;
+            };
+            self.displaced.remove(&path);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    if let Ok(uri) = Url::from_file_path(&path) {
+                        self.update_file(&uri, &text);
+                    }
+                }
+                Err(e) if says_nothing_is_there(&e) => {}
+                Err(e) => self.mark_unreadable(&path, e.to_string()),
+            }
+        }
     }
 
     /// Update a file in the index (called on didChange)
@@ -888,72 +1145,59 @@ impl Workspace {
             Err(_) => return,
         };
 
-        // Remove old symbols for this file
-        let old_module_name = self
-            .modules
-            .iter()
-            .find(|(_, m)| m.path == path)
-            .map(|(name, _)| name.clone());
-
-        if let Some(module_name) = old_module_name {
-            self.modules.remove(&module_name);
-            // Clean up symbols from this module
-            for symbols in self.symbols.values_mut() {
-                symbols.retain(|s| s.module_name != module_name);
-            }
-        }
-
-        // Invalidate type checker cache for this file
-        self.type_checker.invalidate_file(uri.as_str());
-
-        // Remove old references from this file
-        for refs in self.references.values_mut() {
-            refs.retain(|r| r.uri != *uri);
-        }
-        // Remove empty entries
-        self.references.retain(|_, refs| !refs.is_empty());
+        let old_module_name = self.drop_file(uri, &path);
 
         // Re-index the file
         if let Some(tree) = self.parser.parse(content) {
-            let symbols = self.parser.extract_symbols(&tree, content);
             let module_name = self
                 .extract_module_name(&tree, content)
                 .unwrap_or_else(|| self.path_to_module_name(&path));
-            let imports = self.extract_imports(&tree, content);
-            let exposing = self.extract_exposing(&tree, content);
 
-            // Re-index for type checking
-            self.type_checker
-                .index_file(uri.as_str(), content, tree.clone());
+            if self.has_to_wait(&path, &module_name) {
+                self.displaced.insert(path, module_name);
+            } else {
+                let symbols = self.parser.extract_symbols(&tree, content);
+                let imports = self.extract_imports(&tree, content);
+                let exposing = self.extract_exposing(&tree, content);
 
-            // Re-index references for this file
-            self.find_references_in_tree(&tree, content, uri, &module_name, &imports);
+                // Re-index for type checking
+                self.type_checker
+                    .index_file(uri.as_str(), content, tree.clone());
 
-            for symbol in &symbols {
-                let global_symbol = GlobalSymbol {
-                    name: symbol.name.clone(),
+                // Re-index references for this file
+                self.find_references_in_tree(&tree, content, uri, &module_name, &imports);
+
+                for symbol in &symbols {
+                    let global_symbol = GlobalSymbol {
+                        name: symbol.name.clone(),
+                        module_name: module_name.clone(),
+                        kind: symbol.kind,
+                        definition_uri: uri.clone(),
+                        definition_range: symbol.definition_range.unwrap_or(symbol.range),
+                        signature: symbol.signature.clone(),
+                    };
+
+                    self.symbols
+                        .entry(symbol.name.clone())
+                        .or_default()
+                        .push(global_symbol);
+                }
+
+                let module = ElmModule {
+                    path,
                     module_name: module_name.clone(),
-                    kind: symbol.kind,
-                    definition_uri: uri.clone(),
-                    definition_range: symbol.definition_range.unwrap_or(symbol.range),
-                    signature: symbol.signature.clone(),
+                    symbols,
+                    imports,
+                    exposing,
                 };
 
-                self.symbols
-                    .entry(symbol.name.clone())
-                    .or_default()
-                    .push(global_symbol);
+                self.enter_module(module);
             }
+        }
 
-            let module = ElmModule {
-                path,
-                module_name: module_name.clone(),
-                symbols,
-                imports,
-                exposing,
-            };
-
-            self.modules.insert(module_name, module);
+        // Under another name now, waiting for one, or no module at all
+        if let Some(module_name) = old_module_name {
+            self.restore_displaced(&module_name);
         }
     }
 
@@ -964,29 +1208,9 @@ impl Workspace {
             Err(_) => return,
         };
 
-        // Find and remove the module by path
-        let module_name = self
-            .modules
-            .iter()
-            .find(|(_, m)| m.path == path)
-            .map(|(name, _)| name.clone());
-
-        if let Some(module_name) = module_name {
-            self.modules.remove(&module_name);
-            // Clean up symbols from this module
-            for symbols in self.symbols.values_mut() {
-                symbols.retain(|s| s.module_name != module_name);
-            }
+        if let Some(module_name) = self.drop_file(uri, &path) {
+            self.restore_displaced(&module_name);
         }
-
-        // Invalidate type checker cache
-        self.type_checker.invalidate_file(uri.as_str());
-
-        // Remove references from this file
-        for refs in self.references.values_mut() {
-            refs.retain(|r| r.uri != *uri);
-        }
-        self.references.retain(|_, refs| !refs.is_empty());
     }
 
     /// Take in that a file was renamed or moved by somebody else: index the
@@ -2919,6 +3143,237 @@ mod tests {
         assert_eq!(workspace.unreadable_files(), None);
     }
 
+    const GREETING: &str = "module Greeting exposing (hello)\n\n\nhello =\n    1\n";
+
+    // The files that define `hello`, as far as the index knows
+    fn hello_is_defined_in(workspace: &Workspace) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = workspace.symbols["hello"]
+            .iter()
+            .filter_map(|symbol| symbol.definition_uri.to_file_path().ok())
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn test_a_module_stays_with_the_file_that_spells_its_name() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let src = temp_dir.path().join("src");
+        let original = src.join("Greeting.elm");
+        // Copies that still declare the module they were made from. One comes before the
+        // original in any order of names and one after it, whatever order the walk has.
+        let copies = [src.join("Aaa.elm"), src.join("Zzz.elm")];
+        for path in [&original, &copies[0], &copies[1]] {
+            write_settled(path, GREETING);
+        }
+        let uri = |path: &PathBuf| Url::from_file_path(path).unwrap();
+        let holder =
+            |workspace: &Workspace| workspace.modules.get("Greeting").map(|m| m.path.clone());
+
+        workspace.initialize().unwrap();
+        assert_eq!(holder(&workspace), Some(original.clone()));
+        assert_eq!(hello_is_defined_in(&workspace), vec![original.clone()]);
+
+        // Read again later, as after an edit, a copy does not take the name either
+        workspace.update_file(&uri(&copies[0]), GREETING);
+        assert_eq!(holder(&workspace), Some(original.clone()));
+        assert_eq!(hello_is_defined_in(&workspace), vec![original.clone()]);
+
+        // With a name of its own it is a module like any other
+        let renamed = GREETING.replace("module Greeting", "module Zzz");
+        workspace.update_file(&uri(&copies[1]), &renamed);
+        assert_eq!(workspace.modules["Zzz"].path, copies[1]);
+        assert_eq!(
+            hello_is_defined_in(&workspace),
+            vec![original.clone(), copies[1].clone()]
+        );
+
+        // With the original gone, the copy that waits is the one file that declares the module
+        fs::remove_file(&original).unwrap();
+        workspace.remove_file(&uri(&original));
+        assert_eq!(holder(&workspace), Some(copies[0].clone()));
+        assert_eq!(hello_is_defined_in(&workspace), copies.to_vec());
+        assert!(workspace.displaced.is_empty());
+
+        // The original comes back and takes its name from the copy, which waits again
+        write_settled(&original, GREETING);
+        workspace.update_file(&uri(&original), GREETING);
+        assert_eq!(holder(&workspace), Some(original.clone()));
+        assert_eq!(
+            hello_is_defined_in(&workspace),
+            vec![original, copies[1].clone()]
+        );
+        assert_eq!(
+            workspace.displaced.keys().collect::<Vec<_>>(),
+            vec![&copies[0]]
+        );
+    }
+
+    #[test]
+    fn test_a_module_is_at_home_below_any_source_directory_that_spells_its_name() {
+        // "src" and "src/Sub" are both source directories. The file in
+        // src/Sub can be Utils for the one and Sub.Utils for the other.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().to_path_buf();
+        let sub = root.join("src").join("Sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(
+            root.join("elm.json"),
+            r#"{ "source-directories": ["src", "src/Sub"] }"#,
+        )
+        .unwrap();
+        let (outer, inner) = (sub.join("Utils.elm"), sub.join("Inner.elm"));
+        write_settled(&outer, "module Sub.Utils exposing (..)\n");
+        write_settled(&inner, "module Inner exposing (..)\n");
+        let mut workspace = Workspace::new(root.clone());
+        workspace.initialize().unwrap();
+
+        // A copy of each, made later, waits behind the file that lies where the name says
+        for (original, name) in [(&outer, "Sub.Utils"), (&inner, "Inner")] {
+            let copy = root
+                .join("src")
+                .join(format!("Zz{}.elm", name.replace('.', "")));
+            let text = fs::read_to_string(original).unwrap();
+            write_settled(&copy, &text);
+            workspace.update_file(&Url::from_file_path(&copy).unwrap(), &text);
+            assert_eq!(
+                workspace.waits_behind(&copy),
+                Some((name, original.as_path()))
+            );
+        }
+        // A move into the inner directory is still named by that directory
+        assert_eq!(
+            workspace
+                .module_name_at(&sub.join("New.elm"))
+                .map_err(|e| e.to_string()),
+            Ok("New".to_string())
+        );
+        // A rename leaves a file in its directory, and its name the parts it had
+        for (file, renamed) in [(&outer, "Sub.Renamed"), (&inner, "Renamed")] {
+            let uri = Url::from_file_path(file).unwrap();
+            assert_eq!(
+                workspace
+                    .rename_file(&uri, "Renamed.elm")
+                    .unwrap()
+                    .new_module_name,
+                renamed
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_copy_waits_whether_it_is_read_before_the_module_or_after() {
+        for copy_first in [true, false] {
+            let (temp_dir, mut workspace) = create_test_workspace();
+            let src = temp_dir.path().join("src");
+            let [original, copy] = [src.join("Greeting.elm"), src.join("Backup.elm")];
+            write_settled(&original, GREETING);
+            write_settled(&copy, GREETING);
+
+            // As at the start, where the order of the walk is the file system's
+            let order = if copy_first {
+                [&copy, &original]
+            } else {
+                [&original, &copy]
+            };
+            for path in order {
+                workspace.index_file(path).unwrap();
+            }
+            assert_eq!(workspace.modules["Greeting"].path, original);
+            assert_eq!(hello_is_defined_in(&workspace), vec![original.clone()]);
+            assert_eq!(workspace.displaced.keys().collect::<Vec<_>>(), vec![&copy]);
+        }
+    }
+
+    #[test]
+    fn test_a_file_that_waits_for_a_module_name_is_a_file_of_the_index() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let original = temp_dir.path().join("src").join("Greeting.elm");
+        // Outside the source directories, where a file enters the index with a document opened for it
+        let waiting = temp_dir.path().join("tests").join("Greeting.elm");
+        fs::create_dir(waiting.parent().unwrap()).unwrap();
+        write_settled(&original, GREETING);
+        write_settled(&waiting, GREETING);
+        workspace.initialize().unwrap();
+        workspace.update_file(&Url::from_file_path(&waiting).unwrap(), GREETING);
+        assert_eq!(workspace.modules["Greeting"].path, original);
+
+        // An index that is built anew asks for it again
+        assert_eq!(workspace.files_beyond_the_walk(), vec![waiting.clone()]);
+        // The comparison with the disk reads it once for its first stamp, and again after an edit
+        assert_eq!(workspace.take_disk_changes().changed, vec![waiting.clone()]);
+        assert_eq!(workspace.take_disk_changes(), DiskChanges::default());
+        write_settled(&waiting, &GREETING.replace('1', "22"));
+        assert_eq!(workspace.take_disk_changes().changed, vec![waiting.clone()]);
+        // And it notices when the file is gone
+        fs::remove_file(&waiting).unwrap();
+        assert_eq!(workspace.take_disk_changes().deleted, vec![waiting]);
+    }
+
+    #[test]
+    fn test_a_module_name_goes_to_a_waiting_file_that_can_still_be_read() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let src = temp_dir.path().join("src");
+        let original = src.join("Greeting.elm");
+        // The waiting files are tried from the last name to the first
+        let [sound, gone, no_text] = [
+            src.join("Aaa.elm"),
+            src.join("Bbb.elm"),
+            src.join("Ccc.elm"),
+        ];
+        for path in [&original, &sound, &gone, &no_text] {
+            write_settled(path, GREETING);
+        }
+        workspace.initialize().unwrap();
+        assert_eq!(workspace.displaced.len(), 3);
+
+        // One copy was deleted since and one is no text any more, and the index was told of neither
+        fs::remove_file(&gone).unwrap();
+        fs::write(&no_text, [0xff, 0xfe]).unwrap();
+        fs::remove_file(&original).unwrap();
+        workspace.remove_file(&Url::from_file_path(&original).unwrap());
+
+        assert_eq!(workspace.modules["Greeting"].path, sound);
+        assert_eq!(hello_is_defined_in(&workspace), vec![sound]);
+        assert!(workspace.displaced.is_empty());
+        let problem = workspace.unreadable_files().unwrap_or_default();
+        assert!(problem.contains("Ccc.elm"), "{}", problem);
+    }
+
+    #[test]
+    fn test_a_free_module_name_goes_first_to_a_file_that_spells_it() {
+        let temp_dir = TempDir::new().unwrap();
+        let [src, lib] = [temp_dir.path().join("src"), temp_dir.path().join("lib")];
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(
+            temp_dir.path().join("elm.json"),
+            r#"{ "source-directories": ["src", "lib"] }"#,
+        )
+        .unwrap();
+        // Two copies wait from the start, one before the module in the order of names and one after
+        let original = src.join("Greeting.elm");
+        for path in [&original, &src.join("Aaa.elm"), &src.join("Zzz.elm")] {
+            write_settled(path, GREETING);
+        }
+        let mut workspace = Workspace::new(temp_dir.path().to_path_buf());
+        workspace.initialize().unwrap();
+
+        // A second source directory gets a file at the very place the name spells. Of two such
+        // files the one that was read last holds the name, and the other waits with the copies.
+        let twin = lib.join("Greeting.elm");
+        write_settled(&twin, GREETING);
+        workspace.update_file(&Url::from_file_path(&twin).unwrap(), GREETING);
+        assert_eq!(workspace.modules["Greeting"].path, twin);
+        assert_eq!(workspace.displaced.len(), 3);
+
+        fs::remove_file(&twin).unwrap();
+        workspace.remove_file(&Url::from_file_path(&twin).unwrap());
+        assert_eq!(workspace.modules["Greeting"].path, original);
+        assert_eq!(hello_is_defined_in(&workspace), vec![original]);
+        assert_eq!(workspace.displaced.len(), 2);
+    }
+
     #[test]
     fn test_a_file_beyond_the_source_directories_survives_a_new_index() {
         let (temp_dir, mut workspace) = create_test_workspace();
@@ -3007,6 +3462,205 @@ mod tests {
             "module Shared exposing (..)\n",
         );
         assert_eq!(workspace.files_beyond_the_walk(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn test_a_source_directory_is_spelled_as_the_disk_spells_it() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("app");
+        let shared = temp_dir.path().join("shared");
+        fs::create_dir_all(root.join("src").join("Page")).unwrap();
+        fs::create_dir(&shared).unwrap();
+        let home = root.join("src").join("Page").join("Home.elm");
+        write_settled(&home, "module Page.Home exposing (..)\n");
+        fs::write(
+            root.join("elm.json"),
+            r#"{ "source-directories": ["SRC", "../Shared", "Lib"] }"#,
+        )
+        .unwrap();
+        let mut workspace = Workspace::new(root.clone());
+        workspace.initialize().unwrap();
+
+        if !root.join("SRC").exists() {
+            // This file system tells SRC from src, so elm.json names directories that are not there
+            assert_eq!(
+                workspace.source_dirs,
+                vec![
+                    root.join("SRC"),
+                    temp_dir.path().join("Shared"),
+                    root.join("Lib")
+                ]
+            );
+            return;
+        }
+        // One spelling, the disk's. What is not on the disk stays as elm.json has it.
+        assert_eq!(
+            workspace.source_dirs,
+            vec![root.join("src"), shared, root.join("Lib")]
+        );
+        assert_eq!(
+            workspace
+                .modules
+                .get("Page.Home")
+                .map(|module| module.path.clone()),
+            Some(home.clone())
+        );
+        assert_eq!(
+            workspace.module_name_at(&home).map_err(|e| e.to_string()),
+            Ok("Page.Home".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_source_directory_beside_a_linked_root_is_where_the_file_system_finds_it() {
+        // home/app is a link to data/app, and elm.json lists "../shared". The
+        // compiler reads data/shared. home/shared is another directory.
+        let temp_dir = TempDir::new().unwrap();
+        let temp = temp_dir.path().canonicalize().unwrap();
+        let (home, data) = (temp.join("home"), temp.join("data"));
+        fs::create_dir_all(data.join("app").join("src")).unwrap();
+        fs::create_dir_all(data.join("shared")).unwrap();
+        fs::create_dir_all(home.join("shared")).unwrap();
+        fs::write(
+            data.join("app").join("elm.json"),
+            r#"{ "source-directories": ["src", "../shared", "src/../../shared/deep"] }"#,
+        )
+        .unwrap();
+        write_settled(
+            &data.join("shared").join("Shared.elm"),
+            "module Shared exposing (..)\n",
+        );
+        write_settled(
+            &home.join("shared").join("Other.elm"),
+            "module Other exposing (..)\n",
+        );
+        std::os::unix::fs::symlink(data.join("app"), home.join("app")).unwrap();
+        let root = home.join("app");
+        let mut workspace = Workspace::new(root.clone());
+        workspace.initialize().unwrap();
+
+        // What lies below the root keeps the root's spelling, link and all.
+        // ".." leaves the link for the place it leads to.
+        assert_eq!(
+            workspace.source_dirs,
+            vec![
+                root.join("src"),
+                data.join("shared"),
+                data.join("shared").join("deep")
+            ]
+        );
+        assert_eq!(
+            workspace
+                .modules
+                .get("Shared")
+                .map(|module| module.path.clone()),
+            Some(data.join("shared").join("Shared.elm"))
+        );
+        assert!(!workspace.modules.contains_key("Other"));
+    }
+
+    #[test]
+    fn test_a_source_directory_made_later_is_spelled_as_the_disk_spells_it() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().to_path_buf();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(
+            root.join("elm.json"),
+            r#"{ "source-directories": ["src", "GEN"] }"#,
+        )
+        .unwrap();
+        let mut workspace = Workspace::new(root.clone());
+        workspace.initialize().unwrap();
+        // Nothing is there yet to say how the name is spelled
+        assert_eq!(
+            workspace.source_dirs,
+            vec![root.join("src"), root.join("GEN")]
+        );
+
+        // A build writes its generated code into "gen"
+        fs::create_dir(root.join("gen")).unwrap();
+        let api = root.join("gen").join("Api.elm");
+        write_settled(&api, "module Api exposing (..)\n");
+        if !root.join("GEN").exists() {
+            // This file system tells GEN from gen, and elm.json still names a directory that is not there
+            return;
+        }
+        assert_eq!(workspace.take_disk_changes().changed, vec![api.clone()]);
+        assert_eq!(
+            workspace.source_dirs,
+            vec![root.join("src"), root.join("gen")]
+        );
+        assert_eq!(
+            workspace.module_name_at(&api).map_err(|e| e.to_string()),
+            Ok("Api".to_string())
+        );
+    }
+
+    #[test]
+    fn test_a_source_directory_is_found_in_the_form_the_disk_keeps_its_accent_in() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        // The disk keeps the accent as a letter and a mark, and elm.json writes it as one letter
+        let on_disk = root.join("co\u{301}digo");
+        fs::create_dir(&on_disk).unwrap();
+        write_settled(&on_disk.join("A.elm"), "module A exposing (..)\n");
+        fs::write(
+            root.join("elm.json"),
+            "{ \"source-directories\": [\"c\u{f3}digo\"] }",
+        )
+        .unwrap();
+        if !root.join("c\u{f3}digo").exists() {
+            // This file system tells the two forms apart, and elm.json names a directory that is not there
+            return;
+        }
+        let mut workspace = Workspace::new(root.to_path_buf());
+        workspace.initialize().unwrap();
+
+        assert_eq!(workspace.source_dirs, vec![on_disk.clone()]);
+        assert_eq!(
+            workspace.modules.get("A").map(|module| module.path.clone()),
+            Some(on_disk.join("A.elm"))
+        );
+    }
+
+    #[test]
+    fn test_a_file_is_no_copy_of_itself_under_another_spelling() {
+        let (temp_dir, mut workspace) = create_test_workspace();
+        let src = temp_dir.path().join("src");
+        fs::create_dir(src.join("Api")).unwrap();
+        let on_disk = src.join("Api").join("Utils.elm");
+        let as_called = src.join("API").join("Utils.elm");
+        let text = "module API.Utils exposing (..)\n";
+        write_settled(&on_disk, text);
+        if !as_called.exists() {
+            // This file system tells API from Api: two paths are two files
+            return;
+        }
+        // A client called the file by a spelling the disk does not have, and
+        // there the path spells the module's name
+        workspace.update_file(&Url::from_file_path(&as_called).unwrap(), text);
+        assert_eq!(
+            workspace
+                .modules
+                .get("API.Utils")
+                .map(|module| module.path.clone()),
+            Some(as_called.clone())
+        );
+
+        // Called as the disk spells it, it is the same file, and no copy of it
+        // that waits for the module's name
+        workspace.update_file(&Url::from_file_path(&on_disk).unwrap(), text);
+        assert_eq!(workspace.waits_behind(&on_disk), None);
+        assert_eq!(
+            workspace
+                .modules
+                .get("API.Utils")
+                .map(|module| module.path.clone()),
+            Some(on_disk.clone())
+        );
+        // And the other spelling is no file that waits behind this one
+        assert!(workspace.displaced.is_empty());
     }
 
     #[test]

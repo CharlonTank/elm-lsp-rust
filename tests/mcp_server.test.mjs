@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -20,7 +21,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "fs";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { once } from "node:events";
 import { request } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -240,6 +241,8 @@ test("a moved module is named by its path below its source directory, or not mov
     isError: true,
   });
   assert.deepEqual(await move("src/helpers/Utils.elm"), { text: noName("helpers"), isError: true });
+  // A file where a directory would have to be
+  assert.deepEqual(await move("src/Main.elm/Sub/Utils.elm"), { text: noName("Main.elm"), isError: true });
   assert.deepEqual(await move("src/Helpers/utils.elm"), { text: noName("utils"), isError: true });
   assert.deepEqual(await callTool(client, "elm_rename_file", { file_path: utils, new_name: "utils.elm" }), {
     text: 'Error: "utils" is no module name. It has to start with an upper-case letter and hold only letters, digits and underscores',
@@ -955,6 +958,385 @@ test("a file out of reach is not taken for a deleted one", { skip: asRoot }, asy
   assert.match(renamed.text, /Applied 10 edit\(s\) in 4 file\(s\)/);
   assert.equal(readFileSync(utilsTest, "utf-8"), consumer("UtilsTest").replaceAll("formatName", "shout"));
   assert.equal(readFileSync(linked, "utf-8"), consumer("Linked").replaceAll("formatName", "shout"));
+});
+
+// An agent copies a module, as a backup before a risky change or to start a new module from it.
+// Until the copy has a name of its own, two files declare one module. The compiler reads the
+// one whose path spells the name, and so does a refactoring, whatever becomes of the copy.
+for (const [fate, settle] of [
+  ["is still there", () => {}],
+  ["is deleted", (copy) => rmSync(copy)],
+  ["gets a name of its own", (copy) => writeFileSync(copy, readFileSync(copy, "utf-8").replace("module Utils ", "module UtilsBackup "))],
+]) {
+  test(`a module is refactored as itself when a copy of it ${fate}`, async (t) => {
+    const project = copyFixture(t);
+    const client = await connect(t, { cwd: project });
+    const [main, utils, copy] = ["Main.elm", "Utils.elm", "UtilsBackup.elm"].map((name) => join(project, "src", name));
+    await callTool(client, "elm_symbols", { file_path: utils });
+
+    const text = readFileSync(utils, "utf-8");
+    writeFileSync(copy, text);
+    await callTool(client, "elm_symbols", { file_path: main });
+    settle(copy);
+
+    // Utils.elm imports Types, and did not change on disk in all this
+    const renamed = await callTool(client, "elm_rename_file", { file_path: join(project, "src/Types.elm"), new_name: "Models.elm" });
+    assert.equal(renamed.isError, false, renamed.text);
+    assert.match(readFileSync(utils, "utf-8"), /^import Models exposing \(User\)$/m);
+    // "greet" in Main.elm is the one of Utils.elm
+    const lines = readFileSync(main, "utf-8").split("\n");
+    const line = lines.findIndex((text) => text.includes("(greet model.user)"));
+    const definition = await callTool(client, "elm_definition", { file_path: main, line, character: lines[line].indexOf("greet") });
+    assert.match(definition.text, /src\/Utils\.elm:12:/);
+    // A copy that still declares Utils is no module of the project, and nothing in it is rewritten
+    if (fate === "is still there") assert.equal(readFileSync(copy, "utf-8"), text);
+  });
+}
+
+test("a copy that is renamed takes a name of its own, and no importer of the module it was made from", async (t) => {
+  const project = copyFixture(t);
+  const [main, utils, copy, spare] = ["Main.elm", "Utils.elm", "UtilsBackup.elm", "Spare.elm"].map((name) => join(project, "src", name));
+  writeFileSync(copy, readFileSync(utils, "utf-8"));
+  const client = await connect(t, { cwd: project });
+  const importer = readFileSync(main, "utf-8");
+
+  // The copy declares Utils, and Main.elm imports Utils: the one in Utils.elm
+  const renamed = await callTool(client, "elm_rename_file", { file_path: copy, new_name: "Spare.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(spare, "utf-8"), /^module Spare exposing /);
+  assert.equal(readFileSync(main, "utf-8"), importer);
+  // From here on it is a module of the project
+  assert.match((await callTool(client, "elm_symbols", { file_path: spare })).text, /^Found 3 symbols/);
+});
+
+test("a tool called on a copy that still declares another file's module is refused, and says what to do", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // A function that only the copy has. Main.elm has a `view` of its own, which a search by name alone finds.
+  writeFileSync(at("UtilsBackup.elm"), `${readFileSync(at("Utils.elm"), "utf-8")}\n\nview : String\nview =\n    ""\n`);
+  writeFileSync(at("TypesBackup.elm"), readFileSync(at("Types.elm"), "utf-8"));
+  const client = await connect(t, { cwd: project });
+  const before = sourcesOf(project);
+  // Where `word` stands in a file, as the arguments of a tool
+  const place = (name, word) => {
+    const lines = readFileSync(at(name), "utf-8").split("\n");
+    const line = lines.findIndex((text) => text.includes(word));
+    return { file_path: at(name), line, character: lines[line].indexOf(word) };
+  };
+  const refused = (copy, original, module) =>
+    `${at(copy)} declares module ${module}, which is the module of ${at(original)}. ` +
+    `Give it a name of its own with elm_rename_file, or edit its module line, and repeat the call.`;
+
+  // The index holds nothing of the copies, so each of these would be answered from other files
+  const calls = [
+    ["elm_rename_function", { ...place("UtilsBackup.elm", "view :"), old_name: "view", newName: "show" }, refused("UtilsBackup.elm", "Utils.elm", "Utils")],
+    ["elm_rename_function", { ...place("UtilsBackup.elm", "helper :"), old_name: "helper", newName: "assist" }, refused("UtilsBackup.elm", "Utils.elm", "Utils")],
+    ["elm_references", place("UtilsBackup.elm", "helper :"), refused("UtilsBackup.elm", "Utils.elm", "Utils")],
+    ["elm_definition", place("UtilsBackup.elm", "formatName name"), refused("UtilsBackup.elm", "Utils.elm", "Utils")],
+    ["elm_symbols", { file_path: at("UtilsBackup.elm") }, refused("UtilsBackup.elm", "Utils.elm", "Utils")],
+    ["elm_move_function", { ...place("UtilsBackup.elm", "helper :"), function_name: "helper", target_module: at("Main.elm") }, refused("UtilsBackup.elm", "Utils.elm", "Utils")],
+    ["elm_rename_type", { ...place("TypesBackup.elm", "Guest ="), old_name: "Guest", newName: "Visitor" }, refused("TypesBackup.elm", "Types.elm", "Types")],
+    ["elm_remove_field", { ...place("TypesBackup.elm", "email :"), field_name: "email" }, refused("TypesBackup.elm", "Types.elm", "Types")],
+    ["elm_prepare_add_variant", { file_path: at("TypesBackup.elm"), type_name: "Guest", new_variant_name: "Other" }, refused("TypesBackup.elm", "Types.elm", "Types")],
+  ];
+  for (const [tool, args, message] of calls) {
+    const answer = await callTool(client, tool, args);
+    assert.deepEqual({ tool, isError: answer.isError, text: answer.text }, { tool, isError: true, text: message });
+  }
+  assert.deepEqual(sourcesOf(project), before);
+
+  // A file in no source directory can be a program of its own, which the compiler builds when it
+  // is given the path. The index has room for one Main all the same, and says so in other words.
+  mkdirSync(join(project, "examples/Demo"), { recursive: true });
+  const demo = join(project, "examples/Demo/Main.elm");
+  writeFileSync(demo, 'module Main exposing (main)\n\nimport Html\n\n\nmain =\n    Html.text "demo"\n');
+  const outside = await callTool(client, "elm_symbols", { file_path: demo });
+  assert.deepEqual([outside.isError, outside.text], [
+    true,
+    `${demo} declares module Main, and so does ${at("Main.elm")}, which lies where a source directory spells that name. ` +
+      `The index keeps one file for each module name, so it keeps nothing of this file, which is in no source directory, and no tool can start from it. ` +
+      `If it is a copy, give it a name of its own with elm_rename_file and repeat the call.`,
+  ]);
+
+  // The build takes any file, and has the compiler's own words for a module at the wrong place
+  const built = await callTool(client, "elm_diagnostics", { file_path: at("UtilsBackup.elm") });
+  assert.doesNotMatch(built.text, /which is the module of/);
+  // The way out that the refusal names. Below a directory, the name is the one the new path spells.
+  mkdirSync(at("Backup"));
+  renameSync(at("TypesBackup.elm"), at("Backup/Types.elm"));
+  const renamed = await callTool(client, "elm_rename_file", { file_path: at("Backup/Types.elm"), new_name: "Models.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(at("Backup/Models.elm"), "utf-8"), /^module Backup\.Models exposing /);
+  assert.match((await callTool(client, "elm_symbols", { file_path: at("Backup/Models.elm") })).text, /^Found 4 symbols/);
+  // Moving the other copy leaves the importers of Utils with the module they import
+  const moved = await callTool(client, "elm_move_file", { file_path: at("UtilsBackup.elm"), target_path: at("Backup/Helpers.elm") });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(readFileSync(at("Backup/Helpers.elm"), "utf-8"), /^module Backup\.Helpers exposing /);
+  assert.equal(readFileSync(at("Main.elm"), "utf-8"), before["Main.elm"]);
+
+  // Below a source directory a path that spells no module name is refused, as a move there is.
+  // In no source directory the file keeps the first parts of the name it declares.
+  mkdirSync(at("pages"));
+  writeFileSync(at("pages/Home.elm"), "module Home exposing (home)\n\n\nhome =\n    1\n");
+  const misplaced = await callTool(client, "elm_rename_file", { file_path: at("pages/Home.elm"), new_name: "Start.elm" });
+  assert.equal(misplaced.isError, true);
+  assert.match(misplaced.text, /"pages" cannot be part of a module name/);
+  assert.ok(existsSync(at("pages/Home.elm")));
+  mkdirSync(join(project, "tests/Support"), { recursive: true });
+  const support = join(project, "tests/Support/Fake.elm");
+  writeFileSync(support, "module Support.Fake exposing (fake)\n\n\nfake =\n    1\n");
+  const supported = await callTool(client, "elm_rename_file", { file_path: support, new_name: "Stub.elm" });
+  assert.equal(supported.isError, false, supported.text);
+  assert.match(readFileSync(join(project, "tests/Support/Stub.elm"), "utf-8"), /^module Support\.Stub exposing /);
+});
+
+test("a file is the same file however its name is spelled in upper and lower case", async (t) => {
+  const project = copyFixture(t);
+  const [main, utils, spelled] = ["Main.elm", "Utils.elm", "utils.elm"].map((name) => join(project, "src", name));
+  // Where the file system tells the two apart, there is no file of that name
+  if (!existsSync(spelled)) return t.skip("this file system tells upper case from lower case");
+  const client = await connect(t, { cwd: project });
+
+  // Taken for another file that declares Utils, it would count as a copy of the module
+  assert.match((await callTool(client, "elm_symbols", { file_path: spelled })).text, /^Found 3 symbols/);
+  const renamed = await callTool(client, "elm_rename_file", { file_path: spelled, new_name: "Helpers.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(renamed.text, /Updated 1 import\(s\) in 2 file\(s\)/);
+  assert.match(readFileSync(main, "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
+  assert.equal(existsSync(utils), false);
+
+  // Through a linked directory, where the real path differs from the given one in more than its case,
+  // with the link and a directory behind it spelled wrongly as well
+  const linked = join(tempDir(t), "linked");
+  symlinkSync(copyFixture(t), linked);
+  const misspelled = join(dirname(linked), "LINKED/SRC/utils.elm");
+  assert.match((await callTool(client, "elm_symbols", { file_path: misspelled })).text, /^Found 3 symbols/);
+  const again = await callTool(client, "elm_rename_file", { file_path: misspelled, new_name: "Helpers.elm" });
+  assert.match(again.text, /Updated 1 import\(s\) in 2 file\(s\)/);
+  assert.match(readFileSync(join(linked, "src/Main.elm"), "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
+
+  // The module a function moves to is named by a path as well, here with the project's own directory in another case
+  const other = copyFixture(t);
+  const shouted = join(dirname(other), basename(other).toUpperCase(), "src/Types.elm");
+  const moved = await callTool(client, "elm_move_function", { file_path: join(other, "src/Utils.elm"), line: 6, character: 0, function_name: "formatName", target_module: shouted });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(readFileSync(join(other, "src/Types.elm"), "utf-8"), /^formatName name =$/m);
+});
+
+test("a link to a file keeps its own name, whatever the file it leads to is called", async (t) => {
+  const project = copyFixture(t);
+  const [main, utils] = ["Main.elm", "Utils.elm"].map((name) => join(project, "src", name));
+  // Utils.elm is a link to a file whose name differs from its own in letter case alone
+  mkdirSync(join(project, "vendor"));
+  renameSync(utils, join(project, "vendor/utils.elm"));
+  symlinkSync(join(project, "vendor/utils.elm"), utils);
+  const client = await connect(t, { cwd: project });
+
+  assert.match((await callTool(client, "elm_symbols", { file_path: utils })).text, /^Found 3 symbols/);
+  const renamed = await callTool(client, "elm_rename_file", { file_path: utils, new_name: "Helpers.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(renamed.text, /Updated 1 import\(s\) in 2 file\(s\)/);
+  assert.match(readFileSync(main, "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: main }), { text: "No errors or warnings", isError: false });
+});
+
+test("a source directory is the same directory however elm.json spells it", async (t) => {
+  const project = copyFixture(t);
+  const [main, utils] = ["Main.elm", "Utils.elm"].map((name) => join(project, "src", name));
+  // Where the file system tells the two apart, elm.json would name a directory that is not there
+  if (!existsSync(join(project, "SRC"))) return t.skip("this file system tells upper case from lower case");
+  writeFileSync(join(project, "elm.json"), readFileSync(join(project, "elm.json"), "utf-8").replace('"src"', '"SRC"'));
+  const client = await connect(t, { cwd: project });
+
+  // Taken for a file outside the source directory SRC, it would be no module of the project
+  assert.match((await callTool(client, "elm_symbols", { file_path: utils })).text, /^Found 3 symbols/);
+  const renamed = await callTool(client, "elm_rename_file", { file_path: utils, new_name: "Helpers.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(renamed.text, /Updated 1 import\(s\) in 2 file\(s\)/);
+  assert.match(readFileSync(main, "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
+  // A move names the module by its path below the source directory, which has to be the one the file lies in
+  const moved = await callTool(client, "elm_move_file", { file_path: join(project, "src/Helpers.elm"), target_path: "src/Lib/Helpers.elm" });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(moved.text, /^Moved Helpers to Lib\.Helpers$/m);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: main }), { text: "No errors or warnings", isError: false });
+});
+
+test("a project behind a link is reached by the link's own name", async (t) => {
+  // Projects is a link to a directory called projects, in another place: the two names differ in letter case alone
+  const [home, data] = ["home", "data"].map((name) => join(tempDir(t), name));
+  mkdirSync(home);
+  mkdirSync(join(data, "projects"), { recursive: true });
+  cpSync(copyFixture(t), join(data, "projects/fixture"), { recursive: true });
+  symlinkSync(join(data, "projects"), join(home, "Projects"));
+  // Where the file system tells the two names apart, a directory of the target's name can lie beside the link
+  const beside = join(home, "projects/fixture");
+  const caseCounts = !existsSync(join(home, "projects"));
+  if (caseCounts) cpSync(join(data, "projects/fixture"), beside, { recursive: true });
+  const utils = join(home, "Projects/fixture/src/Utils.elm");
+  const client = await connect(t, { cwd: tempDir(t) });
+
+  assert.match((await callTool(client, "elm_symbols", { file_path: utils })).text, /^Found 3 symbols/);
+  const renamed = await callTool(client, "elm_rename_function", { file_path: utils, line: 6, character: 0, old_name: "formatName", newName: "shout" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.ok(renamed.text.includes(`${utils}:`), renamed.text);
+  assert.match(readFileSync(utils, "utf-8"), /^shout name =$/m);
+  if (caseCounts) assert.match(readFileSync(join(beside, "src/Utils.elm"), "utf-8"), /^formatName name =$/m);
+});
+
+test("a file moved into a directory is named by the directory as the disk spells it", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  mkdirSync(at("Api"));
+  if (!existsSync(at("API"))) return t.skip("this file system tells upper case from lower case");
+  const client = await connect(t, { cwd: project });
+
+  // Taken as it is written, the target would make a module API.Utils of a file that lies in src/Api
+  const moved = await callTool(client, "elm_move_file", { file_path: at("Utils.elm"), target_path: "src/API/Utils.elm" });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(moved.text, /^Moved Utils to Api\.Utils$/m);
+  assert.match(readFileSync(at("Api/Utils.elm"), "utf-8"), /^module Api\.Utils exposing /);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Api\.Utils exposing \(formatName, greet\)$/m);
+  // And it is that module from here on, under either spelling
+  assert.match((await callTool(client, "elm_symbols", { file_path: at("API/Utils.elm") })).text, /^Found 3 symbols/);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("a source directory is found in the form the disk keeps its accent in", async (t) => {
+  const project = copyFixture(t);
+  // The disk keeps the accent as a letter and a mark. elm.json and a caller write it as one letter.
+  const [onDisk, asWritten] = ["co\u0301digo", "c\u00f3digo"].map((name) => join(project, name));
+  renameSync(join(project, "src"), onDisk);
+  if (!existsSync(asWritten)) return t.skip("this file system tells the two forms of an accent apart");
+  writeFileSync(join(project, "elm.json"), readFileSync(join(project, "elm.json"), "utf-8").replace('"src"', '"c\u00f3digo"'));
+  const client = await connect(t, { cwd: project });
+
+  for (const directory of [onDisk, asWritten]) {
+    assert.match((await callTool(client, "elm_symbols", { file_path: join(directory, "Utils.elm") })).text, /^Found 3 symbols/);
+  }
+  const renamed = await callTool(client, "elm_rename_file", { file_path: join(asWritten, "Utils.elm"), new_name: "Helpers.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(renamed.text, /Updated 1 import\(s\) in 2 file\(s\)/);
+  assert.match(readFileSync(join(onDisk, "Main.elm"), "utf-8"), /^import Helpers exposing \(formatName, greet\)$/m);
+});
+
+test("a source directory beside a project behind a link is the one the compiler reads", async (t) => {
+  // home/app is a link to data/app, and elm.json lists "../shared". Read from the real place of
+  // the project, that is data/shared. Read from the text of the path, it would be home/shared.
+  for (const sibling of [false, true]) {
+    const [home, data] = ["home", "data"].map((name) => join(tempDir(t), name));
+    mkdirSync(home);
+    mkdirSync(join(data, "shared"), { recursive: true });
+    cpSync(copyFixture(t), join(data, "app"), { recursive: true });
+    symlinkSync(join(data, "app"), join(home, "app"));
+    const project = join(home, "app");
+    addSourceDirectory(project, "../shared");
+    const consumer = "module Consumer exposing (shown)\n\nimport Utils exposing (formatName)\n\n\nshown : String\nshown =\n    formatName \"x\"\n";
+    writeFileSync(join(data, "shared/Consumer.elm"), consumer);
+    const main = join(project, "src/Main.elm");
+    writeFileSync(main, readFileSync(main, "utf-8").replace("import Browser\n", "import Browser\nimport Consumer\n"));
+    // A directory of the same name beside the link belongs to something else
+    if (sibling) {
+      mkdirSync(join(home, "shared"));
+      writeFileSync(join(home, "shared/Consumer.elm"), consumer);
+    }
+    const client = await connect(t, { cwd: tempDir(t) });
+
+    const renamed = await callTool(client, "elm_rename_function", { file_path: join(project, "src/Utils.elm"), line: 6, character: 0, old_name: "formatName", newName: "shout" });
+    assert.equal(renamed.isError, false, renamed.text);
+    assert.match(readFileSync(join(data, "shared/Consumer.elm"), "utf-8"), /^import Utils exposing \(shout\)$/m);
+    if (sibling) assert.equal(readFileSync(join(home, "shared/Consumer.elm"), "utf-8"), consumer);
+    assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: main }), { text: "No errors or warnings", isError: false });
+  }
+});
+
+test("a source directory listed through a link to nothing is the one the language server reads", async (t) => {
+  // "gone" leads nowhere, so the file system has no place for "gone/../../shared". The language server
+  // reads ".." from the text there, and the wrapper has to arrive at the same directory to let a change in.
+  const project = copyFixture(t, "app");
+  const shared = join(dirname(project), "shared");
+  mkdirSync(shared);
+  symlinkSync("nowhere", join(project, "gone"));
+  addSourceDirectory(project, "gone/../../shared");
+  const consumer = join(shared, "Consumer.elm");
+  writeFileSync(consumer, "module Consumer exposing (shown)\n\nimport Utils exposing (formatName)\n\n\nshown : String\nshown =\n    formatName \"x\"\n");
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_function", { file_path: join(project, "src/Utils.elm"), line: 6, character: 0, old_name: "formatName", newName: "shout" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(consumer, "utf-8"), /^import Utils exposing \(shout\)$/m);
+});
+
+test("a source directory outside the project is the same directory however elm.json spells it", async (t) => {
+  const project = join(tempDir(t), "app");
+  cpSync(copyFixture(t), project, { recursive: true });
+  const shared = join(dirname(project), "shared");
+  mkdirSync(shared);
+  if (!existsSync(join(dirname(project), "SHARED"))) return t.skip("this file system tells upper case from lower case");
+  addSourceDirectory(project, "../SHARED");
+  writeFileSync(join(shared, "Consumer.elm"), "module Consumer exposing (shown)\n\nimport Utils exposing (formatName)\n\n\nshown : String\nshown =\n    formatName \"x\"\n");
+  const client = await connect(t, { cwd: project });
+
+  // The language server and the wrapper have to agree on the directory, or the change to it is refused
+  const renamed = await callTool(client, "elm_rename_function", { file_path: join(project, "src/Utils.elm"), line: 6, character: 0, old_name: "formatName", newName: "shout" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(join(shared, "Consumer.elm"), "utf-8"), /^import Utils exposing \(shout\)$/m);
+});
+
+test("a module in a directory whose accent the disk keeps as a letter and a mark has its name with one letter", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  // Foo/Élan on disk in the decomposed form, and in the module line as the compiler wants it
+  const [onDisk, composed] = ["Foo/E\u0301lan", "Foo/\u00c9lan"];
+  mkdirSync(at(onDisk), { recursive: true });
+  if (!existsSync(at(composed))) return t.skip("this file system tells the two forms of an accent apart");
+  writeFileSync(at(`${onDisk}/Cafe.elm`), "module Foo.\u00c9lan.Cafe exposing (open)\n\n\nopen : Bool\nopen =\n    True\n");
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", "import Browser\nimport Foo.\u00c9lan.Cafe\n"));
+  const client = await connect(t, { cwd: project });
+
+  assert.match((await callTool(client, "elm_symbols", { file_path: at(`${composed}/Cafe.elm`) })).text, /^Found 1 symbols/);
+  const renamed = await callTool(client, "elm_rename_file", { file_path: at(`${composed}/Cafe.elm`), new_name: "Summer.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(at(`${onDisk}/Summer.elm`), "utf-8"), /^module Foo\.\u00c9lan\.Summer exposing \(open\)$/m);
+  assert.match(readFileSync(at("Main.elm"), "utf-8"), /^import Foo\.\u00c9lan\.Summer$/m);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("a module below two source directories is itself when a copy of it is made", async (t) => {
+  // "src" and "src/Sub" are both source directories, and Sub/Utils.elm is the module Sub.Utils of the first
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  addSourceDirectory(project, "src/Sub");
+  mkdirSync(at("Sub"));
+  writeFileSync(at("Sub/Utils.elm"), readFileSync(at("Utils.elm"), "utf-8").replace("module Utils exposing", "module Sub.Utils exposing"));
+  rmSync(at("Utils.elm"));
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Utils exposing", "import Sub.Utils exposing"));
+  const client = await connect(t, { cwd: project });
+  assert.match((await callTool(client, "elm_symbols", { file_path: at("Sub/Utils.elm") })).text, /^Found 3 symbols/);
+
+  // A backup of it, made while the server runs, still says "module Sub.Utils"
+  const backup = readFileSync(at("Sub/Utils.elm"), "utf-8");
+  writeFileSync(at("ZZBackup.elm"), backup);
+  const renamed = await callTool(client, "elm_rename_file", { file_path: at("Types.elm"), new_name: "Models.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(at("Sub/Utils.elm"), "utf-8"), /^import Models exposing \(User\)$/m);
+  assert.equal(readFileSync(at("ZZBackup.elm"), "utf-8"), backup);
+  rmSync(at("ZZBackup.elm"));
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("a copy that is there when the server starts takes no module's name either", async (t) => {
+  const project = copyFixture(t);
+  const utils = join(project, "src/Utils.elm");
+  const text = readFileSync(utils, "utf-8");
+  // One before Utils.elm in any order of names and one after it. The order of the walk is the file system's.
+  const copies = ["Aaa.elm", "Zzz.elm"].map((name) => join(project, "src", name));
+  for (const copy of copies) writeFileSync(copy, text);
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_file", { file_path: join(project, "src/Types.elm"), new_name: "Models.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.match(readFileSync(utils, "utf-8"), /^import Models exposing \(User\)$/m);
+  assert.deepEqual(copies.map((copy) => readFileSync(copy, "utf-8")), [text, text]);
 });
 
 test("a file outside the source directories stays in an index that is built anew", async (t) => {

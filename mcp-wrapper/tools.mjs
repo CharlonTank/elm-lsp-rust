@@ -11,7 +11,7 @@
 import { execFile } from "child_process";
 import { mkdir, rename } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { z } from "zod";
@@ -20,6 +20,7 @@ import { ensureClient } from "./lsp-client.mjs";
 import { moveFunction } from "./move-function.mjs";
 import {
   applyWorkspaceEdit,
+  asSpelledOnDisk,
   assertInProject,
   findWorkspaceRoot,
   projectToolsHint,
@@ -76,11 +77,12 @@ const noProject = (absPath) => `No elm.json found in the parent directories of $
 
 // Resolve a file to an absolute path and the Elm project that contains it.
 function locate(filePath) {
-  const absPath = resolve(filePath);
-  const stats = statSync(absPath, { throwIfNoEntry: false });
+  const given = resolve(filePath);
+  const stats = statSync(given, { throwIfNoEntry: false });
   if (!stats?.isFile()) {
-    throw new ToolError(`Cannot read ${absPath}: ${stats ? "it is not a file" : "it does not exist"}`);
+    throw new ToolError(`Cannot read ${given}: ${stats ? "it is not a file" : "it does not exist"}`);
   }
+  const absPath = asSpelledOnDisk(given);
   const workspaceRoot = findWorkspaceRoot(absPath);
   if (!workspaceRoot) {
     throw new ToolError(noProject(absPath));
@@ -272,7 +274,8 @@ export const PATH_ARGUMENTS = ["file_path", "new_path", "old_path"];
 function projectOf(args) {
   for (const path of PATH_ARGUMENTS.map((name) => args[name]).filter((path) => typeof path === "string")) {
     const root = findWorkspaceRoot(resolve(path));
-    if (root) return realpathSync(root);
+    // As the disk spells it, so that two spellings of one root take turns
+    if (root) return realpathSync.native(root);
   }
   return null;
 }
@@ -575,7 +578,8 @@ export const tools = [
       target_module: z.string().describe('Path to the target module file (e.g., "src/Utils/Helpers.elm")'),
     },
     async run({ file_path, line, function_name, target_module }) {
-      const absTargetModule = resolve(target_module);
+      // Spelled as the disk spells it before anything is asked of it, as file_path is
+      const absTargetModule = asSpelledOnDisk(resolve(target_module));
       const { workspaceRoot } = locate(file_path);
       assertInProject(absTargetModule, workspaceRoot);
       if (!existsSync(absTargetModule)) {
@@ -754,7 +758,10 @@ export const tools = [
       // that "src/Utils/Helper.elm" means the same wherever the server was started.
       // One with ".." in it, or through a linked directory, could lead out of the project.
       const { workspaceRoot } = locate(file_path);
-      const absTarget = resolve(workspaceRoot, target_path);
+      // The directories on the way are spelled as the disk has them, so that "src/API" names the
+      // module Api where the directory is src/Api. The file's own name is the caller's to choose.
+      const given = resolve(workspaceRoot, target_path);
+      const absTarget = join(asSpelledOnDisk(dirname(given)), basename(given));
       assertInProject(absTarget, workspaceRoot);
       return relocateFile({ file_path, command: "elm.moveFile", target: absTarget, verb: "move", done: "Moved" });
     },
@@ -770,8 +777,8 @@ export const tools = [
       new_path: z.string().describe("New file path"),
     },
     async run({ old_path, new_path }) {
-      const absOldPath = resolve(old_path);
-      const absNewPath = resolve(new_path);
+      const absOldPath = asSpelledOnDisk(resolve(old_path));
+      const absNewPath = asSpelledOnDisk(resolve(new_path));
       const workspaceRoot = findWorkspaceRoot(absNewPath) || findWorkspaceRoot(absOldPath);
       if (!workspaceRoot) {
         throw new ToolError(noProject(absNewPath));
