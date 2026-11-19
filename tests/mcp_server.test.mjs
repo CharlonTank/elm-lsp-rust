@@ -993,6 +993,28 @@ for (const [fate, settle] of [
   });
 }
 
+test("a renamed module leaves the modules below it their names", async (t) => {
+  const project = copyFixture(t);
+  const main = join(project, "src/Main.elm");
+  // Utils has a module below it, as Page has Page.Home. Main.elm names both by their full names.
+  mkdirSync(join(project, "src/Utils"));
+  writeFileSync(join(project, "src/Utils/Extra.elm"), 'module Utils.Extra exposing (pad)\n\n\npad : String -> String\npad text =\n    " " ++ text\n');
+  const before = readFileSync(main, "utf-8");
+  writeFileSync(
+    main,
+    before
+      .replace("import Utils exposing (formatName, greet)", "import Utils exposing (formatName, greet)\nimport Utils.Extra")
+      .replace("text (greet model.user)", "text (Utils.Extra.pad (Utils.helper (greet model.user)))")
+  );
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_file", { file_path: join(project, "src/Utils.elm"), new_name: "Helpers.elm" });
+  assert.equal(renamed.isError, false, renamed.text);
+  const after = readFileSync(main, "utf-8");
+  assert.match(after, /^import Helpers exposing \(formatName, greet\)\nimport Utils\.Extra$/m);
+  assert.match(after, /text \(Utils\.Extra\.pad \(Helpers\.helper \(greet model\.user\)\)\)/);
+});
+
 test("a copy that is renamed takes a name of its own, and no importer of the module it was made from", async (t) => {
   const project = copyFixture(t);
   const [main, utils, copy, spare] = ["Main.elm", "Utils.elm", "UtilsBackup.elm", "Spare.elm"].map((name) => join(project, "src", name));

@@ -313,7 +313,17 @@ impl Workspace {
                                 .nth(actual_pos - 1)
                                 .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
 
-                        if before_ok {
+                        // "Utils.Extra.pad" names the module Utils.Extra, which lies below
+                        // the renamed one and keeps its name: an upper-case word with a
+                        // dot behind it is one more part of a module's name
+                        let after = &line[actual_pos + qualified_pattern.len()..];
+                        let word_end = after
+                            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                            .unwrap_or(after.len());
+                        let names_a_module_below = after.starts_with(char::is_uppercase)
+                            && after[word_end..].starts_with('.');
+
+                        if before_ok && !names_a_module_below {
                             changes.entry(file_uri.clone()).or_default().push(TextEdit {
                                 range: Range {
                                     start: Position {
