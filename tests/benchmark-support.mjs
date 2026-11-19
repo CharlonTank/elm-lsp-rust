@@ -79,3 +79,6 @@ export const SPREAD = [
   "    1",
   "",
 ].join("\n");
+
+// What a session left behind, as far as a test says
+export const left = (parts) => ({ changed: [], patch: "", originals: new Map(), committed: new Set(), ...parts });
