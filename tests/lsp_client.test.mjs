@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { ElmLspClient, ensureClient, IDLE_TIMEOUT_MS, stopClients } from "../mcp-wrapper/lsp-client.mjs";
+import { ElmLspClient, ensureClient, IDLE_TIMEOUT_MS, REQUEST_TIMEOUT_MS, serveOneCall, stopClients } from "../mcp-wrapper/lsp-client.mjs";
 import { toFileUri } from "../mcp-wrapper/workspace.mjs";
 import { copyFixture, tempDir } from "./support.mjs";
 
@@ -94,6 +94,67 @@ test("a request in flight fails when the language server dies", async (t) => {
   client.process.kill("SIGKILL");
   await assert.rejects(answer, /LSP process exited/);
   assert.equal(client.pendingRequests.size, 0);
+});
+
+test("a compile that outlasts the wait for an answer says that the compiler goes on", async (t) => {
+  t.after(stopClients);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const project = copyFixture(t);
+  const client = await ensureClient(project);
+  const main = uriOf(project, "src/Main.elm");
+
+  // A server that answers nothing, as one does while the compiler runs
+  client.process.kill("SIGSTOP");
+  const answer = client.getDiagnostics(main);
+  t.mock.timers.tick(REQUEST_TIMEOUT_MS);
+  await assert.rejects(answer, {
+    message:
+      "The Elm compiler did not finish within 30 seconds. It is still running, and the language server answers no call for this project until it ends. " +
+      "Make the same call again once it has ended to get its diagnostics",
+  });
+  assert.equal(client.pendingRequests.size, 0);
+
+  // The same call again, as a tool makes it, waits behind the compiler
+  const again = ensureClient(project);
+  while (client.pendingRequests.size === 0) await new Promise(setImmediate);
+  t.mock.timers.tick(REQUEST_TIMEOUT_MS);
+  await assert.rejects(again, {
+    message:
+      "The Elm compiler of an earlier elm_diagnostics call is still running, and the language server answers no call for this project until it ends. " +
+      "Make the call again once it has ended",
+  });
+
+  // The compiler ends, and its answer and the one to the second call arrive while a third call
+  // waits. They settle nothing, and the third call gets its own answer.
+  client.process.kill("SIGCONT");
+  assert.equal(await ensureClient(project), client);
+  assert.ok(Array.isArray((await client.getDiagnostics(main)).diagnostics));
+
+  // A request that runs out of time now says only that
+  client.process.kill("SIGSTOP");
+  const symbols = client.getSymbols(main);
+  t.mock.timers.tick(REQUEST_TIMEOUT_MS);
+  await assert.rejects(symbols, { message: "Request textDocument/documentSymbol timed out" });
+  client.process.kill("SIGKILL");
+});
+
+test("on the command line a compile that outlasts the wait says that the compiler goes on after the command", async (t) => {
+  t.after(stopClients);
+  serveOneCall();
+  t.after(() => serveOneCall(false));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const project = copyFixture(t);
+  const client = await ensureClient(project);
+
+  client.process.kill("SIGSTOP");
+  const answer = client.getDiagnostics(uriOf(project, "src/Main.elm"));
+  t.mock.timers.tick(REQUEST_TIMEOUT_MS);
+  await assert.rejects(answer, {
+    message:
+      "The Elm compiler did not finish within 30 seconds. It goes on in the background after this command ends. " +
+      "Wait for it to end before you ask for diagnostics again, because each call starts a compiler of its own",
+  });
+  client.process.kill("SIGKILL");
 });
 
 test("the language server answers the handshake on every start", async (t) => {

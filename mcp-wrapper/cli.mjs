@@ -11,7 +11,7 @@ import { z } from "zod";
 import { runChecks } from "./doctor.mjs";
 import { ToolError } from "./errors.mjs";
 import { findHarness, harnesses, installAt, renderMarkdown, renderText } from "./harnesses.mjs";
-import { stopClients } from "./lsp-client.mjs";
+import { serveOneCall, stopClients } from "./lsp-client.mjs";
 import { runInTurn, tools } from "./tools.mjs";
 import { allowProjectTools } from "./workspace.mjs";
 
@@ -164,6 +164,7 @@ async function runTool(name, argv) {
   if (argv.includes("--help")) {
     return toolHelp(tool);
   }
+  serveOneCall();
   try {
     return await runInTurn(tool, parseToolArguments(tool, argv));
   } finally {

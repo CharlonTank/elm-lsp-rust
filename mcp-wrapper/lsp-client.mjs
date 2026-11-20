@@ -19,7 +19,32 @@ export const RUST_LSP_PATH = join(__dirname, "..", "target", "release", "elm_lsp
 // What a call says when the binary lacks a command that this wrapper sends
 const OLDER_BINARY = `${RUST_LSP_PATH} is older than this wrapper. Run scripts/setup.sh to rebuild it.`;
 
-const REQUEST_TIMEOUT_MS = 30000;
+// How long a request waits for the server's answer
+export const REQUEST_TIMEOUT_MS = 30000;
+
+// Whether a language server stays for the calls after the one that started it. The command line
+// runs one call and stops the language server once the call returns.
+let serversStay = true;
+
+// Have each language server stop with the call that started it, as the command line does.
+export function serveOneCall(on = true) {
+  serversStay = !on;
+}
+
+// What a request for diagnostics says when it runs out of time. A language server that stays reads
+// no other message until the compiler ends. One that stops with its call leaves the compiler
+// running without it, and the next call starts a compiler of its own.
+const compilerTimedOut = () =>
+  `The Elm compiler did not finish within ${REQUEST_TIMEOUT_MS / 1000} seconds. ` +
+  (serversStay
+    ? "It is still running, and the language server answers no call for this project until it ends. " +
+      "Make the same call again once it has ended to get its diagnostics"
+    : "It goes on in the background after this command ends. " +
+      "Wait for it to end before you ask for diagnostics again, because each call starts a compiler of its own");
+// What any request says when it runs out of time while the compiler of an earlier one goes on
+const COMPILER_STILL_RUNNING =
+  "The Elm compiler of an earlier elm_diagnostics call is still running, and the language server answers no call for this project until it ends. " +
+  "Make the call again once it has ended";
 
 // A language server that no call has used for this long is stopped. The next call starts it again.
 export const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -35,6 +60,9 @@ export class ElmLspClient {
     this.process = null;
     this.requestId = 0;
     this.pendingRequests = new Map(); // id -> { resolve, reject, timer }
+    // The id of the last request for diagnostics that ran out of time, until its answer arrives after
+    // all. The server takes its messages in order, so until then it answers none that came after it.
+    this.lateCompile = null;
     this.buffer = Buffer.alloc(0);
     this.documentVersions = {};
     // Settles once the handshake is over. Set by start().
@@ -127,6 +155,9 @@ export class ElmLspClient {
 
       try {
         const message = JSON.parse(content);
+        if (message.id === this.lateCompile) {
+          this.lateCompile = null;
+        }
         const pending = this.pendingRequests.get(message.id);
         if (pending) {
           clearTimeout(pending.timer);
@@ -153,14 +184,23 @@ export class ElmLspClient {
     this.process.stdin.write(header + content);
   }
 
-  sendRequest(method, params) {
+  // A request that runs the compiler goes on in the server after its wait is over, and holds up every
+  // message behind it. It says so when it runs out of time, and so do the requests behind it.
+  sendRequest(method, params, { runsCompiler = false } = {}) {
     return new Promise((resolve, reject) => {
       const id = ++this.requestId;
       this.sendMessage({ jsonrpc: "2.0", id, method, params });
 
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
-        reject(new ToolError(`Request ${method} timed out`));
+        if (this.lateCompile !== null) {
+          reject(new ToolError(COMPILER_STILL_RUNNING));
+        } else {
+          reject(new ToolError(runsCompiler ? compilerTimedOut() : `Request ${method} timed out`));
+        }
+        if (runsCompiler) {
+          this.lateCompile = id;
+        }
       }, REQUEST_TIMEOUT_MS);
       this.pendingRequests.set(id, { resolve, reject, timer });
     });
@@ -246,11 +286,13 @@ export class ElmLspClient {
   }
 
   async getDiagnostics(uri) {
-    // Use custom command to get on-demand diagnostics
-    return this.sendRequest("workspace/executeCommand", {
-      command: "elm.getDiagnostics",
-      arguments: [uri],
-    });
+    // The server runs the compiler before it answers, and reads no other message until the
+    // compiler ends. A first build that downloads packages can take longer than a request waits.
+    return this.sendRequest(
+      "workspace/executeCommand",
+      { command: "elm.getDiagnostics", arguments: [uri] },
+      { runsCompiler: true }
+    );
   }
 
   async executeCommand(command, args) {
