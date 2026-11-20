@@ -574,6 +574,38 @@ test("with --project-tools, tools at the root of a monorepo are found from the E
   assert.equal(readFileSync(record, "utf-8"), `--yes ${file}\n`);
 });
 
+test("elm_format formats an Elm file and nothing else", async (t) => {
+  const project = copyFixture(t);
+  const src = join(project, "src");
+  // Laid out in a way that elm-format changes
+  const types = join(src, "Types.elm");
+  writeFileSync(types, readFileSync(types, "utf-8").replace("module Types exposing", "module  Types exposing"));
+  const notes = join(project, "notes.txt");
+  const note = "module  Notes exposing (x)\n\nx = 1\n";
+  writeFileSync(notes, note);
+  const before = sourcesOf(project);
+  const client = await connect(t, { cwd: project });
+  const format = (file_path) => callTool(client, "elm_format", { file_path });
+
+  // elm-format formats every .elm file below a directory
+  assert.deepEqual(await format(src), { text: `Cannot read ${src}: it is not a file`, isError: true });
+  assert.deepEqual(sourcesOf(project), before);
+  // A value that begins with a dash is a path, and no option of elm-format
+  assert.deepEqual(await format("--help"), { text: `Cannot read ${join(project, "--help")}: it does not exist`, isError: true });
+  assert.deepEqual(await format(notes), { text: `Cannot format ${notes}: the name of an Elm file ends in .elm`, isError: true });
+  assert.equal(readFileSync(notes, "utf-8"), note);
+  // So is the name of a file that begins with one
+  const dashed = join(project, "-Dashed.elm");
+  writeFileSync(dashed, note.replace("Notes", "Dashed"));
+  assert.deepEqual(await format("-Dashed.elm"), { text: `Successfully formatted ${dashed}`, isError: false });
+  assert.match(readFileSync(dashed, "utf-8"), /^module Dashed exposing \(x\)\n/);
+  // A lone Elm file needs no project around it
+  const lone = join(tempDir(t), "Lone.elm");
+  writeFileSync(lone, note.replace("Notes", "Lone"));
+  assert.deepEqual(await format(lone), { text: `Successfully formatted ${lone}`, isError: false });
+  assert.match(readFileSync(lone, "utf-8"), /^module Lone exposing \(x\)\n/);
+});
+
 // The language server counts columns in bytes, and a string is indexed in UTF-16 code units
 test("a rename lands on its symbol on a line with non-ASCII text before it", async (t) => {
   const project = copyFixture(t);

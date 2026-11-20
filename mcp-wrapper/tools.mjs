@@ -78,14 +78,19 @@ const rangeFields = {
 // The path in the message shows the caller how a relative path was resolved.
 const noProject = (absPath) => `No elm.json found in the parent directories of ${absPath}`;
 
-// Resolve a file to an absolute path and the Elm project that contains it.
-function locate(filePath) {
+// Resolve a path to the absolute path of a file that is there.
+function existingFile(filePath) {
   const given = resolve(filePath);
   const stats = statSync(given, { throwIfNoEntry: false });
   if (!stats?.isFile()) {
     throw new ToolError(`Cannot read ${given}: ${stats ? "it is not a file" : "it does not exist"}`);
   }
-  const absPath = asSpelledOnDisk(given);
+  return given;
+}
+
+// Resolve a file to an absolute path and the Elm project that contains it.
+function locate(filePath) {
+  const absPath = asSpelledOnDisk(existingFile(filePath));
   const workspaceRoot = findWorkspaceRoot(absPath);
   if (!workspaceRoot) {
     throw new ToolError(noProject(absPath));
@@ -410,11 +415,17 @@ export const tools = [
     description: "Format an Elm file using elm-format",
     input: { file_path: elmFile() },
     async run({ file_path }) {
+      // elm-format formats every Elm file below a directory, and needs no project for a file. It
+      // gets an absolute path, which it cannot read as an option.
+      const absPath = existingFile(file_path);
+      if (!absPath.endsWith(".elm")) {
+        throw new ToolError(`Cannot format ${absPath}: the name of an Elm file ends in .elm`);
+      }
       // The server does not implement formatting. execFile keeps the path out of a shell.
-      const directory = dirname(resolve(file_path));
+      const directory = dirname(absPath);
       const env = { ...process.env, PATH: toolPath(directory) };
       try {
-        await execFileAsync("elm-format", ["--yes", file_path], { env, timeout: FORMAT_TIMEOUT_MS });
+        await execFileAsync("elm-format", ["--yes", absPath], { env, timeout: FORMAT_TIMEOUT_MS });
       } catch (error) {
         if (error.code === "ENOENT") {
           throw new ToolError(`elm-format is not on PATH.${projectToolsHint(directory, ["elm-format"])}`);
@@ -424,7 +435,7 @@ export const tools = [
         }
         throw new ToolError(`Error formatting: ${error.message}`);
       }
-      return `Successfully formatted ${file_path}`;
+      return `Successfully formatted ${absPath}`;
     },
   },
 
