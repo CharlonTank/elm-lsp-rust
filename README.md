@@ -69,7 +69,7 @@ When you install via the marketplace:
 1. Claude Code fetches plugin metadata from `elm-lsp-plugin/marketplace.json`
 2. The marketplace points to this repository (`elm-lsp-rust`)
 3. Claude Code clones this repo and runs `scripts/setup.sh` to build the Rust binary
-4. The MCP wrapper (`mcp-wrapper/index.mjs`) becomes available as `elm-lsp-rust` MCP server
+4. The MCP wrapper (`mcp-wrapper/index.mjs`) becomes available as the MCP server `elr`, whose tools Claude Code names `mcp__plugin_elm-lsp-rust_elr__elm_definition` and so on
 
 The plugin starts the server with `--elm-projects-only`, so its tools appear only in sessions opened in an Elm project.
 
