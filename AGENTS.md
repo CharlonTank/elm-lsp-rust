@@ -34,9 +34,13 @@ The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or new
 - `src/server.rs` - LSP protocol handlers
 - `src/type_checker.rs` - Type inference for field rename
 - `mcp-wrapper/tools.mjs` - Tool definitions, shared by the MCP server and the CLI
+- `mcp-wrapper/move-function.mjs` - `elm_move_function`, which moves the lines of a function and rewrites the imports that expose it
 - `mcp-wrapper/index.mjs` - MCP server (stdio and HTTP)
 - `mcp-wrapper/cli.mjs` - Command-line interface
+- `mcp-wrapper/doctor.mjs` - The installation checks of `cli.mjs doctor`
 - `mcp-wrapper/lsp-client.mjs` - Starts the Rust binary and speaks LSP to it
+- `mcp-wrapper/workspace.mjs` - Finds the Elm project of a file, checks that a path lies in it and writes the edits of a refactoring
+- `mcp-wrapper/errors.mjs` - `ToolError`, a failure that the agent is shown and can act on
 - `mcp-wrapper/harnesses.mjs` - How each harness registers the server, source of `docs/harnesses.md`
 
 ## MCP Tools

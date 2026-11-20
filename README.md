@@ -231,25 +231,29 @@ Notes:
 ```
 elm-lsp-rust/
 ├── .claude-plugin/
-│   └── plugin.json      # Plugin metadata for marketplace
+│   └── plugin.json       # Plugin metadata for marketplace
 ├── src/
-│   ├── main.rs          # Entry point
-│   ├── server.rs        # LSP protocol (tower-lsp)
-│   ├── workspace/       # Indexing, symbols, refactoring
-│   ├── document.rs      # Single file representation
-│   ├── parser.rs        # Tree-sitter parsing
-│   └── diagnostics.rs   # Elm compiler integration
-├── mcp-wrapper/         # Agent-facing layer (Node.js)
-│   ├── tools.mjs        # The tools, defined once
-│   ├── index.mjs        # MCP server over stdio or HTTP
-│   ├── cli.mjs          # Command-line interface
-│   ├── lsp-client.mjs   # Runs the Rust binary, one per Elm project
-│   └── harnesses.mjs    # Registration for each harness
-├── docs/                # Harness configuration, agent install guide
+│   ├── main.rs           # Entry point
+│   ├── server.rs         # LSP protocol (tower-lsp)
+│   ├── workspace/        # Indexing, symbols, refactoring
+│   ├── document.rs       # Single file representation
+│   ├── parser.rs         # Tree-sitter parsing
+│   └── diagnostics.rs    # Elm compiler integration
+├── mcp-wrapper/          # Agent-facing layer (Node.js)
+│   ├── tools.mjs         # The tools, defined once
+│   ├── move-function.mjs # elm_move_function, by editing text
+│   ├── index.mjs         # MCP server over stdio or HTTP
+│   ├── cli.mjs           # Command-line interface
+│   ├── doctor.mjs        # The checks of cli.mjs doctor
+│   ├── lsp-client.mjs    # Runs the Rust binary, one per Elm project
+│   ├── workspace.mjs     # Finds a file's project, writes edits
+│   ├── errors.mjs        # ToolError, a failure the agent can act on
+│   └── harnesses.mjs     # Registration for each harness
+├── docs/                 # Harness configuration, agent install guide
 ├── scripts/
-│   └── setup.sh         # Builds the language server
-├── skills/              # Agent skill
-└── tests/               # Test suites
+│   └── setup.sh          # Builds the language server
+├── skills/               # Agent skill
+└── tests/                # Test suites
 ```
 
 ### Key design decisions
