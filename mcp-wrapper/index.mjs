@@ -7,6 +7,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { CallToolRequestSchema, ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "crypto";
 import { createServer as createHttpServer } from "http";
 import { join } from "path";
@@ -104,9 +105,11 @@ function createMcpServer({ readOnly }) {
     { name: "elr", version: "0.3.0" },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS }
   );
+  // The offered tools by name, as the SDK keeps them
+  const offered = new Map();
   for (const tool of tools) {
     if (readOnly && !tool.readOnly) continue;
-    server.registerTool(
+    const registered = server.registerTool(
       tool.name,
       {
         title: tool.title,
@@ -119,7 +122,6 @@ function createMcpServer({ readOnly }) {
           openWorldHint: tool.openWorld === true,
         },
       },
-      // When run() throws, the SDK answers with the error message and isError set.
       async (args) => {
         const call = runInTurn(tool, args);
         runningCalls.add(call);
@@ -130,7 +132,29 @@ function createMcpServer({ readOnly }) {
         }
       }
     );
+    offered.set(tool.name, registered);
   }
+  // In place of the SDK's handler, which waits for its check of the arguments before it runs the
+  // tool. That check takes longer for more arguments, so of two calls that arrive together the one
+  // with fewer would take its turn first. This one checks them at once, and a call takes its turn
+  // before anything is awaited. The answers and their texts are those of the SDK. A tool whose run()
+  // throws is answered with the error message and isError set.
+  server.server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
+    try {
+      const tool = offered.get(params.name);
+      if (!tool) throw new McpError(ErrorCode.InvalidParams, `Tool ${params.name} not found`);
+      const checked = tool.inputSchema.safeParse(params.arguments);
+      if (!checked.success) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Input validation error: Invalid arguments for tool ${params.name}: ${checked.error.message}`
+        );
+      }
+      return await tool.handler(checked.data, extra);
+    } catch (error) {
+      return { content: [{ type: "text", text: error.message }], isError: true };
+    }
+  });
   return server;
 }
 

@@ -151,6 +151,58 @@ test("two calls for one project at the same time run one after the other", async
   assert.match(readFileSync(utils, "utf-8"), /^module Utils exposing \(formatTheName, welcome, helper\)$/m);
 });
 
+test("calls that arrive in one write take their turns in the order they were written", async (t) => {
+  const project = copyFixture(t);
+  const utils = join(project, "src/Utils.elm");
+  const rename = { file_path: utils, line: 6, character: 0, old_name: "formatName", newName: "formatTheName" };
+  const messages = [
+    {
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "pipe", version: "1" } },
+    },
+    { method: "notifications/initialized" },
+    // A refactoring with five arguments, then a call with one. The SDK checks five arguments for longer.
+    { id: 2, method: "tools/call", params: { name: "elm_rename_function", arguments: rename } },
+    { id: 3, method: "tools/call", params: { name: "elm_symbols", arguments: { file_path: utils } } },
+  ];
+  const input = messages.map((message) => JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n").join("");
+  const { stdout } = await runNode(SERVER, [], { cwd: project, input });
+
+  const answers = stdout.trim().split("\n").map((line) => JSON.parse(line));
+  const symbols = answers.find((answer) => answer.id === 3).result.content[0].text;
+  assert.match(symbols, /^formatTheName \(Function\)/m);
+  assert.doesNotMatch(symbols, /^formatName /m);
+});
+
+test("calls that arrive in one HTTP batch take their turns in the order they were listed", async (t) => {
+  const project = copyFixture(t);
+  const utils = join(project, "src/Utils.elm");
+  const { port } = await connectOverHttp(t);
+  const url = `http://127.0.0.1:${port}/mcp`;
+  const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  const post = (body, extra = {}) => fetch(url, { method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
+  const clientInfo = { name: "batch", version: "1" };
+  // A batch is a message of the protocol version before 2025-06-18
+  const version = "2025-03-26";
+  const opened = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: version, capabilities: {}, clientInfo } });
+  await opened.text();
+  const session = { "mcp-session-id": opened.headers.get("mcp-session-id"), "mcp-protocol-version": version };
+  await (await post({ jsonrpc: "2.0", method: "notifications/initialized" }, session)).text();
+
+  const rename = { file_path: utils, line: 6, character: 0, old_name: "formatName", newName: "formatTheName" };
+  const answers = await post(
+    [
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "elm_rename_function", arguments: rename } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "elm_symbols", arguments: { file_path: utils } } },
+    ],
+    session
+  );
+  const text = await answers.text();
+  assert.match(text, /formatTheName \(Function\)/);
+  assert.doesNotMatch(text, /formatName \(Function\)/);
+});
+
 test("a project that is reached through a link takes its turn with the same project under its own path", async (t) => {
   const project = copyFixture(t);
   const linked = join(tempDir(t), "linked");
@@ -2659,8 +2711,9 @@ test("--read-only leaves out every tool that writes", async (t) => {
     old_name: "helper",
     newName: "assist",
   });
-  assert.equal(rename.isError, true);
-  assert.match(rename.text, /elm_rename_function/);
+  assert.deepEqual(rename, { text: "MCP error -32602: Tool elm_rename_function not found", isError: true });
+  // A tool that is left out is not found before its arguments are looked at
+  assert.deepEqual(await callTool(client, "elm_rename_function", { file_path: join(project, "src/Utils.elm") }), rename);
 });
 
 test("a request that cannot be carried out is a tool error", async (t) => {
@@ -2699,6 +2752,39 @@ test("a request that cannot be carried out is a tool error", async (t) => {
   const nowhere = await callTool(client, "elm_notify_file_changed", { old_path: stray, new_path: join(project, "src/Nowhere.elm") });
   assert.equal(nowhere.isError, true);
   assert.match(nowhere.text, /^Error: No such file or directory/);
+});
+
+test("arguments that do not fit the schema and a tool that is not offered are answered as the SDK answers them", async (t) => {
+  const project = copyFixture(t);
+  const client = await connect(t, { cwd: project });
+  const types = join(project, "src/Types.elm");
+  const invalid = (tool, issues) => ({
+    text: `MCP error -32602: Input validation error: Invalid arguments for tool ${tool}: ${JSON.stringify(issues, null, 2)}`,
+    isError: true,
+  });
+
+  assert.deepEqual(
+    await callTool(client, "elm_rename_function", { file_path: types, line: 0, character: 0, old_name: "x" }),
+    invalid("elm_rename_function", [{ code: "invalid_type", expected: "string", received: "undefined", path: ["newName"], message: "Required" }])
+  );
+  assert.deepEqual(
+    await callTool(client, "elm_definition", { file_path: types, line: 1.5, character: 0 }),
+    invalid("elm_definition", [
+      { code: "invalid_type", expected: "integer", received: "float", message: "Expected integer, received float", path: ["line"] },
+    ])
+  );
+  // No arguments at all are no empty set of arguments
+  assert.deepEqual(
+    await callTool(client, "elm_symbols", undefined),
+    invalid("elm_symbols", [{ code: "invalid_type", expected: "object", received: "undefined", path: [], message: "Required" }])
+  );
+  assert.deepEqual(await callTool(client, "elm_nope", { file_path: types }), {
+    text: "MCP error -32602: Tool elm_nope not found",
+    isError: true,
+  });
+  // An argument the tool does not take is dropped
+  const symbols = await callTool(client, "elm_symbols", { file_path: types, extra: 1 });
+  assert.deepEqual(symbols, { text: (await callTool(client, "elm_symbols", { file_path: types })).text, isError: false });
 });
 
 test("a module stays in the index while its file is there, whatever the server is told about a move", async (t) => {
