@@ -1245,6 +1245,55 @@ test.todo("a renamed field leaves the field of that name in another module's rec
   assert.equal(text("Page/Settings.elm"), settings);
 });
 
+// A field rename goes by the type of the record, and leaves the uses whose type it does not work
+// out: in a chain, in a pattern that is no argument of a function, and on what such a pattern
+// binds. Until it reads those types, this fails.
+test.todo("a renamed field is renamed wherever its record is taken apart", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Sizes.elm");
+  const lines = [
+    ...["module Sizes exposing (Box, Shape(..), Size, area, double, inside, twice, wide, wider)", "", ""],
+    ...["type alias Size =", "    { width : Float", "    , height : Float", "    }", "", ""],
+    ...["type alias Box =", "    { size : Size", "    }", "", ""],
+    ...["type Shape", "    = Square Size", "    | Dot", "", ""],
+    ...["area : Size -> Float", "area size =", "    size.width * size.height", "", ""],
+    ...["inside : Box -> Float", "inside box =", "    box.size.width", "", ""],
+    ...["wide : Shape -> Float", "wide shape =", "    case shape of", "        Square { width } ->", "            width * 2", "", "        Dot ->", "            0", "", ""],
+    ...["wider : Shape -> Float", "wider shape =", "    case shape of", "        Square size ->", "            size.width", "", "        Dot ->", "            0", "", ""],
+    ...["double : Size -> Float", "double size =", "    let", "        { width } =", "            size", "    in", "    width * 2", "", ""],
+    ...["twice : List Size -> List Float", "twice sizes =", "    List.map (\\{ width } -> width * 2) sizes", ""],
+  ];
+  writeFileSync(file, lines.join("\n"));
+  const client = await connect(t, { cwd: project });
+
+  const renamed = await callTool(client, "elm_rename_field", { file_path: file, line: 4, character: 6, old_name: "width", newName: "breadth" });
+  assert.equal(renamed.isError, false, renamed.text);
+  assert.equal(readFileSync(file, "utf-8"), lines.join("\n").replaceAll("width", "breadth"));
+});
+
+// Removing a field takes more along in two layouts: an alias on one line goes whole, and the
+// first field of a literal on several lines leaves its brace alone on a line. Until the tool
+// edits the field and nothing else, this fails.
+test.todo("a removed field takes nothing else along", async (t) => {
+  const project = copyFixture(t);
+  const file = join(project, "src/Pets.elm");
+  const person = "type alias Person = { name : String, age : Int }";
+  const lines = [
+    ...["module Pets exposing (Person, Pet, rex)", "", "", person, "", ""],
+    ...["type alias Pet =", "    { kind : String", "    , legs : Int", "    }", "", ""],
+    ...["rex : Pet", "rex =", '    { kind = "dog"', "    , legs = 4", "    }", ""],
+  ];
+  writeFileSync(file, lines.join("\n"));
+  const client = await connect(t, { cwd: project });
+  const remove = (line, field) => callTool(client, "elm_remove_field", { file_path: file, line, character: lines[line].indexOf(field), field_name: field });
+
+  // The lower one first, so that the line of the other stays where it is
+  assert.equal((await remove(7, "kind")).isError, false);
+  assert.equal((await remove(3, "age")).isError, false);
+  const left = lines.join("\n").replace(person, "type alias Person = { name : String }").replace("    { kind : String\n    , legs", "    { legs").replace('    { kind = "dog"\n    , legs', "    { legs");
+  assert.equal(readFileSync(file, "utf-8"), left);
+});
+
 test("a port module is renamed and moved like any other module", async (t) => {
   const project = copyFixture(t);
   const at = (name) => join(project, "src", name);
