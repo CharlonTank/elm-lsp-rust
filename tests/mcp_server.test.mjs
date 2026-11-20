@@ -2095,6 +2095,39 @@ test("a function moves between modules whatever their exposing lists look like",
   assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
 });
 
+test("a function moves out of every import that lists it, in a file that imports its module twice", async (t) => {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  const write = (name, lines) => writeFileSync(at(name), lines.join("\n") + "\n");
+  const word = (name) => ["", "", `${name} : String -> String`, `${name} text =`, "    text"];
+  const names = ["one", "two", "three", "other", "more"];
+  write("Src.elm", [`module Src exposing (${names.join(", ")})`, ...names.flatMap(word)]);
+  write("Dest.elm", ["module Dest exposing (kept)", ...word("kept")]);
+  const user = (name, imports, body) => write(`${name}.elm`, [`module ${name} exposing (use)`, "", ...imports, "", "", "use : String", "use =", `    ${body}`]);
+  // The same import twice, one of them under an alias, and two lists that hold other names as well
+  user("Same", ["import Src exposing (one)", "import Src exposing (one)"], 'one "x"');
+  user("Alias", ["import Src exposing (two)", "import Src as S exposing (two)"], 'two (S.other "x")');
+  user("Mixed", ["import Src exposing (three, other)", "import Src exposing (more, three)"], 'three (other (more "x"))');
+  const main = at("Main.elm");
+  writeFileSync(main, readFileSync(main, "utf-8").replace("import Browser\n", "import Browser\nimport Same\nimport Alias\nimport Mixed\n"));
+  const client = await connect(t, { cwd: project });
+  const imports = (name) => readFileSync(at(`${name}.elm`), "utf-8").split("\n").slice(2, 5);
+  const move = async (name) => {
+    const line = readFileSync(at("Src.elm"), "utf-8").split("\n").indexOf(`${name} text =`);
+    const moved = await callTool(client, "elm_move_function", { file_path: at("Src.elm"), line, character: 0, function_name: name, target_module: at("Dest.elm") });
+    assert.equal(moved.isError, false, moved.text);
+    assert.match(moved.text, /- Updated imports in 1 other file\(s\)\.$/);
+    assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: main }), { text: "No errors or warnings", isError: false });
+  };
+
+  await move("one");
+  assert.deepEqual(imports("Same"), ["import Dest exposing (one)", "import Src", "import Src"]);
+  await move("two");
+  assert.deepEqual(imports("Alias"), ["import Dest exposing (two)", "import Src", "import Src as S"]);
+  await move("three");
+  assert.deepEqual(imports("Mixed"), ["import Dest exposing (three)", "import Src exposing (other)", "import Src exposing (more)"]);
+});
+
 test("a function moves whole, with its doc comment, and takes nothing else along", async (t) => {
   const project = copyFixture(t);
   const at = (name) => join(project, "src", name);

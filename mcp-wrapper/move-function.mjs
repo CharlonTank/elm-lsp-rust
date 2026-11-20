@@ -431,15 +431,19 @@ function elmFilesIn(dir, seen) {
 // Point an importing file at the function's new module. Returns the new
 // content, or null when the file does not expose the function from the source.
 function retargetImport(content, functionName, sourceModuleName, targetModuleName) {
-  const source = importedLists(content, sourceModuleName).find((list) => indexIn(list, functionName) !== -1);
-  if (!source) return null;
+  const listing = (text) => importedLists(text, sourceModuleName).find((list) => indexIn(list, functionName) !== -1);
+  if (!listing(content)) return null;
 
-  // Drop the function from the source import. One that exposed nothing else stays without its
-  // list, because the file can name the module by itself as well, as in Utils.greet.
-  const without =
-    source.items.length > 1
-      ? withoutItem(content, source, indexIn(source, functionName))
-      : content.slice(0, source.exposing).trimEnd() + content.slice(source.close + 1);
+  // Drop the function from every import of the source that lists it, since a file can import a
+  // module more than once. One that exposed nothing else stays without its list, because the
+  // file can name the module by itself as well, as in Utils.greet.
+  let without = content;
+  for (let source = listing(without); source; source = listing(without)) {
+    without =
+      source.items.length > 1
+        ? withoutItem(without, source, indexIn(source, functionName))
+        : without.slice(0, source.exposing).trimEnd() + without.slice(source.close + 1);
+  }
 
   // Expose it from an import of the target instead
   return withExposed(without, targetModuleName, functionName);
