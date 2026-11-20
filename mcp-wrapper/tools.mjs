@@ -13,7 +13,7 @@ import { mkdir, rename } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
-import { promisify } from "util";
+import { getSystemErrorMap, promisify } from "util";
 import { z } from "zod";
 import { ToolError } from "./errors.mjs";
 import { ensureClient } from "./lsp-client.mjs";
@@ -81,7 +81,13 @@ const noProject = (absPath) => `No elm.json found in the parent directories of $
 // Resolve a path to the absolute path of a file that is there.
 function existingFile(filePath) {
   const given = resolve(filePath);
-  const stats = statSync(given, { throwIfNoEntry: false });
+  let stats;
+  try {
+    stats = statSync(given, { throwIfNoEntry: false });
+  } catch (error) {
+    // Such as a directory above it without search permission, or a link to itself
+    throw new ToolError(`Cannot read ${given}: ${getSystemErrorMap().get(error.errno)?.[1] ?? error.message}`);
+  }
   if (!stats?.isFile()) {
     throw new ToolError(`Cannot read ${given}: ${stats ? "it is not a file" : "it does not exist"}`);
   }

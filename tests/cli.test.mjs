@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   copyFixture,
@@ -20,6 +20,9 @@ import {
 
 const CLI = join(REPO, "mcp-wrapper/cli.mjs");
 const cli = (args, options) => runNode(CLI, args, options);
+
+// Root reads and writes every file, whatever its permissions say
+const asRoot = process.getuid?.() === 0 && "permissions do not hold root back";
 
 test("tools lists every tool, and --json describes their arguments", async () => {
   const listing = await cli(["tools"]);
@@ -125,6 +128,30 @@ test("a tool that fails exits 1 with one line on stderr", async (t) => {
   assert.deepEqual(mistyped, { code: 1, stdout: "", stderr: `Cannot read ${join(dir, "Starry.elm")}: it does not exist\n` });
   const directory = await cli(["symbols", "--file_path", dir]);
   assert.deepEqual(directory, { code: 1, stdout: "", stderr: `Cannot read ${dir}: it is not a file\n` });
+
+  // A path that cannot be looked at, with the reason that the system gives
+  const loop = join(dir, "Loop.elm");
+  symlinkSync(loop, loop);
+  const looped = await cli(["symbols", "--file_path", loop]);
+  assert.deepEqual(looped, { code: 1, stdout: "", stderr: `Cannot read ${loop}: too many symbolic links encountered\n` });
+  const long = join(dir, `${"A".repeat(296)}.elm`);
+  const tooLong = await cli(["format", "--file_path", long]);
+  assert.deepEqual(tooLong, { code: 1, stdout: "", stderr: `Cannot read ${long}: name too long\n` });
+
+  await t.test("below a directory without search permission", { skip: asRoot }, async () => {
+    const locked = join(dir, "locked");
+    const hidden = join(locked, "Hidden.elm");
+    mkdirSync(locked);
+    writeFileSync(hidden, "module Hidden exposing (x)\n");
+    try {
+      chmodSync(locked, 0o600);
+      const denied = await cli(["symbols", "--file_path", hidden]);
+      assert.deepEqual(denied, { code: 1, stdout: "", stderr: `Cannot read ${hidden}: permission denied\n` });
+    } finally {
+      // Searchable again, or the directory cannot be removed
+      chmodSync(locked, 0o755);
+    }
+  });
 });
 
 test("--project-tools lets the CLI use the tools in the project's node_modules", async (t) => {
