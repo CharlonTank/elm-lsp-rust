@@ -1,7 +1,10 @@
 #!/bin/bash
-# Build the language server and install the MCP wrapper's dependencies when
-# either is missing or out of date. The Claude Code plugin runs this on
-# session start. For any other harness, run it once after cloning.
+# Build the language server when the binary is missing or older than a Rust
+# source, Cargo.toml or Cargo.lock. Install the MCP wrapper's dependencies
+# when mcp-wrapper/node_modules is missing. That directory is under version
+# control, so in a clone the script installs nothing. The Claude Code plugin
+# runs this on session start. For any other harness, run it once after
+# cloning.
 
 set -e
 
