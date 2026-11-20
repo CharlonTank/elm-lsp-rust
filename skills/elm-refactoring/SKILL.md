@@ -269,7 +269,7 @@ type_name: "BackendModel"
 - **A removed field can take more along.** `elm_remove_field` removes a record alias whole when the alias stands on one line, and where the first field of a record literal on several lines goes it leaves `{` on a line by itself, which does not parse. It reports success both times. Run `elm_diagnostics` on the project's entry module afterwards and repair what it names.
 - **Refactoring tools write to disk.** Read a file again before editing it further.
 - **Always verify compilation** after refactoring, with `elm_diagnostics` on the project's entry module or with the project's build command
-- **Lines with non-ASCII text before the symbol.** Columns are counted in bytes there, so a column in a result is larger than the count of characters. Pass it to a tool as the result gave it. Edits land where they belong. `elm_diagnostics` prints the compiler's own line and column, which count from 1 and by characters.
+- **Lines with non-ASCII text before the symbol.** Columns are counted in bytes there, so a column in a result is larger than the count of characters. Pass it to a tool as the result gave it. A column you count yourself has to count UTF-8 bytes too. Edits land where they belong. `elm_diagnostics` prints the compiler's own line and column, which count from 1 and by characters.
 - These tools read Elm's syntax and tell a function from a type, a variant or a field of the same name, which a text replace does not
 
 ## Why Use LSP Tools

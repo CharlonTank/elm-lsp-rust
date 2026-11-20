@@ -724,6 +724,7 @@ test("the server tells the client how to address files", async (t) => {
   const client = await connect(t, { cwd: tempDir(t) });
   assert.match(client.getInstructions(), /absolute file paths/);
   assert.match(client.getInstructions(), /0-indexed/);
+  assert.match(client.getInstructions(), /columns in results count UTF-8 bytes, and a column you count yourself has to count them too/);
 });
 
 test("an option the server does not know stops it with the usage text", async () => {

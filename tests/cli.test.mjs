@@ -172,12 +172,15 @@ test("help describes the commands and each tool's arguments", async () => {
     const usage = await cli(args);
     assert.equal(usage.code, 0);
     assert.ok(usage.stdout.startsWith(`Usage: node ${CLI} <command>`), usage.stdout);
+    assert.match(usage.stdout, /Lines and characters are 0-indexed, and a\s+character counts UTF-8 bytes on a line with non-ASCII text before it\./);
   }
 
   const toolHelp = await cli(["rename_function", "--help"]);
   assert.equal(toolHelp.code, 0);
   assert.match(toolHelp.stdout, /^elm_rename_function: Rename a function across the entire project\./);
   assert.match(toolHelp.stdout, /--newName <string>\n\s+The new name for the function/);
+  const definitionHelp = await cli(["definition", "--help"]);
+  assert.match(definitionHelp.stdout, /--character <number>\n\s+Character position \(0-indexed\), counted in UTF-8 bytes on a line with non-ASCII text before it/);
 });
 
 test("doctor passes on a built checkout", async (t) => {

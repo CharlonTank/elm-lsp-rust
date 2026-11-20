@@ -34,7 +34,8 @@ const USAGE = `Usage: ${SELF} <command>
                                project's node_modules/.bin when they are there. Only for
                                projects you trust.
 
-The elm_ prefix of a tool name is optional. Lines and characters are 0-indexed.
+The elm_ prefix of a tool name is optional. Lines and characters are 0-indexed, and a
+character counts UTF-8 bytes on a line with non-ASCII text before it.
 Exit status: 0 on success, 1 when the tool fails, 2 when the command line is wrong.`;
 
 // A mistake on the command line, as opposed to a tool that ran and failed.

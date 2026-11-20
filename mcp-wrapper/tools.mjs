@@ -54,22 +54,25 @@ const MAX_ERRORS_ELSEWHERE = 20;
 // A line, a column or a count. The server reads these as unsigned integers.
 const wholeNumber = (description) => z.number().int().min(0).describe(description);
 
+// A column that the caller passes. The language server counts it in UTF-8 bytes, as it counts
+// the columns in its results.
+const column = (description) =>
+  wholeNumber(`${description} (0-indexed), counted in UTF-8 bytes on a line with non-ASCII text before it`);
+
 // The `line` and `character` fields that point at a symbol.
 function position(subject) {
   return {
     line: wholeNumber(subject ? `Line number of the ${subject} (0-indexed)` : "Line number (0-indexed)"),
-    character: wholeNumber(
-      subject ? `Character position within the ${subject} (0-indexed)` : "Character position (0-indexed)"
-    ),
+    character: column(subject ? `Character position within the ${subject}` : "Character position"),
   };
 }
 
 // The `start_*` and `end_*` fields that select a range.
 const rangeFields = {
   start_line: wholeNumber("Start line (0-indexed)"),
-  start_char: wholeNumber("Start character (0-indexed)"),
+  start_char: column("Start character"),
   end_line: wholeNumber("End line (0-indexed)"),
-  end_char: wholeNumber("End character (0-indexed)"),
+  end_char: column("End character"),
 };
 
 // The path in the message shows the caller how a relative path was resolved.
@@ -549,7 +552,7 @@ export const tools = [
     input: {
       file_path: elmFile(),
       line: wholeNumber("Line number of the field (0-indexed)"),
-      character: wholeNumber("Character position within the field name (0-indexed)"),
+      character: column("Character position within the field name"),
       old_name: z.string().describe("Expected current field name (must match what's at the position)"),
       newName: z.string().describe("The new name for the field"),
     },

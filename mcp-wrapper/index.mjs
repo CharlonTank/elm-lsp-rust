@@ -83,7 +83,8 @@ const INSTRUCTIONS =
   "The one exception is target_path of elm_move_file, which starts at the project root when it is relative. " +
   "Lines and characters in arguments are 0-indexed. Locations in results have 1-indexed lines. " +
   "Refactoring tools write their edits to disk, so read a file again before you edit it further. " +
-  "On a line with non-ASCII text before the symbol, columns in results count bytes. Pass such a column to a tool as the result gave it. " +
+  "On a line with non-ASCII text before the symbol, columns in results count UTF-8 bytes, and a column you count yourself has to count them too. " +
+  "Pass such a column to a tool as the result gave it. " +
   "elm_diagnostics prints the compiler's own line and column, which count from 1 and by characters.";
 
 // The tool calls that are running now. A refactoring among them has files left
