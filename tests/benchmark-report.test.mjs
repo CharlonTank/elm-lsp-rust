@@ -6,7 +6,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "fs";
+import { join } from "path";
 import { renderReport, summarize } from "../benchmarks/lib/report.mjs";
+import { REPO } from "./support.mjs";
 
 // `outcome` is one of the outcomes, or what stopped a failed session
 const record = (arm, outcome, costUsd, wallMs, repetition = 1) => ({
@@ -156,4 +159,105 @@ test("the report states the headline figures and lists every session", () => {
   // So does one that ends at ten cents, whose steps are two and a half
   const dime = renderReport(summarize(plan, [record("baseline", "passed", 0.09, 1000), record("lsp", "passed", 0.05, 1000)]));
   assert.match(dime, />\$0\.025<\/text>.*>\$0\.050<\/text>.*>\$0\.075<\/text>.*>\$0\.100<\/text>/);
+});
+
+test("the README's account of the run holds the figures of the run's summary", () => {
+  const summary = JSON.parse(readFileSync(join(REPO, "benchmarks/results/summary.json"), "utf-8"));
+  const readme = readFileSync(join(REPO, "benchmarks/README.md"), "utf-8");
+  const section = readme.slice(readme.indexOf("\n## A run on three codebases\n"), readme.indexOf("\n## What it does not tell you\n"));
+  // The records again, as far as the summary holds them, so the report's own code takes the medians
+  const records = summary.runs.map((run) => ({
+    ...run,
+    task: `${run.codebase}/${run.type}`,
+    failure: run.outcome === "agent-failed" ? run.ending : null,
+    toolCalls: { Bash: run.toolCalls },
+    model: summary.model,
+  }));
+  const plan = { codebases: summary.codebases };
+  assert.deepEqual(summarize(plan, records).overall, summary.overall);
+  assert.deepEqual(
+    summarize(plan, records).taskTypes.map(({ id, baseline, lsp }) => ({ id, baseline, lsp })),
+    summary.taskTypes.map(({ id, baseline, lsp }) => ({ id, baseline, lsp }))
+  );
+
+  // The four figures of the page's tiles, for each arm, as the page writes them
+  const tiles = (subset) => {
+    const page = renderReport(summarize(plan, subset));
+    return ["Tasks solved", "Median cost per session", "Median time per session", "Median tool calls per session"].map((label) => {
+      const tile = page.slice(page.indexOf(`<div class="label">${label}</div>`)).split('<div class="card tile">')[0];
+      return [...tile.matchAll(/<span class="value">([^<]*)<\/span>/g)].map((match) => match[1]);
+    });
+  };
+  const KINDS = {
+    "Rename a function": "rename-function",
+    "Rename a function whose name other modules use": "rename-shared-function",
+    "Rename a variant": "rename-variant",
+    "Rename a record field whose name other records use": "rename-field",
+    "Rename a module": "rename-module",
+    "Add a variant": "add-variant",
+  };
+  const rowsUnder = (header) => {
+    const lines = section.split("\n");
+    const start = lines.indexOf(header);
+    assert.notEqual(start, -1, header);
+    const rows = [];
+    for (let index = start + 2; lines[index]?.startsWith("| "); index++) {
+      rows.push(lines[index].slice(2, -2).split(" | "));
+    }
+    return rows;
+  };
+
+  const byKind = rowsUnder("| Kind of task | Without the server | With the server |");
+  assert.deepEqual(byKind.map(([kind]) => KINDS[kind]), summary.taskTypes.map((type) => type.id));
+  for (const [kind, ...cells] of byKind) {
+    const [solved, cost, time, calls] = tiles(records.filter((record) => record.type === KINDS[kind]));
+    assert.deepEqual(cells, [0, 1].map((arm) => `${solved[arm]}, ${cost[arm]}, ${time[arm]}, ${calls[arm]} tool calls`), kind);
+  }
+
+  const byCodebase = rowsUnder("| Kind of task | Codebase | Without the server | With the server | Files changed |");
+  assert.equal(byCodebase.length, summary.taskTypes.length * summary.codebases.length);
+  for (const [kind, codebase, without, withIt, files] of byCodebase) {
+    const subset = records.filter((record) => record.type === KINDS[kind] && record.codebase === codebase);
+    const [solved, cost, time, calls] = tiles(subset);
+    // The section says that every one of those sessions solved its task
+    assert.deepEqual(solved, ["3 of 3", "3 of 3"], `${kind} on ${codebase}`);
+    assert.deepEqual([without, withIt], [0, 1].map((arm) => `${cost[arm]}, ${time[arm]}, ${calls[arm]} tool calls`), `${kind} on ${codebase}`);
+    // Every session of the row changed that many files, in both arms
+    assert.deepEqual(subset.map((record) => String(record.changedFiles)), Array(6).fill(files), `${kind} on ${codebase}`);
+  }
+
+  // The overall figures: the tiles, and beside them the totals, the means and the rounds of the two arms
+  const [solved, cost, time, calls] = tiles(records);
+  assert.ok(section.includes(`each arm solved ${solved[0]}. `) && solved[0] === solved[1], "both arms solved as many");
+  assert.ok(section.includes(`The median session cost ${cost[0]}, took ${time[0]} and made ${calls[0]} tool calls without the server.`));
+  assert.ok(section.includes(`With it, the median session cost ${cost[1]}, took ${time[1]} and made ${calls[1]} tool calls.`));
+  const arms = ["baseline", "lsp"].map((arm) => records.filter((record) => record.arm === arm));
+  const total = (runs, figure) => runs.reduce((sum, run) => sum + run[figure], 0);
+  const both = (format) => arms.map(format).join(" and ");
+  assert.ok(
+    section.includes(
+      `the sessions cost ${both((runs) => `$${total(runs, "costUsd").toFixed(2)}`)} in total and ${both((runs) => `$${(total(runs, "costUsd") / runs.length).toFixed(3)}`)} on average, ` +
+        `took ${both((runs) => `${(total(runs, "wallMs") / runs.length / 1000).toFixed(1)} s`)} on average, ` +
+        `and made ${both((runs) => (total(runs.map((run) => ({ calls: run.toolCalls.Bash })), "calls") / runs.length).toFixed(1))} tool calls on average.`
+    )
+  );
+  const rounds = arms[0].map((without) => [without, arms[1].find((other) => other.task === without.task && other.repetition === without.repetition)]);
+  const count = (holds) => rounds.filter(([without, withIt]) => holds(without, withIt)).length;
+  assert.ok(
+    section.includes(
+      `The session with the server was the cheaper one in ${count((a, b) => b.costUsd < a.costUsd)} of the ${rounds.length} rounds and the faster one in ${count((a, b) => b.wallMs < a.wallMs)}. ` +
+        `It made fewer tool calls in ${count((a, b) => b.toolCalls.Bash < a.toolCalls.Bash)} and the same number in ${count((a, b) => b.toolCalls.Bash === a.toolCalls.Bash)}.`
+    )
+  );
+  assert.ok(section.includes(`Every session of the \`lsp\` arm but one called a tool of the server, ${arms[1].filter((run) => run.lspCalls > 0).length} of ${arms[1].length}.`));
+
+  // Where one arm lies wholly above the other: a row of the table by codebase, and its cost or its time
+  const apart = byCodebase.flatMap(([kind, codebase]) =>
+    ["costUsd", "wallMs"].map((figure) => {
+      const [without, withIt] = arms.map((runs) => runs.filter((run) => run.type === KINDS[kind] && run.codebase === codebase).map((run) => run[figure]));
+      return Math.min(...withIt) > Math.max(...without) ? "above" : Math.max(...withIt) < Math.min(...without) ? "below" : "neither";
+    })
+  );
+  const times = (where) => apart.filter((order) => order === where).length;
+  assert.ok(section.includes(`The run shows it ${times("above") + times("below")} times, ${times("above")} with the server above and ${times("below")} with the server below.`));
 });

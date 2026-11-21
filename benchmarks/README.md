@@ -2,7 +2,9 @@
 
 Does a coding agent get Elm refactorings right more often, faster or cheaper when it can call this language server? This benchmark runs the same tasks twice, once with the server's MCP tools and once without, and compares.
 
-It runs on any Elm codebase you point it at. Nothing about a codebase is written into this repository. The plan, the transcripts and the run records stay in the output directory, and the report shows counts and measurements only.
+It runs on an Elm codebase whose check command keeps to the [check command rules](#check-command-rules). A project whose check command generates Elm sources cannot be benchmarked. Nothing about a codebase is written into this repository. The plan, the transcripts and the run records stay in the output directory, and the report shows counts and measurements only.
+
+[A run on three codebases](#a-run-on-three-codebases) has the results of one run that I made.
 
 ## Before your first run
 
@@ -84,7 +86,7 @@ Every source directory of `elm.json` has to lie inside `elmRoot`. The benchmark 
 
 ## The tasks
 
-`plan` picks one target per task type in each codebase. It prefers a target that involves about ten files, or five for the add-variant task, and `--min-files` sets the fewest it accepts. Which files a target involves depends on the task. For a rename they are other files than the one that declares the target. A module involves the files that import it. A function or a variant involves the importers that name it: through the module's name or alias, or bare where the import exposes it, which for a variant is where the import takes the variants of its type along. No other file can name a function or a variant that its module does not expose, so such a one involves no file and is no target. A field involves the importers of the record's module that name both the record and the field. The add-variant task involves the files with a branch on one of the type's variants, the one that declares the type among them, and that one alone where its module keeps the variants to itself. A variant called like its own type, as in `type Email = Email String`, is no target, because the tokens of a use do not tell the type from the variant. Functions are found by their type annotations, so a function without one is no target and no namesake.
+`plan` picks one target per task type in each codebase. It prefers a target that involves about ten files, or five for the add-variant task, and `--min-files` sets the fewest it accepts. Which files a target involves depends on the task. For a rename they are other files than the one that declares the target. A module involves the files that import it. A function or a variant involves the importers that name it: through the module's name or alias, or bare where the import exposes it, which for a variant is where the import takes the variants of its type along. No other file can name a function or a variant that its module does not expose, so such a one involves no file and is no target. A field involves the importers of the record's module that name both the record and the field. The add-variant task involves the files with a branch on one of the type's variants, the one that declares the type among them, and that one alone where its module keeps the variants to itself. That count is an upper bound of the files the task changes, since a case that ends in a catch-all needs no new branch. A variant called like its own type, as in `type Email = Email String`, is no target, because the tokens of a use do not tell the type from the variant. Functions are found by their type annotations, so a function without one is no target and no namesake.
 
 A function, a variant or a field is a target only when its name has four letters or more. A shorter one is too often the name of something else in the same files, which the comparison of tokens cannot tell from it. A target whose new name, the old one with `Renamed` behind it, stands anywhere in the project's code already is no target either, since the renamed target could clash with it. That holds for a function without a type annotation, a record alias and a local variable alike, and for a module where the last part of its new name stands there. A module is no target where anything lies at the path of its new file already, because the move would write over it. That holds for a file without a module line, which the benchmark does not read as a module, and for a link whose end is gone. On a file system that ignores letter case, it holds for a name that differs in case alone.
 
@@ -226,6 +228,88 @@ What a session changed is read against the commit it started from, file by file.
 Cost is what Claude Code reports for the session. Time is wall-clock time, so run with `--concurrency 1` on a quiet machine if the timing matters to you. Each record holds the `--concurrency` it ran with as `concurrency`, since the two arms of a round can come from two runs with different numbers, and a resumed run is free to take another. `summary.json` has the same figures as the page. Both name the model and the effort it ran at, which is Claude Code's default where `run` named none, and each effort where the records differ. They also name the Claude Code version and the language server's version with the last commit that changed its sources, a digest of what is not committed in them, and the time its binary was built. The sources are `src/` without the other binaries in `src/bin/`, `mcp-wrapper/`, `Cargo.toml` and `Cargo.lock` of this repository, so a change to a document here or to one of those binaries leaves a run that was started free to go on.
 
 The arms are compared on the same work. A round of a task enters the report once every arm that `run` started sessions for has one for it, and the page says how many sessions are waiting for their counterpart. A report of one arm alone says that it compares nothing. A session that had to be killed has a time and no cost. The cost medians leave it out, and the page says how many those are in each arm.
+
+## A run on three codebases
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/report-dark.png">
+  <img alt="The upper part of the report page of the run. Tasks solved, 54 of 54 without the language server and 54 of 54 with it. Median cost per session, $0.10 and $0.09. Median time per session, 27 s and 25 s. Median tool calls per session, 5 and 4. Above the four figures, a paragraph that names the model, the three codebases with their sizes and the language server. Below them, bars of the tasks solved, the median cost and the median time for each of the six kinds of task, and a table of how the sessions ended." src="results/report-light.png">
+</picture>
+
+I ran the benchmark on 21 November 2026 with `claude-opus-5-5` at Claude Code's default effort, Claude Code 2.1.311 and the language server elm-lsp-rust 0.3.39. It ran on three Elm codebases. They are private, so they are named A, B and C here.
+
+| Codebase | Modules | Lines |
+|----------|---------|-------|
+| A | 687 | 78,858 |
+| B | 288 | 94,924 |
+| C | 644 | 113,930 |
+
+`plan` found all six kinds of task in each codebase, so the run had 18 tasks. I ran them with `run --repeat 3 --concurrency 2` in both arms and the defaults otherwise, which made 108 sessions. They cost $12.49 together. The last record was written 28 minutes after the first. That span comes from the times at which the two records were written, since the summary holds no times.
+
+I made the run at 8678f91, "Plan, run and report a benchmark from one command", the fourth commit of this branch. The pictures name it as the state of the language server, and the benchmark's own code was at that commit too. The commits after it change what `plan` leaves out, how it counts lines, what the verdict of a module rename refuses, which variables a session is started with and what the isolation check asks. The isolation check of the tip passed on the machine of the run, with Claude Code 2.1.311. Those commits also change how the benchmark takes output that is no event and a reader that throws, what it does with a leftover checkout whose label went to another repository, how it ends on an error that nothing catches, and the report's note on the Turns column, and none of these touches a result of a run that finished. With them, `plan` picks the same 18 tasks at the same commits of the three codebases, with the same requests and the same expectations. The shell that I started the run from set none of the variables that those commits keep from a session, and no session of the run moved a module onto a file that was there. So the run stands as it is. The sizes above are counted as the first of those commits counts lines, one line per module fewer than 8678f91 counted.
+
+Each cell below holds the tasks solved, the median cost, the median time and the median number of tool calls of the 9 sessions of one arm, three per codebase.
+
+| Kind of task | Without the server | With the server |
+|--------------|--------------------|-----------------|
+| Rename a function | 9 of 9, $0.07, 22 s, 3 tool calls | 9 of 9, $0.07, 20 s, 3 tool calls |
+| Rename a function whose name other modules use | 9 of 9, $0.13, 31 s, 5 tool calls | 9 of 9, $0.09, 28 s, 5 tool calls |
+| Rename a variant | 9 of 9, $0.11, 26 s, 4 tool calls | 9 of 9, $0.10, 23 s, 4 tool calls |
+| Rename a record field whose name other records use | 9 of 9, $0.17, 30 s, 6 tool calls | 9 of 9, $0.22, 56 s, 14 tool calls |
+| Rename a module | 9 of 9, $0.07, 21 s, 4 tool calls | 9 of 9, $0.09, 22 s, 4 tool calls |
+| Add a variant | 9 of 9, $0.14, 49 s, 15 tool calls | 9 of 9, $0.07, 24 s, 4 tool calls |
+
+Over all kinds, each arm solved 54 of 54. The median session cost $0.10, took 27 s and made 5 tool calls without the server. With it, the median session cost $0.09, took 25 s and made 4 tool calls. The other overall figures lean the other way. Without the server and with it, the sessions cost $6.15 and $6.34 in total and $0.114 and $0.117 on average, took 29.3 s and 29.8 s on average, and made 5.8 and 6.0 tool calls on average. A round pairs the two sessions of the same codebase, kind of task and repetition. The session with the server was the cheaper one in 26 of the 54 rounds and the faster one in 30. It made fewer tool calls in 22 and the same number in 14. Over all kinds of task, neither arm was cheaper or faster in this run. Every session of the `lsp` arm but one called a tool of the server, 53 of 54.
+
+[`results/summary.json`](results/summary.json) is the run's summary. `report` wrote it and the report page at the tip of this branch, from the records of the run and a plan made there, which is why they hold the sizes above. The two pictures show the upper part of that page. The summary holds the figures of the report page for every one of the 108 sessions, so the two tables, the total costs and the count of sessions that called the server can be checked against it. Like the pictures, it holds counts and measurements only.
+
+Both arms solved every task. With this model at this effort, the solve rate does not tell the arms apart. The difference lies in single kinds of task and single codebases.
+
+The arms differ most in two kinds of task. Adding a variant took $0.14, 49 s and 15 tool calls in the median without the server, and $0.07, 24 s and 4 tool calls with it. Renaming a field took $0.17, 30 s and 6 tool calls without the server, and $0.22, 56 s and 14 tool calls with it. In the other four kinds, the medians over all three codebases differ by at most 3.7 cents and 3.3 seconds. Together those four kinds cost $3.33 without the server and $3.66 with it. In renaming a function, a function whose name other modules use and a variant, nine sessions on three targets per kind do not tell a difference of a few cents or seconds from chance. Renaming a module is another matter. On each of the three codebases, every session with the server cost more than every session without it, by 0.9 to 3.6 cents in the median. By chance alone, the three sessions of one arm all cost more than the three of the other once in 20 on one codebase, and once in 8,000 on all three. The table by codebase below shows what the medians over all codebases hide.
+
+Each cell below holds the median cost, the median time and the median number of tool calls of the 3 sessions of one arm on one codebase. Every one of those sessions solved its task. The last column holds the number of files a session changed. In every row, all six sessions changed that number of files, the three of one arm and the three of the other. A module that moved counts twice there, for the file that went and the one that came.
+
+| Kind of task | Codebase | Without the server | With the server | Files changed |
+|--------------|----------|--------------------|-----------------|---------------|
+| Rename a function | A | $0.08, 21 s, 3 tool calls | $0.10, 23 s, 4 tool calls | 18 |
+| Rename a function | B | $0.06, 19 s, 3 tool calls | $0.07, 18 s, 3 tool calls | 11 |
+| Rename a function | C | $0.07, 22 s, 4 tool calls | $0.07, 20 s, 4 tool calls | 12 |
+| Rename a function whose name other modules use | A | $0.13, 32 s, 5 tool calls | $0.09, 23 s, 4 tool calls | 11 |
+| Rename a function whose name other modules use | B | $0.16, 33 s, 6 tool calls | $0.12, 33 s, 6 tool calls | 11 |
+| Rename a function whose name other modules use | C | $0.08, 26 s, 5 tool calls | $0.09, 30 s, 5 tool calls | 8 |
+| Rename a variant | A | $0.15, 32 s, 5 tool calls | $0.21, 50 s, 11 tool calls | 11 |
+| Rename a variant | B | $0.07, 23 s, 4 tool calls | $0.06, 19 s, 3 tool calls | 11 |
+| Rename a variant | C | $0.11, 30 s, 5 tool calls | $0.10, 23 s, 4 tool calls | 11 |
+| Rename a record field whose name other records use | A | $0.17, 29 s, 5 tool calls | $0.12, 26 s, 4 tool calls | 6 |
+| Rename a record field whose name other records use | B | $0.15, 29 s, 5 tool calls | $0.24, 57 s, 18 tool calls | 5 |
+| Rename a record field whose name other records use | C | $0.23, 40 s, 6 tool calls | $0.28, 1 min 7 s, 14 tool calls | 8 |
+| Rename a module | A | $0.07, 18 s, 2 tool calls | $0.08, 22 s, 4 tool calls | 12 |
+| Rename a module | B | $0.07, 24 s, 5 tool calls | $0.10, 21 s, 4 tool calls | 12 |
+| Rename a module | C | $0.08, 24 s, 4 tool calls | $0.09, 27 s, 4 tool calls | 12 |
+| Add a variant | A | $0.08, 27 s, 7 tool calls | $0.07, 23 s, 5 tool calls | 1 |
+| Add a variant | B | $0.15, 49 s, 15 tool calls | $0.08, 24 s, 4 tool calls | 3 |
+| Add a variant | C | $0.15, 52 s, 15 tool calls | $0.07, 25 s, 4 tool calls | 3 |
+
+`plan` ran with its defaults, so with `--min-files 5`. Adding a variant on A changed one file, fewer than the 5 that `plan` asks for. `plan` counts the files with a branch on a variant of the type, and a case that ends in a catch-all needs no new branch, so the compiler asked for a branch in one file there.
+
+In some rows one arm lies wholly above the other. Every one of its three sessions cost more, or took longer, than every one of the other arm's. With three sessions in each arm, chance alone gives that once in ten for one row and one measure, so between 3 and 4 times in the 18 rows with their two measures. The run shows it 18 times, 9 with the server above and 9 with the server below. These are the rows where that holds:
+
+- Renaming a function. The server cost more on A.
+- Renaming a function whose name other modules use. The server took less time on A and cost less on B.
+- Renaming a variant. On A, the three sessions with the server cost $0.24, $0.20 and $0.21 and took 56, 41 and 50 s. The three without it cost $0.15, $0.16 and $0.10 and took 32, 36 and 26 s. The three with the server were the three most expensive and the three slowest of all 18 sessions that renamed a variant. On C, the server cost less. On B, neither arm lies wholly above the other.
+- Renaming a field. On B, the server cost more and took longer. On A, it cost less.
+- Renaming a module. The server cost more on all three codebases, by 0.9 to 3.6 cents in the median, and took longer on C.
+- Adding a variant. The server cost less and took less time on B and C, and took less time on A.
+
+The counts in the next three paragraphs come from the transcripts of the sessions, which are not in this repository.
+
+The 9 sessions that added a variant with the server called `elm_prepare_add_variant` and `elm_add_variant` once each and made 3 edits by hand between them. The 9 sessions without the server made 39 edits.
+
+Each of the 9 sessions that renamed a field with the server called `elm_rename_field` once. In the 3 sessions on A, the project built right after that call, and the session changed nothing more. In the 6 sessions on B and C, the session corrected the result by hand, with 19 edits by the Edit tool between them and `sed` commands besides. By what those sessions wrote, the tool had renamed a field of the same name on another record and had left uses of the field out. The 9 sessions without the server made the change with shell commands and no edit.
+
+Each of the 9 sessions that renamed a variant with the server called `elm_rename_variant` once. On A, all 3 sessions then changed the result of the tool by hand, with 5 edits in one session and `sed` commands in the other two. By what those sessions wrote, the tool had also renamed the variants of the same name on two other types. On B and C, the 6 sessions built the project after the call and changed nothing more.
+
+This is a small run. It has one target per kind of task and codebase, nine sessions per kind of task and arm, and one model at one effort. A cell of the table by codebase rests on three sessions on one target. Its times come from two sessions side by side on one machine. [What it does not tell you](#what-it-does-not-tell-you) lists what the benchmark cannot measure at all.
 
 ## What it does not tell you
 
