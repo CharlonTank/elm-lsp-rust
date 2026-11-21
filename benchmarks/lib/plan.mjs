@@ -189,6 +189,10 @@ export async function planCodebase(codebase, { workDir, minFiles }) {
     const behindLinks = new Set(filesThroughLinks(worktree, project.map((source) => source.file)));
     const isPlain = (target) => [target.file, ...target.affected].every((file) => !behindLinks.has(file));
     const keepsItsName = usesLamdera(worktree.elmRoot) ? (target) => NAMED_BY_LAMDERA.includes(target.module) : () => false;
+    // A module that moves onto a file of the checkout writes over it. The scan passes over a file without
+    // a module line, so the disk is asked. lstat finds a link whose end is gone as well, and where the
+    // disk ignores letter case, a name that differs in case alone.
+    const isFree = (target) => target.newFile === undefined || !lstatSync(join(worktree.elmRoot, target.newFile), { throwIfNoEntry: false });
     const tasks = [];
     const skipped = [];
     let usedByOutsiders = 0;
@@ -199,7 +203,8 @@ export async function planCodebase(codebase, { workDir, minFiles }) {
       const suitable = rankedTargets(taskType, project, built, minFiles, candidates);
       const inSight = suitable.filter((target) => !usedOutside(target, outsiders));
       const plain = inSight.filter(isPlain);
-      const targets = plain.filter((target) => !(taskType.id === "rename-module" && keepsItsName(target)));
+      const free = plain.filter(isFree);
+      const targets = free.filter((target) => !(taskType.id === "rename-module" && keepsItsName(target)));
       usedByOutsiders += suitable.length - inSight.length;
       linked += inSight.length - plain.length;
       const { target, unbroken, untried } = await pickTarget(taskType, targets, worktree, codebase);
@@ -208,7 +213,12 @@ export async function planCodebase(codebase, { workDir, minFiles }) {
         // --min-files asks for, that alone explains the gap.
         const largest = candidates.reduce((most, candidate) => Math.max(most ?? 0, candidate.size), null);
         // What each filter above took out of the candidates that would have suited
-        const leftOut = { outside: suitable.length - inSight.length, linked: inSight.length - plain.length, named: plain.length - targets.length };
+        const leftOut = {
+          outside: suitable.length - inSight.length,
+          linked: inSight.length - plain.length,
+          occupied: plain.length - free.length,
+          named: free.length - targets.length,
+        };
         skipped.push({ type: taskType.id, heldBack: heldBack(taskType, project, built, minFiles, candidates), largest, unbroken, untried, leftOut });
         continue;
       }
@@ -238,7 +248,8 @@ export async function planCodebase(codebase, { workDir, minFiles }) {
         check: codebase.check,
         checkTimeoutMs: codebase.checkTimeoutMs,
         link: codebase.link,
-        lines: project.reduce((total, source) => total + source.text.split("\n").length, 0),
+        // The line breaks, which is what `wc -l` counts. A file that ends with one has no line behind it.
+        lines: project.reduce((total, source) => total + source.text.split("\n").length - 1, 0),
       },
       tasks,
       skipped,

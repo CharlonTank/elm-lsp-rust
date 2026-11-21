@@ -17,6 +17,7 @@ import {
   importersOf,
   mentions,
   NAME_END,
+  namesIn,
   refersTo,
   scanProject,
   scanSource,
@@ -24,7 +25,9 @@ import {
   UPPER_NAME,
 } from "./elm-source.mjs";
 
-// Suffix of every new name. No picked name may already exist with it.
+// Suffix of every new name. A target whose new name stands in the project's code already is left
+// out. A function without an annotation, a record alias or a variable of that name would clash
+// with the renamed target.
 const SUFFIX = "Renamed";
 
 // Variant that the add-variant task introduces
@@ -75,12 +78,13 @@ const closing = (check) =>
 // Functions to rename. `shared` asks for a name that other modules declare too.
 function functionCandidates(project, shared) {
   const declarations = countBy(project.flatMap((source) => source.functions));
+  const taken = namesIn(project);
   const aliases = project.flatMap((source) => source.aliases.map((alias) => ({ file: source.file, alias })));
   const candidates = [];
   for (const source of project) {
     for (const name of source.functions) {
       const elsewhere = declarations.get(name) - 1;
-      if (name.length < MIN_NAME_LENGTH || declarations.has(name + SUFFIX)) continue;
+      if (name.length < MIN_NAME_LENGTH || taken.has(name + SUFFIX)) continue;
       if (shared ? elsewhere < 3 : elsewhere !== 0) continue;
 
       const importers = importersOf(project, source.module);
@@ -151,7 +155,7 @@ export const TASK_TYPES = [
     idealSize: 10,
     candidates(project) {
       const types = project.flatMap((source) => source.types.map((type) => ({ file: source.file, type })));
-      const taken = new Set(types.flatMap(({ type }) => [type.name, ...type.variants]));
+      const taken = namesIn(project);
       const candidates = [];
       for (const source of project) {
         for (const type of source.types) {
@@ -215,12 +219,13 @@ export const TASK_TYPES = [
       // A function over { a | name : String } takes every record that has the field. With the field
       // renamed on one of them alone, a call that passes that record for it no longer compiles.
       const open = new Set(project.flatMap((source) => source.openFields));
+      const taken = namesIn(project);
       const candidates = [];
       for (const source of project) {
         for (const alias of source.aliases) {
           for (const field of alias.fields) {
             // The task is about telling records apart, so the name must be on at least two other records
-            if (field.length < MIN_NAME_LENGTH || owners.get(field) < 3 || owners.has(field + SUFFIX) || open.has(field)) continue;
+            if (field.length < MIN_NAME_LENGTH || owners.get(field) < 3 || taken.has(field + SUFFIX) || open.has(field)) continue;
             const users = importersOf(project, source.module).filter(
               (importer) => mentions(importer.code, alias.name) && mentions(importer.code, field)
             );
@@ -270,10 +275,11 @@ export const TASK_TYPES = [
     title: "Rename a module",
     idealSize: 10,
     candidates(project, entries) {
-      const modules = new Set(project.map((source) => source.module));
+      const taken = namesIn(project);
       return project
-        // The check command names its entry files by path, so those stay where they are
-        .filter((source) => !entries.includes(source.file) && !modules.has(source.module + SUFFIX))
+        // The check command names its entry files by path, so those stay where they are.
+        // A module's name is taken where its last part is, in a module line or as an alias.
+        .filter((source) => !entries.includes(source.file) && !taken.has(source.module.split(".").at(-1) + SUFFIX))
         .map((source) => {
           const importers = importersOf(project, source.module);
           const newFile = source.file.replace(/\.elm$/, `${SUFFIX}.elm`);
@@ -319,7 +325,7 @@ export const TASK_TYPES = [
     idealSize: 5,
     breaksBuild: ({ type }) => ({ type, variant: NEW_VARIANT }),
     candidates(project) {
-      if (project.some((source) => source.types.some((type) => type.variants.includes(NEW_VARIANT)))) return [];
+      if (namesIn(project).has(NEW_VARIANT)) return [];
       const candidates = [];
       for (const source of project) {
         for (const type of source.types.filter((type) => type.variants.length >= 3)) {
@@ -551,13 +557,15 @@ const CHECKS = {
   },
 
   // In every file that changed, nothing changed but the name. `moved` names a file that went to another
-  // place, which is the one file a rename may delete and the one it may create.
-  "renames-only": ({ moved = [], ...rename }, { elmRoot, changed, originals }) => {
+  // place, which is the one file a rename may delete and the one it may create. It may not land on a
+  // file of the starting commit, whose text the comparison with the old place would pass over.
+  "renames-only": ({ moved = [], ...rename }, { elmRoot, changed, originals, committed }) => {
     const [movedFrom, movedTo] = moved;
     for (const file of changed.filter((path) => path.endsWith(".elm") && path !== movedFrom)) {
       const before = originals.get(file === movedTo ? movedFrom : file) ?? null;
       const after = read(elmRoot, file);
       if (after === null) return `${file} was deleted, which no rename asks for`;
+      if (file === movedTo && committed.has(file)) return `the move of ${movedFrom} wrote over ${file}, a file of the starting commit`;
       // The module that moved is compared with what it was at its old place. With the old
       // file still there and untouched, another expectation says so.
       if (before === null && file === movedTo) continue;

@@ -440,6 +440,10 @@ export function scanOutsiders(elmRoot, project) {
     .filter(Boolean);
 }
 
+// Every name that the code of the project holds. A qualified name gives each of its parts.
+const NAME = new RegExp(`${NAME_START}\\p{L}${INNER}*`, "gu");
+export const namesIn = (project) => new Set(project.flatMap((source) => source.code.match(NAME) ?? []));
+
 // True when `word` occurs in the code as a whole identifier, qualified or not.
 export function mentions(code, word) {
   return new RegExp(`${NAME_START}${word}${NAME_END}`, "u").test(code);

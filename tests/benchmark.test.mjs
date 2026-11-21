@@ -1456,6 +1456,8 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
   );
   // The limit that the config leaves out is written down as the one that held
   assert.equal(plan.codebases[0].checkTimeoutMs, 600000);
+  // The codebase has as many lines as wc counts in its modules, each of which ends with a line break
+  assert.equal(plan.codebases[0].lines, Number(execFileSync("sh", ["-c", "cat src/*.elm | wc -l"], { cwd: repo, encoding: "utf-8" })));
   assert.match(plan.tasks[0].prompt, /^Rename the function `defaultUser` of the module `Types` \(`src\/Types\.elm`\) to `defaultUserRenamed`/);
 
   // The same commit always yields the same plan, so two runs are comparable
@@ -2346,6 +2348,27 @@ test("Ctrl-C in a terminal ends the sessions and lets the benchmark's own git co
   // The session has its record, so no later run comes back for its checkout. It has to be gone now.
   assert.ok(existsSync(join(out, "runs", "Fixture--rename-function--baseline--1.json")));
   assert.deepEqual(readdirSync(join(out, "work")), []);
+  assert.equal(worktreesOf(repo), 1);
+});
+
+test("a stop while the plan removes its last checkout leaves no plan", async (t) => {
+  const repo = gitRepository(copyFixture(t));
+  const out = join(tempDir(t), "out");
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(
+    config,
+    JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/FieldRename.elm", "src/TestRemoveVariant.elm"] }] })
+  );
+  // A git that stops the benchmark as Ctrl-C does before it removes a worktree, and then removes it.
+  // The signal comes before the command starts, so the benchmark has it before the command ends.
+  const bin = tempDir(t);
+  const real = execFileSync("which", ["git"]).toString().trim();
+  writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" worktree remove "*) kill -INT $PPID ;; esac\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
+
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  assert.equal(planned.code, 130, planned.stderr);
+  assert.match(planned.stderr, /^Interrupted\. Whatever was running has been ended\. No plan was written\.$/m);
+  assert.equal(existsSync(join(out, "plan.json")), false);
   assert.equal(worktreesOf(repo), 1);
 });
 
@@ -3314,6 +3337,122 @@ test("with the real compiler, a module, a variant and a function named in letter
     const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", `Bistro--${type}--baseline--1.json`), "utf-8"));
     assert.deepEqual({ type, outcome, problems }, { type, outcome: "passed", problems: [] });
   }
+});
+
+test("with the real compiler, a function whose new name an unannotated function has is passed over", async (t) => {
+  if (!hasElm()) {
+    t.skip("needs elm 0.19.1 on PATH");
+    return;
+  }
+  const repo = tempDir(t);
+  mkdirSync(join(repo, "src"));
+  cpSync(join(REPO, "tests/fixture/elm.json"), join(repo, "elm.json"));
+  writeFileSync(
+    join(repo, "src/Lib.elm"),
+    [
+      "module Lib exposing (convertValue, scaleValue)",
+      "",
+      "",
+      "convertValue : Int -> Int",
+      "convertValue value =",
+      "    convertValueRenamed value",
+      "",
+      "",
+      "convertValueRenamed value =",
+      "    value + 1",
+      "",
+      "",
+      "scaleValue : Int -> Int",
+      "scaleValue value =",
+      "    value * 2",
+      "",
+    ].join("\n")
+  );
+  writeFileSync(join(repo, "src/Main.elm"), "module Main exposing (shown)\n\nimport Lib\n\n\nshown : Int\nshown =\n    Lib.convertValue (Lib.scaleValue 1)\n");
+  gitRepository(repo);
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Values", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
+  const out = join(tempDir(t), "out");
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  assert.equal(planned.code, 0, planned.stderr);
+  // convertValue comes first by its name. Renamed, it would clash with the function that has no annotation.
+  const task = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.find((task) => task.type === "rename-function");
+  assert.match(task?.prompt ?? planned.stdout, /^Rename the function `scaleValue` of the module `Lib`/);
+});
+
+test("with the real compiler, a module whose new path holds a file is no target, whatever the scan makes of that file", async (t) => {
+  if (!hasElm()) {
+    t.skip("needs elm 0.19.1 on PATH");
+    return;
+  }
+  const repo = tempDir(t);
+  mkdirSync(join(repo, "src"));
+  cpSync(join(REPO, "tests/fixture/elm.json"), join(repo, "elm.json"));
+  const modules = ["Alpha", "Beta", "Gamma"];
+  for (const module of modules) {
+    writeFileSync(join(repo, `src/${module}.elm`), `module ${module} exposing (shown)\n\n\nshown : Int\nshown =\n    1\n`);
+  }
+  writeFileSync(
+    join(repo, "src/Main.elm"),
+    `module Main exposing (total)\n\n${modules.map((module) => `import ${module}\n`).join("")}\n\ntotal : Int\ntotal =\n    ${modules.map((module) => `${module}.shown`).join(" + ")}\n`
+  );
+  // A placeholder without a module line, a link whose end is gone, and a name in another letter case
+  writeFileSync(join(repo, "src/AlphaRenamed.elm"), "-- module AlphaRenamed exposing (shown)\n");
+  symlinkSync("Gone.elm", join(repo, "src/BetaRenamed.elm"));
+  writeFileSync(join(repo, "src/gammarenamed.elm"), "-- module GammaRenamed exposing (shown)\n");
+  gitRepository(repo);
+  const ignoresCase = sameDirectory(repo, join(dirname(repo), basename(repo).toUpperCase()));
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Names", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
+  const out = join(tempDir(t), "out");
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  assert.equal(planned.code, 0, planned.stderr);
+  const task = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.find((task) => task.type === "rename-module");
+  if (ignoresCase) {
+    assert.equal(task, undefined);
+    assert.match(planned.stdout, /Names: no suitable target for rename-module\. Its candidates were left out: 3 whose new path holds a file already\n/);
+  } else {
+    assert.match(task?.prompt ?? planned.stdout, /^Rename the module `Gamma` to `GammaRenamed`\./);
+  }
+});
+
+test("with the real compiler, a module rename that moves the module over a file of the starting commit is a wrong result", async (t) => {
+  if (!hasElm()) {
+    t.skip("needs elm 0.19.1 on PATH");
+    return;
+  }
+  const repo = tempDir(t);
+  mkdirSync(join(repo, "src"));
+  cpSync(join(REPO, "tests/fixture/elm.json"), join(repo, "elm.json"));
+  writeFileSync(join(repo, "src/Lib.elm"), 'module Lib exposing (label)\n\n\nlabel : String\nlabel =\n    "label"\n');
+  writeFileSync(join(repo, "src/Main.elm"), "module Main exposing (shown)\n\nimport Lib\n\n\nshown : String\nshown =\n    Lib.label\n");
+  gitRepository(repo);
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Lib", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
+  const out = join(tempDir(t), "out");
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  assert.equal(planned.code, 0, planned.stderr);
+
+  // The sessions start from a commit with a placeholder at the new path, which plan would have seen
+  writeFileSync(join(repo, "src/LibRenamed.elm"), "-- module LibRenamed exposing (label)\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "--quiet", "--message", "placeholder");
+  const planPath = join(out, "plan.json");
+  const plan = JSON.parse(readFileSync(planPath, "utf-8"));
+  writeFileSync(planPath, JSON.stringify({ ...plan, codebases: [{ ...plan.codebases[0], commit: git(repo, "rev-parse", "HEAD").trim() }] }));
+
+  // The agent moves the module onto the placeholder and renames every use. The project compiles.
+  const agent = standInAgent(
+    t,
+    `fs.renameSync("src/Lib.elm", "src/LibRenamed.elm");
+  for (const file of ["src/LibRenamed.elm", "src/Main.elm"]) {
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/\\bLib\\b/g, "LibRenamed"));
+  }`
+  );
+  const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-module", "--arms", "baseline", "--agent", agent]);
+  assert.equal(ran.code, 0, ran.stderr);
+  const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Lib--rename-module--baseline--1.json"), "utf-8"));
+  assert.deepEqual({ outcome, problems }, { outcome: "wrong-result", problems: ["the move of src/Lib.elm wrote over src/LibRenamed.elm, a file of the starting commit"] });
 });
 
 test("a run takes a plan only from the state of the benchmark that made it", async (t) => {

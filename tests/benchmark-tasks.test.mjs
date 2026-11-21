@@ -396,6 +396,32 @@ test("what shares the target's name and is another kind of thing has to keep it"
   assert.equal(expected("rename-variant", "src/Page.elm:Page.Home", "types-kept"), undefined);
 });
 
+test("a target whose new name stands in the code already is left out, whatever declares that name", () => {
+  const sources = {
+    "src/Lib.elm":
+      "module Lib exposing (..)\n\nimport Other as SettingsRenamed\n\n\ntype Status\n    = Active\n    | Paused\n    | Stopped\n\n\ntype alias Card =\n    { title : String, label : String }\n\n\nconvertValue : Int -> Int\nconvertValue value =\n    convertValueRenamed value\n\n\nconvertValueRenamed value =\n    value + 1\n\n\nfreeValue : Int\nfreeValue =\n    let\n        titleRenamed =\n            1\n    in\n    titleRenamed\n",
+    "src/Other.elm": "module Other exposing (..)\n\n\ntype alias ActiveRenamed =\n    { x : Int }\n\n\ntype alias Note =\n    { title : String, label : String }\n",
+    "src/Third.elm": "module Third exposing (..)\n\n\ntype alias Entry =\n    { title : String, label : String }\n",
+    "src/Settings.elm": "module Settings exposing (..)\n\n\nshown : Int\nshown =\n    1\n",
+  };
+  const modules = project(sources);
+  const keys = (id, extra = modules) => taskType(id).candidates(extra, []).map((candidate) => candidate.key);
+
+  // A function without an annotation, a record alias, a local variable and an import alias of the new name
+  assert.deepEqual(keys("rename-function").filter((key) => key.startsWith("src/Lib.elm")), ["src/Lib.elm:freeValue"]);
+  assert.deepEqual(keys("rename-variant"), ["src/Lib.elm:Status.Paused", "src/Lib.elm:Status.Stopped"]);
+  assert.deepEqual(keys("rename-field"), ["src/Lib.elm:Card.label", "src/Other.elm:Note.label", "src/Third.elm:Entry.label"]);
+  assert.deepEqual(keys("rename-module"), ["src/Lib.elm", "src/Other.elm", "src/Third.elm"]);
+  // A module with a dotted name is held to the last part of its new name, which is what its uses show
+  const home = (text) => project({ ...sources, "src/Page/Home.elm": `module Page.Home exposing (..)\n\n\n${text}` });
+  assert.deepEqual(keys("rename-module", home("home : Int\nhome =\n    1\n")), ["src/Lib.elm", "src/Other.elm", "src/Third.elm", "src/Page/Home.elm"]);
+  assert.deepEqual(keys("rename-module", home("type alias HomeRenamed =\n    { x : Int }\n")), ["src/Lib.elm", "src/Other.elm", "src/Third.elm"]);
+  // A record alias of the added variant's name leaves no type to add it to
+  assert.deepEqual(keys("add-variant"), ["src/Lib.elm:Status"]);
+  const added = project({ ...sources, "src/Added.elm": "module Added exposing (..)\n\n\ntype alias AddedByBenchmark =\n    { x : Int }\n" });
+  assert.deepEqual(keys("add-variant", added), []);
+});
+
 test("expectations are checked against the files the agent left behind", (t) => {
   const elmRoot = tempDir(t);
   mkdirSync(join(elmRoot, "src"));
@@ -611,6 +637,14 @@ test("a rename may change the name and the layout, and nothing else", (t) => {
   // A copy, with the old file left as it was. That the old file still exists is for another expectation to say.
   writeFileSync(join(elmRoot, "src/LibRenamed.elm"), before.replace("module Lib ", "module LibRenamed "));
   assert.deepEqual(unmetExpectations(elmRoot, [renames], left({ changed: ["src/LibRenamed.elm"], originals: new Map([["src/LibRenamed.elm", null]]) })), []);
+  // A move onto a file of the starting commit writes over it, a placeholder without a module line for one
+  const placeholder = "-- module LibRenamed exposing (label)\n";
+  const overPlaceholder = left({
+    changed: ["src/Lib.elm", "src/LibRenamed.elm"],
+    originals: new Map([["src/Lib.elm", before], ["src/LibRenamed.elm", placeholder]]),
+    committed: new Set(["src/Lib.elm", "src/LibRenamed.elm"]),
+  });
+  assert.deepEqual(unmetExpectations(elmRoot, [renames], overPlaceholder), ["the move of src/Lib.elm wrote over src/LibRenamed.elm, a file of the starting commit"]);
 });
 
 test("a rename counts however the declaration is laid out afterwards", (t) => {

@@ -250,6 +250,7 @@ async function plan(options) {
       const kinds = [
         leftOut.outside > 0 && `${leftOut.outside} that an Elm file outside the project can use`,
         leftOut.linked > 0 && `${leftOut.linked} that ${leftOut.linked === 1 ? "involves" : "involve"} a file that is reached through a link`,
+        leftOut.occupied > 0 && `${leftOut.occupied} whose new path holds a file already`,
         leftOut.named > 0 && `${leftOut.named} whose name Lamdera looks for`,
       ].filter(Boolean);
       const noneLeft = `. Its candidates were left out: ${kinds.join(", ")}`;
@@ -266,6 +267,8 @@ async function plan(options) {
       console.log(`${codebase.label}: no suitable target for ${type}${reason}`);
     }
   }
+  // A stop lets the benchmark's own git commands finish, the last one that removes a checkout among them
+  if (isStopped()) throw new Interrupted();
   writeJson(join(out, "plan.json"), planned);
   console.log(`Wrote ${join(out, "plan.json")}`);
 }
