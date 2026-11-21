@@ -27,6 +27,7 @@
  *   FAKE_AGENT=personal     behave like a session that was handed the CLAUDE.md of the user's settings, and name its
  *                           whole path when the isolation check asks for paths
  *   FAKE_AGENT=personal-home   name that path from ~ instead
+ *   FAKE_AGENT=named        name the path in FAKE_AGENT_NAMED when the isolation check asks for paths
  *   FAKE_AGENT=remembering  report a memory directory
  *   FAKE_AGENT=serverless   report that its MCP servers failed to start
  *   FAKE_AGENT=starting     report that its MCP servers were still starting
@@ -213,7 +214,7 @@ function planted(dir) {
   );
 }
 // Claude Code names the path of each instruction file it hands a session, and the user's lies in its configuration directory
-const personal = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "CLAUDE.md");
+const personal = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "CLAUDE.md");
 const askedForPaths = prompt.includes("path");
 const overheard =
   {
@@ -221,5 +222,6 @@ const overheard =
     nosy: () => planted(".").join(" "),
     personal: () => (askedForPaths ? personal : "NONE"),
     "personal-home": () => (askedForPaths ? personal.replace(homedir(), "~") : "NONE"),
+    named: () => (askedForPaths ? process.env.FAKE_AGENT_NAMED : "NONE"),
   }[mode]?.() ?? "NONE";
 result({ result: isIsolationCheck ? overheard : "Done." });

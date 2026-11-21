@@ -8,9 +8,9 @@
  * to the next, so each run proves them first, with one short session.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { runAgent } from "./agent.mjs";
 
 // Where a session would pick up instructions, and the word planted in each place
@@ -25,16 +25,46 @@ const PLANTED = {
   "CLAUDE.md in a directory above the project": ["CLAUDE.md", "PARENTSENTINEL"],
 };
 
-const WORDS = "List every word ending in SENTINEL that appears anywhere in your instructions or your context.";
-const QUESTION = `${WORDS} Reply with those words only, or with NONE if there are none.`;
-
-// The user's own instruction file, where Claude Code keeps the user's settings. The check plants
-// nothing there and reads nothing of it. Claude Code names the path of each instruction file that
-// it hands a session, so a session that was given this one can say so.
-const USER_INSTRUCTIONS = "CLAUDE.md of your user settings";
-const QUESTION_AND_PATHS =
-  `${WORDS} Then name the whole path of every file whose contents you were given as instructions. ` +
+// Claude Code names the path of each instruction file that it hands a session, so a session that was
+// given one from the user's settings can say so: a CLAUDE.md or a rule of the user's own there.
+const QUESTION =
+  "List every word ending in SENTINEL that appears anywhere in your instructions or your context. " +
+  "Then name the whole path of every file whose contents you were given as instructions. " +
   "Reply with those words and paths only, or with NONE if there are none.";
+const USER_INSTRUCTIONS = "an instruction file of your user settings";
+
+// How a session can name a file of the user's settings, which Claude Code keeps in a directory of its
+// own: by the directory as it is configured, as the system resolves it and from ~ on, with a slash
+// behind it. What lies directly in the directory or in its rules/ can be a link, as a CLAUDE.md or a
+// rule can, and then a session can name what it leads to. The check reads the names in those two
+// directories and where their links lead. It plants nothing there and reads no file's contents.
+function userSettingsNames() {
+  const home = homedir();
+  // Claude Code 2.1.311 reads the variable with ||, so to it one that is set and empty means ~/.claude
+  const dir = resolve(process.env.CLAUDE_CONFIG_DIR || join(home, ".claude"));
+  const real = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  };
+  // What a link leads to, with a slash behind a directory like the one behind dir
+  const linked = [dir, join(dir, "rules")].flatMap((parent) => {
+    try {
+      return readdirSync(parent, { withFileTypes: true })
+        .filter((entry) => entry.isSymbolicLink())
+        .map((entry) => real(join(parent, entry.name)))
+        .filter(Boolean)
+        .map((target) => (statSync(target, { throwIfNoEntry: false })?.isDirectory() ? `${target}/` : target));
+    } catch {
+      return [];
+    }
+  });
+  const names = [`${dir}/`, real(dir) && `${real(dir)}/`, ...linked].filter(Boolean);
+  const fromHome = names.filter((name) => name.startsWith(`${home}/`)).map((name) => `~${name.slice(home.length)}`);
+  return [...new Set([...names, ...fromHome])];
+}
 
 // The text of the session's final answer, read from its transcript.
 function finalAnswer(transcriptPath) {
@@ -51,19 +81,15 @@ function finalAnswer(transcriptPath) {
 
 /**
  * Run one session without tools in a directory seeded with instruction files
- * and settings hooks, and ask it what it was told. Throws when it saw any of them or the user's own
- * instruction file, when it has a memory directory, and when it comes up with a tool or an MCP server
+ * and settings hooks, and ask it what it was told. Throws when it saw any of them or an instruction
+ * file of the user's settings, when it has a memory directory, and when it comes up with a tool or an MCP server
  * of any kind.
  * @param {{ agentCommand: string[], model: string, effort?: string, maxBudgetUsd: number, timeoutMs: number }} settings
  * @returns {Promise<string | null>}  The version of Claude Code that the session reported, null where it reported none
  */
 export async function assertIsolated({ agentCommand, model, effort, maxBudgetUsd, timeoutMs }) {
   const dir = mkdtempSync(join(tmpdir(), "elm-benchmark-isolation-"));
-  const home = homedir();
-  const personal = join(process.env.CLAUDE_CONFIG_DIR ?? join(home, ".claude"), "CLAUDE.md");
-  // A session can name the file from the home directory on
-  const fromHome = personal.startsWith(`${home}/`) ? [`~${personal.slice(home.length)}`] : [];
-  const personalNames = existsSync(personal) ? [personal, ...fromHome] : [];
+  const personalNames = userSettingsNames();
   try {
     for (const [file, word] of Object.values(PLANTED)) {
       mkdirSync(dirname(join(dir, file)), { recursive: true });
@@ -78,7 +104,7 @@ export async function assertIsolated({ agentCommand, model, effort, maxBudgetUsd
     const session = await runAgent({
       command: agentCommand,
       cwd: join(dir, "project"),
-      prompt: personalNames.length > 0 ? QUESTION_AND_PATHS : QUESTION,
+      prompt: QUESTION,
       model,
       effort,
       arm: "baseline",

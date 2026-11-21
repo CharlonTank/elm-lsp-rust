@@ -1128,8 +1128,17 @@ async function notedSessions(t, run) {
 }
 
 test("a session runs at the effort it is given, and at Claude Code's default where it is given none", async (t) => {
-  // Whatever the shell that starts the benchmark has set
-  setForTest(t, { FAKE_AGENT: "idle", CLAUDE_CODE_EFFORT_LEVEL: "max", MAX_THINKING_TOKENS: "32000" });
+  // Whatever the shell that starts the benchmark has set for how the model thinks and how long it answers
+  const shell = {
+    CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: "1",
+    CLAUDE_CODE_MAX_EFFORT_REMINDER: "1",
+    MAX_THINKING_TOKENS: "32000",
+    CLAUDE_CODE_DISABLE_THINKING: "1",
+    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1",
+    DISABLE_INTERLEAVED_THINKING: "1",
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4000",
+  };
+  setForTest(t, { FAKE_AGENT: "idle", CLAUDE_CODE_EFFORT_LEVEL: "max", ...shell });
   const cwd = tempDir(t);
   const session = (effort) =>
     runAgent({
@@ -1150,17 +1159,17 @@ test("a session runs at the effort it is given, and at Claude Code's default whe
   const effortOf = ({ args, variables, effortLevel }) => ({
     flag: args.includes("--effort") ? args[args.indexOf("--effort") + 1] : null,
     effortLevel,
-    thinking: variables.includes("MAX_THINKING_TOKENS"),
+    shell: Object.keys(shell).filter((name) => variables.includes(name)),
   });
-  assert.deepEqual(effortOf(high), { flag: "high", effortLevel: "high", thinking: false });
-  assert.deepEqual(effortOf(unset), { flag: null, effortLevel: null, thinking: false });
+  assert.deepEqual(effortOf(high), { flag: "high", effortLevel: "high", shell: [] });
+  assert.deepEqual(effortOf(unset), { flag: null, effortLevel: null, shell: [] });
   assert.equal(unset.variables.includes("CLAUDE_CODE_EFFORT_LEVEL"), false);
 
   // The isolation check's session is started the same way
   const [isolation] = await notedSessions(t, () =>
     assertIsolated({ agentCommand: [process.execPath, FAKE_AGENT], model: "none", effort: "low", maxBudgetUsd: 1, timeoutMs: 30000 })
   );
-  assert.deepEqual(effortOf(isolation), { flag: "low", effortLevel: "low", thinking: false });
+  assert.deepEqual(effortOf(isolation), { flag: "low", effortLevel: "low", shell: [] });
 });
 
 test("a session and the lsp pre-flight get none of the variables of a session that started the benchmark", async (t) => {
@@ -1285,40 +1294,77 @@ test("the isolation check tells a session that saw the operator's setup from one
   );
 });
 
-test("the isolation check asks for the paths of instruction files where the user has one of their own", async (t) => {
-  const config = tempDir(t);
+test("the isolation check asks for the paths of instruction files, and stops at one of the user's settings", async (t) => {
+  const settings = tempDir(t);
+  const config = join(settings, "config");
+  mkdirSync(config);
   setForTest(t, { CLAUDE_CONFIG_DIR: config });
-  const check = (mode) =>
+  const check = (mode, named = "") =>
     notedSessions(t, () => {
-      process.env.FAKE_AGENT = mode;
-      return assertIsolated({ agentCommand: [process.execPath, FAKE_AGENT], model: "none", maxBudgetUsd: 1, timeoutMs: 30000 }).finally(() => delete process.env.FAKE_AGENT);
+      Object.assign(process.env, { FAKE_AGENT: mode, FAKE_AGENT_NAMED: named });
+      return assertIsolated({ agentCommand: [process.execPath, FAKE_AGENT], model: "none", maxBudgetUsd: 1, timeoutMs: 30000 }).finally(() => {
+        delete process.env.FAKE_AGENT;
+        delete process.env.FAKE_AGENT_NAMED;
+      });
     });
   const promptOf = ([{ args }]) => args[args.indexOf("--print") + 1];
-  const words = "List every word ending in SENTINEL that appears anywhere in your instructions or your context.";
+  const refused = /A test session loaded: an instruction file of your user settings\. Its flags/;
 
-  // Without such a file the question is the one it always was, and a session cannot name the file
-  const without = await check("personal");
-  assert.equal(promptOf(without), `${words} Reply with those words only, or with NONE if there are none.`);
-
-  const personal = join(config, "CLAUDE.md");
-  writeFileSync(personal, "The operator's own instructions, which the check never reads\n");
-  const asked = await check("solve");
+  // The question asks for the paths whether the user has a CLAUDE.md or not
   assert.equal(
-    promptOf(asked),
-    `${words} Then name the whole path of every file whose contents you were given as instructions. Reply with those words and paths only, or with NONE if there are none.`
+    promptOf(await check("solve")),
+    "List every word ending in SENTINEL that appears anywhere in your instructions or your context. Then name the whole path of every file whose contents you were given as instructions. Reply with those words and paths only, or with NONE if there are none."
   );
-  await assert.rejects(check("personal"), /A test session loaded: CLAUDE\.md of your user settings\. Its flags/);
-  // The check wrote nothing into the user's settings
-  assert.deepEqual(readdirSync(config), ["CLAUDE.md"]);
+  // A rule of the user's own with no CLAUDE.md beside it, named as the directory is configured
+  await assert.rejects(check("named", join(config, "rules", "mine.md")), refused);
+  await assert.rejects(check("personal"), refused);
+  // And as the system resolves a directory that is configured through a link
+  const linkedConfig = join(settings, "linked");
+  symlinkSync(config, linkedConfig);
+  setForTest(t, { CLAUDE_CONFIG_DIR: linkedConfig });
+  await assert.rejects(check("named", join(realpathSync(config), "rules", "mine.md")), refused);
+  await assert.rejects(check("named", join(linkedConfig, "rules", "mine.md")), refused);
+  // A directory whose name only begins like it is another one
+  await check("named", `${linkedConfig}-other/CLAUDE.md`);
 
-  // Without the variable the file lies in .claude of the home directory, and a session can name it from ~
+  // A CLAUDE.md that is a link can be named by the file it leads to, and that file alone
+  const dotfiles = join(settings, "dotfiles");
+  mkdirSync(dotfiles);
+  writeFileSync(join(dotfiles, "instructions.md"), "The operator's own instructions, which the check never reads\n");
+  writeFileSync(join(dotfiles, "other.md"), "A file that is no instruction of the user's settings\n");
+  symlinkSync(join(dotfiles, "instructions.md"), join(config, "CLAUDE.md"));
+  await assert.rejects(check("named", join(realpathSync(dotfiles), "instructions.md")), refused);
+  await check("named", join(realpathSync(dotfiles), "other.md"));
+  // So can a rule of the user's that is a link, and a rules directory that is one, by a path in the directory it leads to
+  mkdirSync(join(config, "rules"));
+  writeFileSync(join(dotfiles, "rule.md"), "A rule of the operator's own\n");
+  symlinkSync(join(dotfiles, "rule.md"), join(config, "rules", "linked.md"));
+  await assert.rejects(check("named", join(realpathSync(dotfiles), "rule.md")), refused);
+  const rules = join(dotfiles, "rules");
+  mkdirSync(rules);
+  const otherConfig = join(settings, "other-config");
+  mkdirSync(otherConfig);
+  symlinkSync(rules, join(otherConfig, "rules"));
+  setForTest(t, { CLAUDE_CONFIG_DIR: otherConfig });
+  await assert.rejects(check("named", join(realpathSync(rules), "mine.md")), refused);
+  await check("named", `${realpathSync(rules)}-other/mine.md`);
+  // The check wrote nothing into the user's settings
+  assert.deepEqual(readdirSync(config), ["CLAUDE.md", "rules"]);
+  assert.deepEqual(readdirSync(join(config, "rules")), ["linked.md"]);
+
+  // Without the variable the settings lie in .claude of the home directory, and a session can name a file there from ~
   const home = tempDir(t);
   mkdirSync(join(home, ".claude"));
-  writeFileSync(join(home, ".claude", "CLAUDE.md"), "The operator's own instructions\n");
   setForTest(t, { CLAUDE_CONFIG_DIR: undefined, HOME: home });
-  await assert.rejects(check("personal-home"), /A test session loaded: CLAUDE\.md of your user settings\. Its flags/);
-  await assert.rejects(check("personal"), /A test session loaded: CLAUDE\.md of your user settings\. Its flags/);
+  await assert.rejects(check("personal-home"), refused);
+  await assert.rejects(check("named", "~/.claude/rules/mine.md"), refused);
+  await assert.rejects(check("personal"), refused);
   await check("solve");
+  // Claude Code reads a variable that is set and empty as one that is not set
+  setForTest(t, { CLAUDE_CONFIG_DIR: "" });
+  await assert.rejects(check("named", "~/.claude/rules/mine.md"), refused);
+  await assert.rejects(check("personal"), refused);
+  assert.deepEqual(readdirSync(join(home, ".claude")), []);
 });
 
 test("the lsp pre-flight tries the session's MCP command and requires at least one tool", async (t) => {

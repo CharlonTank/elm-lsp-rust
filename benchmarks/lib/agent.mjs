@@ -229,9 +229,20 @@ const PARENT_SESSION = [
   "CLAUDE_PID",
 ];
 
-// How hard the model thinks. A run is held to the effort it names, or to the default of Claude Code
-// for its model where it names none, and not to what the shell that started it happens to set.
-const EFFORT = ["CLAUDE_CODE_EFFORT_LEVEL", "MAX_THINKING_TOKENS"];
+// How hard the model thinks and how long its answers may grow. A run is held to the effort it names,
+// or to the default of Claude Code for its model where it names none, and not to what the shell that
+// started it happens to set. These are the ones I found by name in Claude Code 2.1.311, so a switch
+// of the kind that a later version adds reaches a session until someone adds it here.
+const EFFORT = [
+  "CLAUDE_CODE_EFFORT_LEVEL",
+  "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
+  "CLAUDE_CODE_MAX_EFFORT_REMINDER",
+  "MAX_THINKING_TOKENS",
+  "CLAUDE_CODE_DISABLE_THINKING",
+  "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+  "DISABLE_INTERLEAVED_THINKING",
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+];
 
 // All worktrees of a repository share one auto memory directory, the operator's
 // own. With it on, a session could read what an earlier one noted, and leave
