@@ -442,6 +442,8 @@ export async function runAgent({ command, cwd, prompt, model, effort, arm, tools
           // Not an event. The line is still in the transcript.
           return;
         }
+        // Nor is null, a number or a string, though each is JSON
+        if (typeof event !== "object" || event === null) return;
         events.push(event);
         if (event.type === "system" && event.subtype === "init" && stopIf?.(summarizeTranscript(events, tools, arm))) end();
       },

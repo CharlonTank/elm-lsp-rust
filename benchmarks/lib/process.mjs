@@ -141,12 +141,14 @@ export const isStopped = () => stopped;
 
 /**
  * Run a command and wait until it has ended, with everything it started.
- * Rejects when it cannot be started, and with Interrupted after stopAll().
+ * Rejects when it cannot be started, with Interrupted after stopAll(), and
+ * with the error of onLine when that throws.
  * @param {string[]} argv
  * @param {object} [options]
  * @param {number} [options.timeoutMs]  The command is ended when this runs out
  * @param {(line: string, end: () => void) => void} [options.onLine]  Gets each line of stdout, and a
  *   function that ends the command as running out of time does. Without it, stdout is collected.
+ *   When it throws, the command is ended that way too, and gets no more lines.
  * @param {(input: import("stream").Writable) => void} [options.onStart]  Writes requests to the command's stdin
  * @param {"collect" | "inherit"} [options.stderr]
  * @param {NodeJS.Signals} [options.ask]  The signal that asks the command to end
@@ -219,8 +221,20 @@ export function runGroup(argv, { cwd, env, timeoutMs, onLine, onStart, stderr = 
       stream?.on("data", (chunk) => {
         collected[name] = (collected[name] + chunk).slice(-OUTPUT_KEPT);
       });
-    if (onLine) createInterface({ input: child.stdout }).on("line", (line) => onLine(line, end));
-    else collect(child.stdout, "stdout");
+    // What onLine threw. It must not escape the listener, where nobody could catch it and the command
+    // would run on. The command is ended instead, and fails with it once it has ended.
+    let failure = null;
+    if (onLine) {
+      createInterface({ input: child.stdout }).on("line", (line) => {
+        if (failure) return;
+        try {
+          onLine(line, end);
+        } catch (error) {
+          failure = error;
+          end();
+        }
+      });
+    } else collect(child.stdout, "stdout");
     collect(child.stderr, "stderr");
 
     const settle = (outcome) => {
@@ -242,7 +256,9 @@ export function runGroup(argv, { cwd, env, timeoutMs, onLine, onStart, stderr = 
         child.stderr?.destroy();
       }, DRAIN_MS);
     });
-    child.on("close", (code) => settle(() => (stopped ? reject(new Interrupted()) : resolve({ code, ...collected, timedOut }))));
+    child.on("close", (code) =>
+      settle(() => (stopped ? reject(new Interrupted()) : failure ? reject(failure) : resolve({ code, ...collected, timedOut })))
+    );
     if (onStart) {
       // An early exit can close stdin before a request was written. The exit still settles the command.
       child.stdin.on("error", () => {});

@@ -19,6 +19,8 @@
  *   FAKE_AGENT=stalled-later  start to work, get no answer to the next request, and ask again until told to stop
  *   FAKE_AGENT=linger       start a command that would write the file "lingered" later, and finish while it runs
  *   FAKE_AGENT=busy         start the same command and work on until told to stop, as Claude Code does on Ctrl-C
+ *   FAKE_AGENT=first-busy   work on like busy in the first session that works on a task, and solve like solve in the
+ *                           others. FAKE_AGENT_FIRST names a file that the first one makes.
  *   FAKE_AGENT=hang         start the same command, never finish, and take no telling
  *   FAKE_AGENT=wreck        delete elm.json, so that what is left cannot even be read
  *   FAKE_AGENT=unreadable   delete what makes the directory a checkout, so that git cannot say what changed
@@ -46,6 +48,10 @@
  * FAKE_AGENT_STARTED names a file where each session notes the arguments it was
  * started with, the names of its environment variables and the value of
  * CLAUDE_CODE_EFFORT_LEVEL, one line each.
+ *
+ * A session that nothing has ended after two minutes ends itself. It holds the
+ * pipes of the test that waits for the benchmark, so the test fails then, where
+ * it would wait for good.
  */
 
 import { spawn } from "child_process";
@@ -58,6 +64,9 @@ const valueOf = (flag) => args[args.indexOf(flag) + 1];
 const prompt = valueOf("--print");
 const { mcpServers } = JSON.parse(valueOf("--mcp-config"));
 const emit = (event) => console.log(JSON.stringify(event));
+
+// No test lets a session work this long
+setTimeout(() => process.exit(1), 120000).unref();
 
 if (process.env.FAKE_AGENT_STARTED) {
   const started = { args, variables: Object.keys(process.env).sort(), effortLevel: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? null };
@@ -74,7 +83,16 @@ function elmFiles(dir) {
 // That session only answers, whatever the mode says about the others.
 const isIsolationCheck = prompt.includes("SENTINEL");
 const mode = process.env.FAKE_AGENT;
-const work = isIsolationCheck ? "answer" : mode;
+// Of the sessions of first-busy, the one that makes the file works on
+function busyIfFirst() {
+  try {
+    writeFileSync(process.env.FAKE_AGENT_FIRST, "", { flag: "wx" });
+    return "busy";
+  } catch {
+    return "solve";
+  }
+}
+const work = isIsolationCheck ? "answer" : mode === "first-busy" ? busyIfFirst() : mode;
 const version = (!isIsolationCheck && process.env.FAKE_AGENT_VERSION_LATER) || process.env.FAKE_AGENT_VERSION;
 emit({
   type: "system",

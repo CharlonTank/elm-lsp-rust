@@ -4,7 +4,7 @@
  * language server and without it? See README.md in this directory.
  */
 
-import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "fs";
 import { join, resolve } from "path";
 import { runChecks } from "../mcp-wrapper/doctor.mjs";
 import { RUST_LSP_PATH } from "../mcp-wrapper/lsp-client.mjs";
@@ -539,6 +539,20 @@ async function main([command, ...rest]) {
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
     process.on(signal, stopAll);
   }
+  // An exception that nothing catches would end the benchmark like a kill and leave the sessions
+  // running, as when the reader of stdout went away and a later line meets EPIPE. It ends them as
+  // an interrupt does instead, and Node hands an unhandled rejection over the same way. Its message
+  // goes to a stderr that may be gone as well. Where nothing was left to end, the status still says
+  // that something went wrong.
+  process.on("uncaughtException", (error) => {
+    try {
+      writeSync(2, `${error?.message ?? error}\n`);
+    } catch {
+      // Nobody reads stderr either
+    }
+    process.exitCode = 1;
+    stopAll();
+  });
   await COMMANDS[command].run(parseOptions(rest, COMMANDS[command].options));
 }
 

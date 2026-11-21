@@ -14,6 +14,7 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   rmdirSync,
   rmSync,
   symlinkSync,
@@ -224,6 +225,17 @@ export async function removeWorktree(codebase, dir) {
 // What the directory of a checkout is called, with some letters behind it
 const CHECKOUT = "checkout-";
 
+// Behind the name of a slot that was put aside. No label has a dot in it, so no session's or plan's slot has this name.
+const ASIDE = ".aside";
+
+// The first name of that kind that no file in the slot's directory has yet
+function asideOf(slot) {
+  for (let number = 1; ; number++) {
+    const aside = `${slot}${ASIDE}${number === 1 ? "" : `-${number}`}`;
+    if (!existsSync(aside)) return aside;
+  }
+}
+
 // What a slot remembers: where its checkout is, and of which codebase. Null when the file says nothing of the kind.
 function readSlot(slot) {
   try {
@@ -282,8 +294,11 @@ export async function closeCheckout(codebase, slot) {
  * that was killed leaves them, and so does one whose cleanup failed after its
  * session's record was written, which no later session comes back for.
  * A slot of a codebase that the config no longer has stays as it is, since
- * the repository whose worktree it would be is not known. Where its checkout
- * is still there, stderr says so.
+ * the repository whose worktree it would be is not known. So does one whose
+ * label the config now gives to another repository, where its checkout is
+ * still there and no worktree of that one. Such a slot is put aside under a
+ * name that no session or plan uses, since the next one of the same name
+ * would drop it. Where such a checkout is still there, stderr says so.
  * @param {import("./config.mjs").Codebase[]} codebases
  */
 export async function closeLeftovers(workDir, codebases) {
@@ -291,10 +306,15 @@ export async function closeLeftovers(workDir, codebases) {
     const slot = join(workDir, name);
     const remembered = readSlot(slot);
     const codebase = codebases.find((candidate) => candidate.label === remembered?.label);
-    if (codebase) await closeCheckout(codebase, slot);
-    else if (remembered && existsSync(remembered.dir)) {
+    const there = remembered !== null && existsSync(remembered.dir);
+    // The label went to another repository since, and closeCheckout would drop the slot and leave the checkout
+    const elsewhere = codebase !== undefined && there && !(await isWorktreeOf(codebase.repo, remembered.dir));
+    if (codebase && !elsewhere) await closeCheckout(codebase, slot);
+    else if (there) {
+      if (elsewhere && !name.includes(ASIDE)) renameSync(slot, asideOf(slot));
+      const stray = elsewhere ? "whose label the config now gives to another repository" : "which the config no longer names";
       console.error(
-        `Left ${remembered.dir} where it is. It is a checkout of the codebase "${remembered.label}", which the config no longer names, ` +
+        `Left ${remembered.dir} where it is. It is a checkout of the codebase "${remembered.label}", ${stray}, ` +
           `and the benchmark removes a directory only where git lists it as a worktree of a codebase of the config. ` +
           `"git worktree remove --force ${remembered.dir}" in the repository of that codebase removes it.`
       );

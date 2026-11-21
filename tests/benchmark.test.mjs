@@ -32,7 +32,7 @@ import {
 import { tmpdir } from "os";
 import { basename, dirname, join, relative } from "path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { ARMS, assertMcpServer, BENCHMARK_SOURCES, runAgent, stateOfSources } from "../benchmarks/lib/agent.mjs";
+import { ARMS, assertMcpServer, BENCHMARK_SOURCES, BUILT_IN_TOOLS, runAgent, stateOfSources } from "../benchmarks/lib/agent.mjs";
 import { loadConfig } from "../benchmarks/lib/config.mjs";
 import { assertIsolated } from "../benchmarks/lib/isolation.mjs";
 import {
@@ -48,6 +48,7 @@ import {
   runCheck,
   stateOf,
 } from "../benchmarks/lib/sandbox.mjs";
+import { runGroup } from "../benchmarks/lib/process.mjs";
 import { unmetExpectations } from "../benchmarks/lib/tasks.mjs";
 import { copyFixture, installLanguageServerStandIn, REPO, runNode, tempDir, wrapperCopy } from "./support.mjs";
 import { BENCH, left, SPREAD } from "./benchmark-support.mjs";
@@ -996,7 +997,7 @@ test("only a worktree of the codebase is ever replaced or removed", async (t) =>
   assert.equal(git(repo, "worktree", "list", "--porcelain").includes("prunable"), false);
 });
 
-test("a leftover checkout of a codebase that the config no longer names stays, and stderr says how to remove it", async (t) => {
+test("a leftover checkout of a codebase that the config no longer names, or names in another repository, stays, and stderr says how to remove it", async (t) => {
   const repo = gitRepository(copyFixture(t));
   const codebase = { label: "Fixture", repo, ref: "HEAD", elmRoot: ".", link: [] };
   const dir = join(tempDir(t), "checkout-left", "fixture");
@@ -1009,22 +1010,81 @@ test("a leftover checkout of a codebase that the config no longer names stays, a
   writeFileSync(join(workDir, "Earlier--rename-function--baseline--1"), JSON.stringify({ dir, label: "Earlier" }));
   writeFileSync(join(workDir, "Gone--rename-function--baseline--1"), JSON.stringify({ dir: join(tempDir(t), "gone"), label: "Gone" }));
   writeFileSync(join(workDir, "Unread--rename-function--baseline--1"), "{");
+  // A slot whose label the config now gives to another repository, while the checkout it remembers is still there
+  const moved = join(tempDir(t), "checkout-moved", "fixture");
+  await createWorktree(codebase, moved);
+  writeFileSync(join(workDir, "Moved--rename-function--baseline--1"), JSON.stringify({ dir: moved, label: "Moved" }));
+  const other = { label: "Moved", repo: gitRepository(copyFixture(t)), ref: "HEAD", elmRoot: ".", link: [] };
+  // And two slots of codebases that the config still has: a checkout of its repository, and one that is gone
+  const own = join(tempDir(t), "checkout-own", "fixture");
+  await createWorktree(codebase, own);
+  writeFileSync(join(workDir, "Fixture--rename-function--baseline--1"), JSON.stringify({ dir: own, label: "Fixture" }));
+  writeFileSync(join(workDir, "Moved--rename-function--lsp--1"), JSON.stringify({ dir: join(tempDir(t), "checkout-gone", "fixture"), label: "Moved" }));
 
   const printed = t.mock.method(console, "error", () => {});
-  await closeLeftovers(workDir, [codebase]);
+  await closeLeftovers(workDir, [codebase, other]);
+  const note = (left, label, why) =>
+    `Left ${left} where it is. It is a checkout of the codebase "${label}", ${why}, ` +
+    `and the benchmark removes a directory only where git lists it as a worktree of a codebase of the config. ` +
+    `"git worktree remove --force ${left}" in the repository of that codebase removes it.`;
   assert.deepEqual(
-    printed.mock.calls.map((call) => call.arguments.join(" ")),
-    [
-      `Left ${dir} where it is. It is a checkout of the codebase "Earlier", which the config no longer names, ` +
-        `and the benchmark removes a directory only where git lists it as a worktree of a codebase of the config. ` +
-        `"git worktree remove --force ${dir}" in the repository of that codebase removes it.`,
-    ]
+    printed.mock.calls.map((call) => call.arguments.join(" ")).sort(),
+    [note(dir, "Earlier", "which the config no longer names"), note(moved, "Moved", "whose label the config now gives to another repository")].sort()
   );
-  assert.deepEqual(readdirSync(workDir).sort(), ["Earlier--rename-function--baseline--1", "Gone--rename-function--baseline--1", "Unread--rename-function--baseline--1"]);
+  assert.deepEqual(readdirSync(workDir).sort(), [
+    "Earlier--rename-function--baseline--1",
+    "Gone--rename-function--baseline--1",
+    "Moved--rename-function--baseline--1.aside",
+    "Unread--rename-function--baseline--1",
+  ]);
   assert.equal(readFileSync(join(dir, "src/Main.elm"), "utf-8"), "edited by a session");
+  assert.deepEqual([existsSync(join(moved, "elm.json")), existsSync(own)], [true, false]);
   git(repo, "worktree", "remove", "--force", dir);
+  git(repo, "worktree", "remove", "--force", moved);
   assert.equal(existsSync(dir), false);
   assert.equal(worktreesOf(repo), 1);
+  assert.equal(worktreesOf(other.repo), 1);
+});
+
+test("a slot that is put aside keeps its checkout in mind after a session of the same name, and goes once the checkout is gone", async (t) => {
+  // A killed benchmark left a checkout of the first repository. The config now gives its label to the second.
+  const first = { label: "Moved", repo: gitRepository(copyFixture(t)), ref: "HEAD", elmRoot: ".", link: [] };
+  const second = { ...first, repo: gitRepository(copyFixture(t)) };
+  const left = join(tempDir(t), "checkout-left", "fixture");
+  await createWorktree(first, left);
+  const workDir = join(tempDir(t), "work");
+  const slot = join(workDir, "Moved--rename-function--baseline--1");
+  mkdirSync(workDir);
+  writeFileSync(slot, JSON.stringify({ dir: left, label: "Moved" }));
+  const printed = t.mock.method(console, "error", () => {});
+  const notes = () => printed.mock.calls.filter((call) => call.arguments.join(" ").startsWith(`Left ${left} where it is.`)).length;
+
+  await closeLeftovers(workDir, [second]);
+  assert.equal(notes(), 1);
+  // The session of the same name in the second repository, which a killed benchmark leaves behind as well
+  const opened = await openCheckout(second, slot);
+  assert.deepEqual(readdirSync(workDir).sort(), ["Moved--rename-function--baseline--1", "Moved--rename-function--baseline--1.aside"]);
+
+  await closeLeftovers(workDir, [second]);
+  assert.equal(notes(), 2, "the checkout of the first repository is still remembered");
+  assert.equal(existsSync(opened.dir), false);
+  assert.deepEqual(readdirSync(workDir), ["Moved--rename-function--baseline--1.aside"]);
+  assert.ok(existsSync(join(left, "elm.json")));
+
+  // Another slot of that name is put aside beside the first
+  const later = join(tempDir(t), "checkout-later", "fixture");
+  await createWorktree(first, later);
+  writeFileSync(slot, JSON.stringify({ dir: later, label: "Moved" }));
+  await closeLeftovers(workDir, [second]);
+  assert.deepEqual(readdirSync(workDir).sort(), ["Moved--rename-function--baseline--1.aside", "Moved--rename-function--baseline--1.aside-2"]);
+
+  // Removed as the note says, the checkouts take their slots along at the next run
+  git(first.repo, "worktree", "remove", "--force", left);
+  git(first.repo, "worktree", "remove", "--force", later);
+  await closeLeftovers(workDir, [second]);
+  assert.deepEqual(readdirSync(workDir), []);
+  assert.equal(notes(), 3);
+  assert.deepEqual([worktreesOf(first.repo), worktreesOf(second.repo)], [1, 1]);
 });
 
 test("a check command that runs out of time is ended with everything it started", async (t) => {
@@ -1247,6 +1307,57 @@ test("a session can be ended at its first event, long before its time is up", as
   assert.deepEqual({ timedOut: session.timedOut, finished: session.finished }, { timedOut: false, finished: false });
   assert.ok(took < 5000, `the session ended ${took} ms after it started`);
   await assertNothingOutlived(cwd, took);
+});
+
+test("a line of a session's output that is JSON and no object is no event", async (t) => {
+  const cwd = tempDir(t);
+  const events = [
+    { type: "system", subtype: "init", tools: BUILT_IN_TOOLS, mcp_servers: [], plugins: [] },
+    { type: "result", subtype: "success", is_error: false, result: "Done.", total_cost_usd: 0.25, num_turns: 1 },
+  ];
+  // Each of the first four lines parses, and none of them is an event
+  const lines = ["null", "5", '"text"', "true", ...events.map((event) => JSON.stringify(event))];
+  const session = await runAgent({
+    // The arguments of the session go to the script and not to node
+    command: [process.execPath, "-e", `for (const line of ${JSON.stringify(lines)}) console.log(line)`, "--"],
+    cwd,
+    prompt: "Do nothing.",
+    model: "none",
+    arm: "baseline",
+    maxBudgetUsd: 1,
+    timeoutMs: 30000,
+    transcriptPath: join(cwd, "transcript.jsonl"),
+  });
+  assert.deepEqual({ finished: session.finished, costUsd: session.costUsd, strayTools: session.strayTools }, { finished: true, costUsd: 0.25, strayTools: [] });
+  // The transcript still holds every line
+  assert.deepEqual(readFileSync(join(cwd, "transcript.jsonl"), "utf-8").split("\n").slice(0, 4), lines.slice(0, 4));
+});
+
+test("a command whose reader of lines throws is ended, and fails with that error once it has ended", async (t) => {
+  const cwd = tempDir(t);
+  // The command prints a line. Asked to end, it prints one more and notes that it ended. Not asked, it would write
+  // the file "lingered" three seconds from its start.
+  const script = `const fs = require("fs");
+    console.log("first");
+    process.on("SIGTERM", () => setTimeout(() => { console.log("asked"); fs.writeFileSync("ended", ""); process.exit(0); }, 300));
+    setTimeout(() => fs.writeFileSync("lingered", ""), 3000);
+    setInterval(() => {}, 1000);`;
+  const read = [];
+  const started = Date.now();
+  await assert.rejects(
+    runGroup([process.execPath, "-e", script], {
+      cwd,
+      timeoutMs: 30000,
+      onLine(line) {
+        read.push(line);
+        throw new Error(`cannot read ${line}`);
+      },
+    }),
+    /^Error: cannot read first$/
+  );
+  assert.equal(existsSync(join(cwd, "ended")), true, "the command was not asked to end, or not waited for");
+  assert.deepEqual(read, ["first"]);
+  await assertNothingOutlived(cwd, Date.now() - started);
 });
 
 test("a session that does not end when asked is killed with everything it started", async (t) => {
@@ -2393,6 +2504,67 @@ test("Ctrl-C in a terminal ends the sessions and lets the benchmark's own git co
   assert.equal(code, 130);
   // The session has its record, so no later run comes back for its checkout. It has to be gone now.
   assert.ok(existsSync(join(out, "runs", "Fixture--rename-function--baseline--1.json")));
+  assert.deepEqual(readdirSync(join(out, "work")), []);
+  assert.equal(worktreesOf(repo), 1);
+});
+
+test("a reader of stdout that goes away ends the sessions as an interrupt does", async (t) => {
+  // The first session works on while two others solve their tasks one after the other, so their lines are
+  // written while a session runs. Node passes over the first write that meets EPIPE, and throws at the next.
+  // The reader of stderr goes as well the second time, so the benchmark's message has nowhere to go.
+  for (const both of [false, true]) {
+    const { repo, out, common } = await plannedFixture(t);
+    const running = spawn(process.execPath, [BENCH, "run", ...common, "--arms", "baseline", "--only", "rename-function", "--repeat", "3", "--concurrency", "2"], {
+      env: { ...process.env, FAKE_AGENT: "first-busy", FAKE_AGENT_FIRST: join(tempDir(t), "first") },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    t.after(() => running.kill("SIGKILL"));
+    let said = "";
+    running.stderr.on("data", (chunk) => (said += chunk));
+    // As "| head -n 2" does: the reader takes the two lines that come before the sessions, and goes
+    let read = "";
+    running.stdout.on("data", (chunk) => {
+      read += chunk;
+      if (read.split("\n").length > 2) {
+        running.stdout.destroy();
+        if (both) running.stderr.destroy();
+      }
+    });
+    const [code] = await once(running, "close");
+
+    assert.equal(code, 130, said);
+    if (!both) {
+      assert.match(said, /^write EPIPE\nInterrupted\. Whatever was running has been ended\. Finished sessions keep their records/);
+      assert.doesNotMatch(said, /\n {4}at /, "no stack trace");
+    }
+    // The sessions that finished keep their records. The one that worked on leaves nothing.
+    assert.equal(readdirSync(join(out, "runs")).filter((file) => file.endsWith(".json")).length, 2);
+    assert.deepEqual(readdirSync(join(out, "work")), []);
+    assert.equal(worktreesOf(repo), 1);
+  }
+});
+
+test("a reader of stdout that goes away fails a run whose sessions had all ended", async (t) => {
+  // Two sessions, one after the other. The line of the second is the write that throws, and by then nothing runs.
+  const { repo, out, common } = await plannedFixture(t);
+  const running = spawn(process.execPath, [BENCH, "run", ...common, "--arms", "baseline", "--only", "rename-function", "--repeat", "2", "--concurrency", "1"], {
+    env: { ...process.env, FAKE_AGENT: "solve" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(() => running.kill("SIGKILL"));
+  let said = "";
+  running.stderr.on("data", (chunk) => (said += chunk));
+  let read = "";
+  running.stdout.on("data", (chunk) => {
+    read += chunk;
+    if (read.split("\n").length > 2) running.stdout.destroy();
+  });
+  const [code] = await once(running, "close");
+
+  // Nothing was interrupted, so the status is the one of an error and not 130
+  assert.equal(code, 1, said);
+  assert.equal(said, "write EPIPE\n");
+  assert.equal(readdirSync(join(out, "runs")).filter((file) => file.endsWith(".json")).length, 2);
   assert.deepEqual(readdirSync(join(out, "work")), []);
   assert.equal(worktreesOf(repo), 1);
 });
