@@ -7,7 +7,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::*;
 
-use super::{FileOperationResult, Workspace, LAMDERA_PROTECTED_FILES};
+use super::{
+    composed, is_module_segment, is_same_file, normalized, FileOperationResult, Workspace,
+    LAMDERA_PROTECTED_FILES,
+};
+use crate::parser::ElmParser;
 
 /// Check if a file is a protected Lamdera file (must be at root of src/)
 fn is_lamdera_protected_file(path: &Path) -> bool {
@@ -22,6 +26,24 @@ fn is_lamdera_protected_file(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// `path` with each part that the disk does not hold yet in the form a
+/// module's name has, every accent written as one letter. A file system that
+/// tells the two forms of an accent apart keeps a name as it is given, and
+/// the compiler looks for a module under the one form. A part that is there
+/// already stays as the caller spells it.
+fn with_new_names_composed(path: &Path) -> PathBuf {
+    let mut made = PathBuf::new();
+    for part in path.components() {
+        let given = made.join(part);
+        made = if given.symlink_metadata().is_ok() {
+            given
+        } else {
+            made.join(composed(&part.as_os_str().to_string_lossy()))
+        };
+    }
+    made
 }
 
 impl Workspace {
@@ -52,42 +74,61 @@ impl Workspace {
             .ok_or_else(|| anyhow::anyhow!("Could not extract module name from file"))?;
 
         // Compute new module name (just the filename without .elm)
-        let new_module_base = new_name.trim_end_matches(".elm");
-
-        // The new module name keeps the same path prefix, just changes the final component
-        let old_parts: Vec<&str> = old_module_name.split('.').collect();
-        let new_module_name = if old_parts.len() > 1 {
-            let prefix: Vec<&str> = old_parts[..old_parts.len() - 1].to_vec();
-            format!("{}.{}", prefix.join("."), new_module_base)
-        } else {
-            new_module_base.to_string()
-        };
+        // Only the one ending: "Text.elm.elm" is no name of a module
+        let new_module_base = composed(new_name.strip_suffix(".elm").unwrap_or(new_name));
+        if !is_module_segment(&new_module_base) {
+            return Err(anyhow::anyhow!(
+                "\"{}\" is no module name. It has to start with an upper-case letter and hold only letters, digits and underscores",
+                new_module_base
+            ));
+        }
 
         // Compute new path
-        let new_path = old_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?
-            .join(new_name);
+        let new_path = with_new_names_composed(
+            &old_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?
+                .join(new_name),
+        );
+
+        // The compiler finds a module by its path below a source directory, so that
+        // path is the module's name, whatever the file declared so far: a copy in
+        // src/Backup that still says "module Utils" becomes Backup.Helpers. A file
+        // that lies where its name says stays in its directory and keeps the first
+        // parts of the name. With "src" and "src/Sub" in elm.json, Sub.Utils in
+        // src/Sub becomes Sub.Helpers, where the inner directory alone would call
+        // it Helpers. A file in no source directory keeps the first parts of the
+        // name it declares too.
+        let keeps_its_place =
+            self.is_at_home(&old_path, &old_module_name) || !self.is_in_source_directory(&new_path);
+        let new_module_name = if keeps_its_place {
+            match old_module_name.rsplit_once('.') {
+                Some((prefix, _)) => format!("{}.{}", prefix, new_module_base),
+                None => new_module_base.to_string(),
+            }
+        } else {
+            self.module_name_at(&new_path)?
+        };
 
         // Collect all edits
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
 
         // 1. Update module declaration in the file itself
-        if let Some(module_range) = find_module_declaration_range(&content) {
-            let new_module_decl = format!("module {} exposing", new_module_name);
-            let old_module_decl_match = format!("module {} exposing", old_module_name);
-
-            if content.contains(&old_module_decl_match) {
-                changes.entry(uri.clone()).or_default().push(TextEdit {
-                    range: module_range,
-                    new_text: new_module_decl,
-                });
-            }
+        if let Some(name_range) = find_module_name_range(&content) {
+            changes.entry(uri.clone()).or_default().push(TextEdit {
+                range: name_range,
+                new_text: new_module_name.clone(),
+            });
         }
 
         // 2. Update all imports across the workspace
-        let files_updated =
-            self.update_imports_for_rename(&old_module_name, &new_module_name, uri, &mut changes)?;
+        let files_updated = self.update_imports_of_file(
+            &old_path,
+            &old_module_name,
+            &new_module_name,
+            uri,
+            &mut changes,
+        )?;
 
         Ok(FileOperationResult {
             old_module_name,
@@ -125,31 +166,37 @@ impl Workspace {
         let old_module_name = extract_module_name_from_content(&content)
             .ok_or_else(|| anyhow::anyhow!("Could not extract module name from file"))?;
 
-        // Compute new module name from target path
-        let new_module_name = path_string_to_module_name(&self.root_path, target_path);
+        // The full new path. A relative target starts at the workspace root.
+        let new_path =
+            with_new_names_composed(&normalized(&if Path::new(target_path).is_absolute() {
+                PathBuf::from(target_path)
+            } else {
+                self.root_path.join(target_path)
+            }));
 
-        // Compute full new path (relative to workspace root or absolute)
-        let new_path = if Path::new(target_path).is_absolute() {
-            PathBuf::from(target_path)
-        } else {
-            self.root_path.join(target_path)
-        };
+        // The compiler finds a module by its path below a source directory,
+        // so that path is the module's name
+        let new_module_name = self.module_name_at(&new_path)?;
 
         // Collect all edits
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
 
         // 1. Update module declaration in the file itself
-        if let Some(module_range) = find_module_declaration_range(&content) {
-            let new_module_decl = format!("module {} exposing", new_module_name);
+        if let Some(name_range) = find_module_name_range(&content) {
             changes.entry(uri.clone()).or_default().push(TextEdit {
-                range: module_range,
-                new_text: new_module_decl,
+                range: name_range,
+                new_text: new_module_name.clone(),
             });
         }
 
         // 2. Update all imports across the workspace
-        let files_updated =
-            self.update_imports_for_rename(&old_module_name, &new_module_name, uri, &mut changes)?;
+        let files_updated = self.update_imports_of_file(
+            &old_path,
+            &old_module_name,
+            &new_module_name,
+            uri,
+            &mut changes,
+        )?;
 
         Ok(FileOperationResult {
             old_module_name,
@@ -161,6 +208,28 @@ impl Workspace {
         })
     }
 
+    /// Update the imports of the module in the file at `path`, when that file
+    /// is the one the module's importers mean. A copy that still declares the
+    /// module of the file it was made from waits for that name, and nothing
+    /// imports it: the importers of the name are the other file's.
+    fn update_imports_of_file(
+        &self,
+        path: &Path,
+        old_module: &str,
+        new_module: &str,
+        skip_uri: &Url,
+        changes: &mut HashMap<Url, Vec<TextEdit>>,
+    ) -> anyhow::Result<usize> {
+        let holds_the_name = self
+            .modules
+            .get(old_module)
+            .is_some_and(|module| is_same_file(&module.path, path));
+        if !holds_the_name {
+            return Ok(0);
+        }
+        self.update_imports_for_rename(old_module, new_module, skip_uri, changes)
+    }
+
     /// Update all imports of old_module to new_module across the workspace
     fn update_imports_for_rename(
         &self,
@@ -169,7 +238,7 @@ impl Workspace {
         skip_uri: &Url,
         changes: &mut HashMap<Url, Vec<TextEdit>>,
     ) -> anyhow::Result<usize> {
-        let import_pattern = format!("import {}", old_module);
+        let qualified_pattern = format!("{}.", old_module);
         let mut files_updated = 0;
 
         for module in self.modules.values() {
@@ -187,76 +256,94 @@ impl Workspace {
             }
 
             let content = std::fs::read_to_string(&module.path)?;
+            // A file that never writes the name neither imports the module nor uses it
+            if !content.contains(old_module) {
+                continue;
+            }
+            let Some(tree) = self.parser.parse(&content) else {
+                continue;
+            };
+            let header = header_clauses(&tree);
 
             // Find all import statements for the old module
-            for (line_num, line) in content.lines().enumerate() {
-                let trimmed = line.trim();
-                if trimmed.starts_with(&import_pattern) {
-                    // Check it's not a prefix match (e.g., "import Foo" shouldn't match "import FooBar")
-                    let after_import = &trimmed[import_pattern.len()..];
-                    if after_import.is_empty()
-                        || after_import.starts_with(' ')
-                        || after_import.starts_with('\n')
-                        || after_import.starts_with('\t')
-                    {
-                        let line_start = line.find("import").unwrap_or(0);
-                        let old_end = line_start + "import ".len() + old_module.len();
+            let imports: Vec<(tree_sitter::Node, tree_sitter::Node)> = header
+                .iter()
+                .filter_map(|(clause, name)| Some((*clause, (*name)?)))
+                .filter(|(clause, name)| {
+                    clause.kind() == "import_clause" && &content[name.byte_range()] == old_module
+                })
+                .collect();
+            for (_, name) in &imports {
+                changes.entry(file_uri.clone()).or_default().push(TextEdit {
+                    range: self.parser.node_to_range(*name),
+                    new_text: new_module.to_string(),
+                });
+                files_updated += 1;
+            }
 
+            // "Utils.greet" means the renamed module only in a file that imports it
+            // under its own name. With "import Utils as U" the file says "U.greet",
+            // and in a file without the import "Utils" is the alias of another module.
+            let imports_it_by_name = imports
+                .iter()
+                .any(|(clause, _)| clause.child_by_field_name("asClause").is_none());
+            if !imports_it_by_name {
+                continue;
+            }
+
+            // Also check for qualified references like "OldModule.function"
+            // This handles cases where the module is used with qualification
+            for (line_num, line) in content.lines().enumerate() {
+                // The lines of the module declaration and of the imports hold
+                // the names of modules and no use of one
+                let in_the_header = || {
+                    header.iter().any(|(clause, _)| {
+                        (clause.start_position().row..=clause.end_position().row)
+                            .contains(&line_num)
+                    })
+                };
+                if !line.contains(&qualified_pattern) || in_the_header() {
+                    continue;
+                }
+
+                // Find all occurrences in the line
+                let mut search_start = 0;
+                while let Some(pos) = line[search_start..].find(&qualified_pattern) {
+                    let actual_pos = search_start + pos;
+
+                    // Make sure it's not part of a larger identifier
+                    let before_ok = !line[..actual_pos]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
+
+                    // "Utils.Extra.pad" names the module Utils.Extra, which lies below
+                    // the renamed one and keeps its name: an upper-case word with a
+                    // dot behind it is one more part of a module's name
+                    let after = &line[actual_pos + qualified_pattern.len()..];
+                    let word_end = after
+                        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .unwrap_or(after.len());
+                    let names_a_module_below =
+                        after.starts_with(char::is_uppercase) && after[word_end..].starts_with('.');
+
+                    if before_ok && !names_a_module_below {
                         changes.entry(file_uri.clone()).or_default().push(TextEdit {
                             range: Range {
                                 start: Position {
                                     line: line_num as u32,
-                                    character: (line_start + "import ".len()) as u32,
+                                    character: actual_pos as u32,
                                 },
                                 end: Position {
                                     line: line_num as u32,
-                                    character: old_end as u32,
+                                    character: (actual_pos + old_module.len()) as u32,
                                 },
                             },
                             new_text: new_module.to_string(),
                         });
-
-                        files_updated += 1;
                     }
-                }
 
-                // Also check for qualified references like "OldModule.function"
-                // This handles cases where the module is used with qualification
-                let qualified_pattern = format!("{}.", old_module);
-                if trimmed.contains(&qualified_pattern)
-                    && !trimmed.starts_with("import ")
-                    && !trimmed.starts_with("module ")
-                {
-                    // Find all occurrences in the line
-                    let mut search_start = 0;
-                    while let Some(pos) = line[search_start..].find(&qualified_pattern) {
-                        let actual_pos = search_start + pos;
-
-                        // Make sure it's not part of a larger identifier
-                        let before_ok = actual_pos == 0
-                            || !line
-                                .chars()
-                                .nth(actual_pos - 1)
-                                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
-
-                        if before_ok {
-                            changes.entry(file_uri.clone()).or_default().push(TextEdit {
-                                range: Range {
-                                    start: Position {
-                                        line: line_num as u32,
-                                        character: actual_pos as u32,
-                                    },
-                                    end: Position {
-                                        line: line_num as u32,
-                                        character: (actual_pos + old_module.len()) as u32,
-                                    },
-                                },
-                                new_text: new_module.to_string(),
-                            });
-                        }
-
-                        search_start = actual_pos + qualified_pattern.len();
-                    }
+                    search_start = actual_pos + qualified_pattern.len();
                 }
             }
         }
@@ -265,108 +352,51 @@ impl Workspace {
     }
 }
 
-/// Extract module name from file content using simple string parsing
+/// The module declaration and the imports at the top of a file, each with
+/// the name of the module in it. They come from the parse tree, so a clause
+/// counts however it is laid out: with any number of spaces, with "exposing"
+/// on a line of its own. A line in a comment or in a string that reads like
+/// one does not count. Where the parser could not read a clause to its end
+/// the name is left out, because what it took for the name can be a part of
+/// it.
+fn header_clauses(
+    tree: &tree_sitter::Tree,
+) -> Vec<(tree_sitter::Node<'_>, Option<tree_sitter::Node<'_>>)> {
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    root.children(&mut cursor)
+        .filter(|clause| matches!(clause.kind(), "module_declaration" | "import_clause"))
+        .map(|clause| {
+            let mut parts = clause.walk();
+            let name = clause
+                .children(&mut parts)
+                .find(|part| part.kind() == "upper_case_qid")
+                .filter(|_| !clause.has_error());
+            (clause, name)
+        })
+        .collect()
+}
+
+/// The name of the module that a file declares, and the place of the name
+/// in the file. Columns count bytes.
+fn declared_name(content: &str) -> Option<(String, Range)> {
+    let parser = ElmParser::new();
+    let tree = parser.parse(content)?;
+    let name = header_clauses(&tree)
+        .into_iter()
+        .find_map(|(clause, name)| name.filter(|_| clause.kind() == "module_declaration"))?;
+    Some((
+        content[name.byte_range()].to_string(),
+        parser.node_to_range(name),
+    ))
+}
+
+/// The name of the module that a file declares, read from its text
 pub(crate) fn extract_module_name_from_content(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(after_module) = trimmed.strip_prefix("module ") {
-            // Find "exposing" to extract the module name
-            if let Some(exposing_pos) = after_module.find(" exposing") {
-                let module_name = after_module[..exposing_pos].trim();
-                // Validate it's a proper module name (starts with uppercase)
-                if module_name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase())
-                {
-                    return Some(module_name.to_string());
-                }
-            }
-        }
-    }
-    None
+    declared_name(content).map(|(name, _)| name)
 }
 
-/// Find the range of the module declaration (just "module ModuleName exposing" part)
-pub(crate) fn find_module_declaration_range(content: &str) -> Option<Range> {
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if let Some(after_module) = trimmed.strip_prefix("module ") {
-            if let Some(exposing_pos) = after_module.find(" exposing") {
-                let module_name = after_module[..exposing_pos].trim();
-                // Validate it's a proper module name
-                if module_name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase())
-                {
-                    let line_start = line.find("module")?;
-                    // Calculate end: "module " + module_name + " exposing"
-                    let decl_len = "module ".len() + module_name.len() + " exposing".len();
-                    return Some(Range {
-                        start: Position {
-                            line: line_num as u32,
-                            character: line_start as u32,
-                        },
-                        end: Position {
-                            line: line_num as u32,
-                            character: (line_start + decl_len) as u32,
-                        },
-                    });
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Convert a path string like "src/Utils/Helper.elm" to module name "Utils.Helper"
-fn path_string_to_module_name(root_path: &Path, path_str: &str) -> String {
-    let path = Path::new(path_str);
-
-    tracing::debug!(
-        "path_string_to_module_name: path_str={}, root_path={}",
-        path_str,
-        root_path.display()
-    );
-
-    // If absolute path, make it relative to workspace root
-    let relative_path = if path.is_absolute() {
-        // Try to strip workspace root
-        if let Ok(rel) = path.strip_prefix(root_path) {
-            tracing::debug!("  Stripped prefix, relative={}", rel.display());
-            rel.to_path_buf()
-        } else {
-            tracing::debug!("  Could not strip prefix");
-            // Fallback: just use the path as-is
-            path.to_path_buf()
-        }
-    } else {
-        path.to_path_buf()
-    };
-
-    // Remove .elm extension
-    let stem = relative_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-
-    // Get parent path components, skipping "src" if present
-    let mut parts: Vec<&str> = Vec::new();
-    if let Some(parent) = relative_path.parent() {
-        for component in parent.components() {
-            if let std::path::Component::Normal(s) = component {
-                let s_str = s.to_str().unwrap_or("");
-                // Skip common source directories
-                if s_str != "src" && s_str != "." && !s_str.is_empty() {
-                    parts.push(s_str);
-                }
-            }
-        }
-    }
-
-    // Add the filename stem
-    parts.push(stem);
-
-    parts.join(".")
+/// The place of the module's name in the file that declares it
+pub(crate) fn find_module_name_range(content: &str) -> Option<Range> {
+    declared_name(content).map(|(_, place)| place)
 }

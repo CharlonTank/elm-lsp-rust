@@ -45,6 +45,7 @@ async function main() {
       file_path: join(MEETDOWN, "src/Types.elm"),
       line: 42,
       character: 6,
+      old_name: "navigationKey",
       newName: "navKey",
     },
   });

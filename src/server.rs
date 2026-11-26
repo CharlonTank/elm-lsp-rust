@@ -5,7 +5,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::diagnostics::DiagnosticsProvider;
+use crate::diagnostics::{DiagnosticsProvider, NoVerdict};
 use crate::document::{Document, VariantInfo};
 use crate::parser::ElmParser;
 use crate::workspace::{BranchConfig, Workspace};
@@ -26,12 +26,20 @@ const CMD_PREPARE_REMOVE_FIELD: &str = "elm.prepareRemoveField";
 const CMD_REMOVE_FIELD: &str = "elm.removeField";
 const CMD_PREPARE_ADD_VARIANT: &str = "elm.prepareAddVariant";
 const CMD_ADD_VARIANT: &str = "elm.addVariant";
+const CMD_SYNC_WITH_DISK: &str = "elm.syncWithDisk";
+const CMD_UNREAD_RANGES: &str = "elm.unreadRanges";
 
 pub struct ElmLanguageServer {
     client: Client,
     documents: DashMap<Url, Document>,
     parser: ElmParser,
+    /// The project directory the client named when it connected
+    root: RwLock<Option<PathBuf>>,
+    /// The index of that project. `None` while its elm.json cannot be read.
     workspace: RwLock<Option<Workspace>>,
+    /// The files beyond the source directories that the last index held,
+    /// kept while there is none, for the next one to take over
+    beyond_the_walk: RwLock<Vec<PathBuf>>,
     diagnostics_provider: RwLock<DiagnosticsProvider>,
 }
 
@@ -41,12 +49,17 @@ impl ElmLanguageServer {
             client,
             documents: DashMap::new(),
             parser: ElmParser::new(),
+            root: RwLock::new(None),
             workspace: RwLock::new(None),
+            beyond_the_walk: RwLock::new(Vec::new()),
             diagnostics_provider: RwLock::new(DiagnosticsProvider::new()),
         }
     }
 
-    async fn on_change(&self, uri: Url, text: String, version: i32) {
+    /// Take in the new text of a document. This must not wait for anything:
+    /// a client sends its request right behind the document, and that order
+    /// holds only as long as a notification is done when its handler returns.
+    fn on_change(&self, uri: Url, text: String, version: i32) {
         tracing::info!("on_change: uri={}", uri);
         let doc = Document::new(uri.clone(), text.clone(), version);
 
@@ -67,17 +80,62 @@ impl ElmLanguageServer {
             self.documents.insert(uri.clone(), doc);
         }
 
-        let diagnostics = self.get_diagnostics(&uri);
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
+        // No diagnostics are published here. They come from the Elm compiler,
+        // which can take seconds, and every tool call opens its document
+        // first. Clients ask for them with the elm.getDiagnostics command.
     }
 
-    fn get_diagnostics(&self, uri: &Url) -> Vec<Diagnostic> {
-        if let Ok(provider) = self.diagnostics_provider.read() {
-            provider.get_diagnostics(uri)
+    /// Refuse a request that starts from a file which waits for its module
+    /// name, such as a copy that still declares the module it was made from.
+    /// The index holds nothing of that file, so the answer would come from
+    /// other files: a rename that starts in the copy would edit the original.
+    /// The symbols of the file itself are refused with the rest, because
+    /// moving a function starts from them and goes on to the importers of
+    /// the module, which are the other file's.
+    fn refuse_a_waiting_file(&self, uri: &Url) -> Result<()> {
+        let Ok(path) = uri.to_file_path() else {
+            return Ok(());
+        };
+        let waiting = self.workspace.read().ok().and_then(|ws| {
+            let workspace = ws.as_ref()?;
+            let (module_name, holder) = workspace.waits_behind(&path)?;
+            Some((
+                module_name.to_string(),
+                holder.to_path_buf(),
+                workspace.is_in_source_directory(&path),
+            ))
+        });
+        let Some((module_name, holder, among_the_sources)) = waiting else {
+            return Ok(());
+        };
+        // Below a source directory the compiler never reads such a file, so it is a
+        // copy, or misnamed. Elsewhere it can be a program of its own that the
+        // compiler builds when given its path, and has to be told so with more care.
+        let message = if among_the_sources {
+            format!(
+                "{} declares module {}, which is the module of {}. Give it a name of its own with elm_rename_file, or edit its module line, and repeat the call.",
+                path.display(),
+                module_name,
+                holder.display()
+            )
         } else {
-            Vec::new()
+            format!(
+                "{} declares module {}, and so does {}, which lies where a source directory spells that name. The index keeps one file for each module name, so it keeps nothing of this file, which is in no source directory, and no tool can start from it. If it is a copy, give it a name of its own with elm_rename_file and repeat the call.",
+                path.display(),
+                module_name,
+                holder.display()
+            )
+        };
+        Err(tower_lsp::jsonrpc::Error::invalid_params(message))
+    }
+
+    /// Drop a file that is gone from the open documents and from the index.
+    fn forget_file(&self, uri: &Url) {
+        self.documents.remove(uri);
+        if let Ok(mut ws) = self.workspace.write() {
+            if let Some(workspace) = ws.as_mut() {
+                workspace.remove_file(uri);
+            }
         }
     }
 
@@ -117,28 +175,35 @@ impl ElmLanguageServer {
         col: usize,
         include_dots: bool,
     ) -> Option<String> {
+        // `col` is a column in bytes, as every column of the language server
+        // is: a result gives it so, and it comes back so. One past the end of
+        // the line names no word. One inside a character of several bytes
+        // means that character.
         if col >= line.len() {
             return None;
         }
-
-        // Find word boundaries
-        let chars: Vec<char> = line.chars().collect();
-        let mut start = col;
-        let mut end = col;
+        let col = (0..=col)
+            .rev()
+            .find(|&at| line.is_char_boundary(at))
+            .unwrap_or(0);
 
         let is_word_char =
             |c: char| -> bool { c.is_alphanumeric() || c == '_' || (include_dots && c == '.') };
 
-        while start > 0 && is_word_char(chars[start - 1]) {
-            start -= 1;
-        }
-
-        while end < chars.len() && is_word_char(chars[end]) {
-            end += 1;
-        }
+        // Find word boundaries
+        let start = line[..col]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word_char(*c))
+            .last()
+            .map_or(col, |(at, _)| at);
+        let end = line[col..]
+            .char_indices()
+            .find(|(_, c)| !is_word_char(*c))
+            .map_or(line.len(), |(at, _)| col + at);
 
         if start < end {
-            Some(chars[start..end].iter().collect())
+            Some(line[start..end].to_string())
         } else {
             None
         }
@@ -285,14 +350,15 @@ impl ElmLanguageServer {
                 let mut search_pos = 0;
                 while let Some(pos) = content[search_pos..].find(new_name) {
                     let abs_pos = search_pos + pos;
-                    let before_ok = abs_pos == 0 || {
-                        let c = content.as_bytes()[abs_pos - 1] as char;
-                        !c.is_alphanumeric() && c != '_'
-                    };
-                    let after_ok = abs_pos + new_name.len() >= content.len() || {
-                        let c = content.as_bytes()[abs_pos + new_name.len()] as char;
-                        !c.is_alphanumeric() && c != '_'
-                    };
+                    let in_a_name = |c: char| c.is_alphanumeric() || c == '_';
+                    let before_ok = !content[..abs_pos]
+                        .chars()
+                        .next_back()
+                        .is_some_and(in_a_name);
+                    let after_ok = !content[abs_pos + new_name.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(in_a_name);
                     if before_ok && after_ok {
                         // Found a match - this would cause shadowing
                         let line_num = content[..abs_pos].matches('\n').count() + 1;
@@ -304,7 +370,8 @@ impl ElmLanguageServer {
                         );
                         return Ok(None);
                     }
-                    search_pos = abs_pos + 1;
+                    // On behind the first character of this match, which can be more than one byte
+                    search_pos = abs_pos + new_name.chars().next().map_or(1, char::len_utf8);
                 }
             }
         }
@@ -607,6 +674,9 @@ impl LanguageServer for ElmLanguageServer {
                 if let Ok(mut diag) = self.diagnostics_provider.write() {
                     diag.set_workspace_root(&path.to_string_lossy());
                 }
+                if let Ok(mut root) = self.root.write() {
+                    *root = Some(path.clone());
+                }
 
                 let mut workspace = Workspace::new(path);
                 if let Err(e) = workspace.initialize() {
@@ -660,6 +730,8 @@ impl LanguageServer for ElmLanguageServer {
                         CMD_REMOVE_FIELD.to_string(),
                         CMD_PREPARE_ADD_VARIANT.to_string(),
                         CMD_ADD_VARIANT.to_string(),
+                        CMD_SYNC_WITH_DISK.to_string(),
+                        CMD_UNREAD_RANGES.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -703,14 +775,14 @@ impl LanguageServer for ElmLanguageServer {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         let version = params.text_document.version;
-        self.on_change(uri, text, version).await;
+        self.on_change(uri, text, version);
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let version = params.text_document.version;
         if let Some(change) = params.content_changes.into_iter().next() {
-            self.on_change(uri, change.text, version).await;
+            self.on_change(uri, change.text, version);
         }
     }
 
@@ -739,12 +811,7 @@ impl LanguageServer for ElmLanguageServer {
                 }
                 FileChangeType::DELETED => {
                     tracing::info!("File deleted: {}", uri);
-                    self.documents.remove(&uri);
-                    if let Ok(mut ws) = self.workspace.write() {
-                        if let Some(workspace) = ws.as_mut() {
-                            workspace.remove_file(&uri);
-                        }
-                    }
+                    self.forget_file(&uri);
                 }
                 _ => {}
             }
@@ -754,6 +821,7 @@ impl LanguageServer for ElmLanguageServer {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // First try local document
         if let Some(doc) = self.documents.get(uri) {
@@ -802,6 +870,7 @@ impl LanguageServer for ElmLanguageServer {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // Get document content for type-aware lookups
         let content = if let Some(doc) = self.documents.get(uri) {
@@ -930,6 +999,7 @@ impl LanguageServer for ElmLanguageServer {
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // Get file content for type-aware field finding
         let content = if let Some(doc) = self.documents.get(uri) {
@@ -1056,6 +1126,7 @@ impl LanguageServer for ElmLanguageServer {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
+        self.refuse_a_waiting_file(uri)?;
 
         if let Some(doc) = self.documents.get(uri) {
             let symbols: Vec<SymbolInformation> = doc
@@ -1125,6 +1196,7 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let mut items = Vec::new();
         let mut seen_labels: HashSet<String> = HashSet::new();
+        self.refuse_a_waiting_file(uri)?;
 
         // Limit to prevent timeout on large workspaces
         const MAX_COMPLETION_ITEMS: usize = 1000;
@@ -1197,6 +1269,7 @@ impl LanguageServer for ElmLanguageServer {
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = &params.text_document.uri;
         let position = params.position;
+        self.refuse_a_waiting_file(uri)?;
 
         // First check if this is a field rename
         if let Some(doc) = self.documents.get(uri) {
@@ -1252,6 +1325,7 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
         let new_name = params.new_name;
+        self.refuse_a_waiting_file(uri)?;
 
         // First check if this is a field rename
         if let Some(doc) = self.documents.get(uri) {
@@ -1352,6 +1426,7 @@ impl LanguageServer for ElmLanguageServer {
         let uri = &params.text_document.uri;
         let range = params.range;
         let mut actions = Vec::new();
+        self.refuse_a_waiting_file(uri)?;
 
         // Get word at start of range
         if let Some(word) = self.get_word_at_position(uri, range.start) {
@@ -1420,6 +1495,26 @@ impl LanguageServer for ElmLanguageServer {
         params: ExecuteCommandParams,
     ) -> Result<Option<serde_json::Value>> {
         tracing::info!("execute_command: {:?}", params.command);
+
+        // A command that starts from a file names it first. The ones that take any
+        // file are the two that give a waiting file a name of its own, the build,
+        // and the two that speak of the disk and not of a module.
+        let takes_any_file = matches!(
+            params.command.as_str(),
+            CMD_RENAME_FILE
+                | CMD_MOVE_FILE
+                | CMD_GET_DIAGNOSTICS
+                | CMD_NOTIFY_FILE_RENAMED
+                | CMD_SYNC_WITH_DISK
+        );
+        let named_first = params
+            .arguments
+            .first()
+            .and_then(|first| first.as_str())
+            .and_then(|text| Url::parse(text).ok());
+        if let (false, Some(uri)) = (takes_any_file, named_first) {
+            self.refuse_a_waiting_file(&uri)?;
+        }
 
         match params.command.as_str() {
             CMD_MOVE_FUNCTION => {
@@ -1503,10 +1598,26 @@ impl LanguageServer for ElmLanguageServer {
 
                 tracing::info!("Getting diagnostics for {}", uri);
 
-                let diagnostics = self.get_diagnostics(&uri);
+                let report = self
+                    .diagnostics_provider
+                    .read()
+                    .map_err(|_| {
+                        NoVerdict::Other("The diagnostics provider is unavailable".to_string())
+                    })
+                    .and_then(|provider| provider.get_diagnostics(&uri));
+                let report = match report {
+                    Ok(report) => report,
+                    // No verdict from the compiler. The caller must not take that for a clean build.
+                    Err(no_verdict) => {
+                        return Ok(Some(serde_json::json!({
+                            "error": no_verdict.to_string(),
+                            "noCompiler": no_verdict == NoVerdict::NoCompiler
+                        })))
+                    }
+                };
 
                 // Convert diagnostics to JSON-serializable format
-                let diagnostics_json: Vec<serde_json::Value> = diagnostics.iter().map(|d| {
+                let diagnostics_json: Vec<serde_json::Value> = report.diagnostics.iter().map(|d| {
                     serde_json::json!({
                         "range": {
                             "start": { "line": d.range.start.line, "character": d.range.start.character },
@@ -1524,10 +1635,119 @@ impl LanguageServer for ElmLanguageServer {
                     })
                 }).collect();
 
+                let elsewhere_json: Vec<serde_json::Value> = report
+                    .elsewhere
+                    .iter()
+                    .map(
+                        |p| serde_json::json!({ "path": p.path, "line": p.line, "title": p.title }),
+                    )
+                    .collect();
+
                 Ok(Some(serde_json::json!({
                     "uri": file_uri,
-                    "diagnostics": diagnostics_json
+                    "diagnostics": diagnostics_json,
+                    "elsewhere": elsewhere_json
                 })))
+            }
+            CMD_SYNC_WITH_DISK => {
+                // No arguments. Brings the index in step with the project on
+                // disk, which an agent edits with its own tools between calls.
+                // The reply has "synced": true, or false with the reason in "error".
+                let not_synced = |reason: String| {
+                    Ok(Some(
+                        serde_json::json!({ "synced": false, "error": reason }),
+                    ))
+                };
+                let Some(root) = self.root.read().ok().and_then(|root| root.clone()) else {
+                    return not_synced(
+                        "The language server was started without a project directory".to_string(),
+                    );
+                };
+
+                let changes = {
+                    let Ok(mut ws) = self.workspace.write() else {
+                        return not_synced("The index is unavailable".to_string());
+                    };
+
+                    // There is no index while elm.json cannot be read, and the one
+                    // there is was built from elm.json as it read at the time
+                    let current = ws
+                        .as_ref()
+                        .is_some_and(|workspace| !workspace.elm_json_changed());
+                    if !current {
+                        // A test or another file beyond the source directories, which a
+                        // document was opened for, stays in the index. With no index to
+                        // ask, as after an elm.json that could not be read, the list that
+                        // was kept from the last one stands in.
+                        let Ok(mut kept) = self.beyond_the_walk.write() else {
+                            return not_synced("The index is unavailable".to_string());
+                        };
+                        if let Some(workspace) = ws.as_mut() {
+                            *kept = workspace.files_beyond_the_walk();
+                        }
+                        let mut fresh = Workspace::new(root.clone());
+                        if let Err(e) = fresh.initialize() {
+                            // An index built from another elm.json would answer for a project that no longer is
+                            *ws = None;
+                            return not_synced(format!(
+                                "Cannot read {}: {}.",
+                                root.join("elm.json").display(),
+                                e
+                            ));
+                        }
+                        fresh.adopt(&kept);
+                        kept.clear();
+                        let incomplete = fresh.unreadable_files();
+                        *ws = Some(fresh);
+                        self.documents.clear();
+                        return match incomplete {
+                            Some(problem) => not_synced(problem),
+                            None => Ok(Some(
+                                serde_json::json!({ "synced": true, "reindexed": true }),
+                            )),
+                        };
+                    }
+
+                    ws.as_mut()
+                        .map(|workspace| workspace.take_disk_changes())
+                        .unwrap_or_default()
+                };
+
+                // Deletions first, so that a file which is gone has given up its
+                // module name before the files that changed are read.
+                for path in &changes.deleted {
+                    if let Ok(uri) = Url::from_file_path(path) {
+                        self.forget_file(&uri);
+                    }
+                }
+                for path in &changes.changed {
+                    let read = std::fs::read_to_string(path);
+                    if let (Ok(uri), Ok(text)) = (Url::from_file_path(path), &read) {
+                        self.on_change(uri, text.clone(), 0);
+                    }
+                    if let Ok(mut ws) = self.workspace.write() {
+                        if let Some(workspace) = ws.as_mut() {
+                            match read {
+                                Ok(_) => workspace.mark_read(path),
+                                Err(e) => workspace.mark_unreadable(path, e.to_string()),
+                            }
+                        }
+                    }
+                }
+
+                // A file the index could not read is a file a refactoring would pass over
+                let incomplete = self.workspace.read().ok().and_then(|ws| {
+                    ws.as_ref()
+                        .and_then(|workspace| workspace.unreadable_files())
+                });
+                match incomplete {
+                    Some(problem) => not_synced(problem),
+                    None => Ok(Some(serde_json::json!({
+                        "synced": true,
+                        "changed": changes.changed.len(),
+                        "deleted": changes.deleted.len()
+                    }))),
+                }
             }
             CMD_PREPARE_REMOVE_VARIANT => {
                 // Expected arguments: [uri, line, character]
@@ -2622,6 +2842,32 @@ impl LanguageServer for ElmLanguageServer {
                         "message": e.to_string()
                     }))),
                 }
+            }
+            CMD_UNREAD_RANGES => {
+                // Expected arguments: [file_uri], of an open file. The reply has
+                // "ranges", the stretches of it that the parser could not read.
+                let file_uri: String = params
+                    .arguments
+                    .first()
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?
+                    .unwrap_or_default();
+                let uri = Url::parse(&file_uri).map_err(|e| {
+                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid URI: {}", e))
+                })?;
+
+                let tree = self
+                    .documents
+                    .get(&uri)
+                    .and_then(|doc| self.parser.parse(&doc.text));
+                Ok(Some(match tree {
+                    Some(tree) => {
+                        serde_json::json!({ "ranges": self.parser.unread_ranges(&tree) })
+                    }
+                    None => serde_json::json!({ "error": format!("{} is not open", uri) }),
+                }))
             }
             _ => Ok(Some(serde_json::json!({
                 "error": format!("Unknown command: {}", params.command)

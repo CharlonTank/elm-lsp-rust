@@ -8,3 +8,6 @@ tests/fixture-backup/
 *.backup
 *.backup2
 .DS_Store
+
+# Benchmark plans, run records and reports
+benchmarks/out/

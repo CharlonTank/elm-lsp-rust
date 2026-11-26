@@ -5,7 +5,7 @@
  */
 
 import { spawn } from "child_process";
-import { readFileSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -19,11 +19,15 @@ const CYAN = "\x1b[36m";
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 
-function runTest(scriptPath, name) {
+// How the two kinds of suite report their totals
+const SCRIPT_COUNTS = { passed: /Passed:\s*(\d+)/, failed: /Failed:\s*(\d+)/ };
+const NODE_TEST_COUNTS = { passed: /^# pass (\d+)/m, failed: /^# fail (\d+)/m };
+
+function runTest(nodeArgs, name, counts = SCRIPT_COUNTS) {
   return new Promise((resolve) => {
-    const child = spawn("node", [scriptPath], {
+    const child = spawn("node", nodeArgs, {
       stdio: ["inherit", "pipe", "pipe"],
-      cwd: dirname(scriptPath),
+      cwd: __dirname,
     });
 
     let stdout = "";
@@ -43,8 +47,8 @@ function runTest(scriptPath, name) {
 
     child.on("close", (code) => {
       // Parse results from output
-      const passMatch = stdout.match(/Passed:\s*(\d+)/);
-      const failMatch = stdout.match(/Failed:\s*(\d+)/);
+      const passMatch = stdout.match(counts.passed);
+      const failMatch = stdout.match(counts.failed);
 
       resolve({
         name,
@@ -233,19 +237,29 @@ async function main() {
 
   // Run fixture tests
   console.log(`${CYAN}Running fixture tests...${RESET}\n`);
-  const fixtureResults = await runTest(fixtureTestPath, "Fixture Tests");
+  const fixtureResults = await runTest([fixtureTestPath], "Fixture Tests");
   const fixtureCoverage = parseCoverageFromOutput(fixtureResults.output);
 
   console.log(`\n${CYAN}Running meetdown comprehensive tests...${RESET}\n`);
-  const meetdownResults = await runTest(meetdownTestPath, "Meetdown Tests");
+  const meetdownResults = await runTest([meetdownTestPath], "Meetdown Tests");
   const meetdownCoverage = parseCoverageFromOutput(meetdownResults.output);
+
+  // The MCP server, the command line and the harness table have node:test suites
+  console.log(`\n${CYAN}Running wrapper tests...${RESET}\n`);
+  const wrapperTestFiles = readdirSync(__dirname).filter((file) => file.endsWith(".test.mjs"));
+  // The totals are read from TAP, which is not the default reporter of every Node version
+  const wrapperResults = await runTest(
+    ["--test", "--test-reporter=tap", ...wrapperTestFiles],
+    "Wrapper Tests",
+    NODE_TEST_COUNTS
+  );
 
   // Generate coverage file from test data
   generateCoverageFile(fixtureResults, meetdownResults, fixtureCoverage, meetdownCoverage);
 
   // Final summary
-  const totalPassed = fixtureResults.passed + meetdownResults.passed;
-  const totalFailed = fixtureResults.failed + meetdownResults.failed;
+  const totalPassed = fixtureResults.passed + meetdownResults.passed + wrapperResults.passed;
+  const totalFailed = fixtureResults.failed + meetdownResults.failed + wrapperResults.failed;
 
   console.log(`\n${BOLD}${"=".repeat(70)}${RESET}`);
   console.log(`${BOLD}  Master Test Summary${RESET}`);
@@ -258,12 +272,22 @@ async function main() {
   console.log(`    ${GREEN}Passed: ${meetdownResults.passed}${RESET}`);
   console.log(`    ${meetdownResults.failed > 0 ? RED : GREEN}Failed: ${meetdownResults.failed}${RESET}`);
 
+  console.log(`\n  ${BOLD}Wrapper Tests:${RESET}`);
+  console.log(`    ${GREEN}Passed: ${wrapperResults.passed}${RESET}`);
+  console.log(`    ${wrapperResults.failed > 0 ? RED : GREEN}Failed: ${wrapperResults.failed}${RESET}`);
+
   console.log(`\n  ${BOLD}Total:${RESET}`);
   console.log(`    ${GREEN}Passed: ${totalPassed}${RESET}`);
   console.log(`    ${totalFailed > 0 ? RED : GREEN}Failed: ${totalFailed}${RESET}`);
   console.log(`    Tests:  ${totalPassed + totalFailed}`);
 
-  if (totalFailed > 0) {
+  // A suite that crashed or was killed has counted no failure, so its exit status decides too
+  const brokenSuites = [fixtureResults, meetdownResults, wrapperResults].filter((suite) => suite.exitCode !== 0);
+  for (const suite of brokenSuites) {
+    console.log(`\n  ${RED}${suite.name} exited with ${suite.exitCode ?? "a signal"}${RESET}`);
+  }
+
+  if (totalFailed > 0 || brokenSuites.length > 0) {
     console.log(`\n${RED}${"=".repeat(70)}${RESET}`);
     console.log(`${RED}  TESTS FAILED${RESET}`);
     console.log(`${RED}${"=".repeat(70)}${RESET}\n`);

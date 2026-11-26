@@ -1,8 +1,31 @@
 # elm-lsp-rust
 
-A fast Elm Language Server written in Rust, designed for Claude Code integration via MCP.
+A fast Elm language server written in Rust, for coding agents. It gives an agent go to definition, find references, compiler diagnostics and project-wide refactorings as tools, over MCP or from the command line.
+
+It is a stdio MCP server, so a harness with an MCP client can register it. [docs/harnesses.md](docs/harnesses.md) has the entry for Claude Code, OpenAI Codex, GitHub Copilot, Cursor, OpenCode, Gemini CLI, Google Antigravity, Cline, Goose, Pi and Oh My Pi. The Claude Code and Codex entries are tested in those harnesses. The other nine follow each harness's documentation and have not been run there. Aider, which has no MCP client, and any script can call the same tools through the command-line interface.
 
 ## Installation
+
+### Any harness
+
+```bash
+git clone https://github.com/CharlonTank/elm-lsp-rust
+cd elm-lsp-rust
+scripts/setup.sh                            # builds the language server (needs cargo and Node.js 18+)
+node mcp-wrapper/cli.mjs doctor             # checks the installation
+node mcp-wrapper/cli.mjs config             # lists the harnesses
+node mcp-wrapper/cli.mjs config <harness>   # prints where your harness keeps its MCP servers and the entry to add
+```
+
+[docs/harnesses.md](docs/harnesses.md) shows the entry for every harness. A harness that is not listed needs a stdio MCP server whose command is `node` and whose argument is the absolute path of `mcp-wrapper/index.mjs`.
+
+You can also hand the job to your agent. Tell it to read [docs/agent-install.md](docs/agent-install.md) in the clone and follow it.
+
+The server starts from any directory, and each tool finds the Elm project from the file it is given. One registration therefore serves every Elm project on the machine. Pass absolute file paths, because a relative path resolves against the directory the harness started the server in.
+
+The skill in `skills/elm-refactoring` tells an agent when and how to use the tools. Copy it into the project's `.agents/skills/` directory, or `.claude/skills/` for Claude Code.
+
+### Claude Code plugin
 
 In Claude Code, run:
 
@@ -13,7 +36,7 @@ In Claude Code, run:
 
 Then restart Claude Code.
 
-### How Plugin Distribution Works
+#### How plugin distribution works
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -46,7 +69,63 @@ When you install via the marketplace:
 1. Claude Code fetches plugin metadata from `elm-lsp-plugin/marketplace.json`
 2. The marketplace points to this repository (`elm-lsp-rust`)
 3. Claude Code clones this repo and runs `scripts/setup.sh` to build the Rust binary
-4. The MCP wrapper (`mcp-wrapper/index.mjs`) becomes available as `elm-lsp-rust` MCP server
+4. The MCP wrapper (`mcp-wrapper/index.mjs`) becomes available as the MCP server `elr`, whose tools Claude Code names `mcp__plugin_elm-lsp-rust_elr__elm_definition` and so on
+
+The plugin starts the server with `--elm-projects-only`, so its tools appear only in sessions opened in an Elm project.
+
+## Command line
+
+`mcp-wrapper/cli.mjs` runs one tool per call and prints its result. Each argument of the tool is a flag.
+
+```bash
+node mcp-wrapper/cli.mjs tools                 # list the tools, add --json for their arguments
+node mcp-wrapper/cli.mjs elm_references --file_path src/Main.elm --line 10 --character 4
+node mcp-wrapper/cli.mjs elm_rename_function --help
+```
+
+`--args '<json>'` passes all arguments as one JSON object. `--project-tools` works as it does for the server, see below. The exit status is 0 on success, 1 when the tool fails and 2 when the command line is wrong.
+
+## Server options
+
+Append these to the arguments of `mcp-wrapper/index.mjs` in your harness's config.
+
+| Option | Effect |
+|--------|--------|
+| `--read-only` | Offers only the nine tools that never edit a source file |
+| `--project-tools` | Takes the compiler and `elm-format` from a project's `node_modules/.bin` when they are there. Only for projects you trust |
+| `--elm-projects-only` | Exits at once unless the working directory, or a direct child of it, holds an `elm.json`. The harness then lists the server as not connected |
+| `--http`, `--host`, `--port` | Serves over HTTP instead of stdio, see [Shared MCP server](#shared-mcp-server-manual-http). `--host` and `--port` need `--http` |
+
+Every tool carries MCP annotations. Nine are marked read-only: `elm_definition`, `elm_references`, `elm_symbols`, `elm_diagnostics`, `elm_code_actions`, `elm_notify_file_changed` and the three `elm_prepare_*` previews. The rest are marked as writing to disk, so a harness that reads annotations asks before it runs them. Read-only means that a tool edits no source file. `elm_diagnostics` still runs the compiler, which writes its cache to `elm-stuff/` and downloads packages it does not have yet.
+
+Diagnostics build a Lamdera project with `lamdera` and any other project with `elm`. The compiler and `elm-format` are found on `PATH`. With `--project-tools`, a copy in the project's `node_modules/.bin` wins, so a project gets the versions it pins. That also lets a repository choose the program these tools run, and a harness may call `elm_diagnostics` without asking first. Turn it on only for code you trust.
+
+The server starts one language server per Elm project on first use and stops it after ten idle minutes. Before each call the language server compares its index with the project on disk. It reads the source files that changed, and builds the index anew when `elm.json` did, so edits an agent made with its own tools are taken into account. While `elm.json`, a source file or a directory of source files cannot be read, every tool that asks the language server fails and says which one and why, because a refactoring would pass over what the index could not read. `elm_format` asks it nothing, and formats the file it is given all the same.
+
+The index covers the source directories that `elm.json` lists, also one outside the project root such as `../shared`. A file in none of them, such as a test, joins the index when a tool is called on that file. The language server then follows it like the rest, also when it builds its index anew. Such a file is gone from the index again once the language server restarts, which it does after ten idle minutes. Until a tool is called on the file again, a rename does not reach it. From the command line every call starts a new language server, so a rename there never reaches a file outside the source directories.
+
+Two files can declare one module: a copy of `Utils.elm` says `module Utils` until its first line is edited. The index keeps one file for each module name, the one whose path spells the name, `src/Utils.elm`. Below a source directory that is the compiler's rule too, so the other file is no module of the project. A rename, or a change to a type, leaves it alone, and a tool that is called on it says so and names both files. `elm_rename_file` and `elm_move_file` give it a name of its own, and `elm_diagnostics` and `elm_format` take it like any file. Two things are less tidy. A file in no source directory that declares the name of a module in one, such as `examples/Demo/Main.elm` beside `src/Main.elm`, compiles when the compiler is given its path, and the tools refuse it all the same. And `elm_move_function` works on the text of every Elm file below the project, so it changes the import in a copy as well.
+
+A refactoring reads every file it changes, and checks that it may write each of them, before it writes the first. A file that cannot be read or written leaves the project as it was, and the error names the file. A file move also checks first that its two directories take the change. These are checks ahead of the work and no transaction: a disk that fills up half way still leaves a refactoring half done.
+
+The calls for one project run one at a time, in the order they arrive, whether they come from one client or from several clients of an HTTP server. Two servers that work on the same project know nothing of each other, so do not let two of them refactor at once.
+
+When the harness closes the server's input, the server answers the requests it has already received, stops its language servers and exits.
+
+### Known limitations
+
+- **Columns on lines with non-ASCII text.** The language server counts columns in bytes. On a line with a non-ASCII character before the symbol, a column in a result is larger than the count of characters by the extra bytes: in `"café " ++ formatName name`, `formatName` is at column 12 and not at 11. Pass a column to a tool as a result gave it. A column you count yourself has to count UTF-8 bytes too, so pass 12 for `formatName` there. Edits land where they belong, on such a line as on any other. `elm_diagnostics` is the exception: it prints the line and the column of the compiler's own report, which count from 1 and by characters.
+- **Linked directories.** A directory below a source directory that is a link to another directory is not followed, though the compiler follows it. The modules behind it are not in the index, and a rename passes them over. A link to a single file is followed.
+- **Source directories outside the project root.** A refactoring that starts inside the project changes the files in a directory such as `../shared` too. A call cannot name a file there itself, because the project is found from the path of the file a call names, and that path leads to no `elm.json`. Two projects that share such a directory are not kept from refactoring it at the same time.
+- **What a moved function leaves behind.** `elm_move_function` moves the text of one function and points the imports that list it by name, as in `import Utils exposing (greet)`, at its new module. An import that listed nothing else stays as `import Utils`, which its file may no longer need. The new module's own import is not changed: where it took the function from the old module, as in `import Utils exposing (formatName, greet)`, it goes on listing a name that the old module no longer exposes. A use by qualified name, through an alias or through `exposing (..)` stays as it was. The imports that the function needs, and the functions of its old module that it calls, do not follow it either: moving `greet : User -> String` into a module that does not import `User` leaves that module with an error. And the old module gets an import of the new one, which closes a circle when the new one imports the old. The tool refuses a target that declares the function's name already, but not one where a name of the target and one of the function shadow each other, which the compiler refuses as well: moving `f = 2` into a module that has `x f = f 0`, or a function whose `let` binds `x` into a module with a top-level `x`, reports success and leaves the target with a SHADOWING error. It also rewrites the import in a copy of a module, which the other refactorings leave alone. In a package, the `@docs` lines of both modules stay as they were, and only `elm make --docs` reads them. In a module without imports, the only doc comment above the first declaration moves with that function when the function starts right below it, though the compiler reads the comment as the module's. The word `@docs` anywhere in it keeps it in the module, as in `{-| @docs a, b -}`, and so does a blank line below it, which `elm-format` writes there. Run `elm_diagnostics` on the project's entry module afterwards, which compiles every module in use, and repair what it reports. For a package, run `elm make --docs=docs.json` as well, which writes that file.
+- **A module's name in a comment or a string.** `elm_rename_file` and `elm_move_file` change the module's name wherever a file that imports the module writes it in front of a dot. They read text for that, so `Utils.greet` in a comment or a string of such a file becomes `Helpers.greet` along with the code.
+- **A name that several modules have.** `elm_definition` and `elm_references` look a name up without the module it belongs to. Where `Aaa`, `Other` and `Utils` each have a `helper`, the definition asked for at `Other.helper` can be the one of `Aaa`, and the references of one of them list the uses of all three. Look at the path of such an answer before you rely on it. Three refactorings write by the same lookup, and each reports success. `elm_rename_variant` also renames a variant of that name which another module declares on a type of its own, such as the `NoOp` in every page module of an application. `elm_add_variant` writes a branch for the bare new variant into a `case` over another type, where a pattern of that `case` holds a variant of the type that changed, as in `Home Page.Home.NoOp ->`. `elm_rename_field` on a record alias whose name and field another module has as well, a `Model` with a `title` in two page modules, renames the other module's field too or stops at the definition, and which of the two differs from run to run. The project does not compile after any of these, so run `elm_diagnostics` on its entry module after one of the three.
+- **Uses that a field rename leaves behind.** `elm_rename_field` tells a field by the type of its record. Where it does not work that type out, it leaves the use as it was and reports success all the same: a chained access such as `model.user.name`, a record pattern in a `case` branch, in a `let` or in a lambda, as in `\{ width } -> width * 2`, and a field read off a value that a pattern bound, as in `Square size -> size.width`. The project does not compile then, and `elm_diagnostics` on its entry module names each place that is left.
+- **What a removed field takes along.** `elm_remove_field` reports success in two cases where it leaves the project broken. A record alias that stands on one line, as in `type alias Person = { name : String, age : Int }`, is removed whole with the field. And where the first field of a record literal on several lines goes, its line is left as `{` with the comma of the next field below it, which does not parse. Run `elm_diagnostics` on the project's entry module afterwards.
+- **Lines the parser does not read.** The language server reads a file with tree-sitter-elm, which does not know every layout that the compiler accepts. One is a `case` in parentheses that close on the line of its last branch, which `elm-format` never writes. From such a declaration on, and around a syntax error in a file that is being edited, `elm_symbols` can lack declarations. `elm_move_function` does not move a function that such lines reach, or the first one below them. It names the lines, because it cannot tell where the function begins and ends. A function above them moves. Where a line of its body starts in the first column, the parser ends the function above that line, as the compiler does, and the rest of the body stays behind. `elm_format` lays out a file that compiles in a way the parser reads. The language server also pairs a type signature with a definition by their name, wherever in the file the two stand. Where a signature stands apart from its definition, or a file defines a name twice, `elm_symbols` gives that function the lines of the declarations in between. `elm_move_function` then moves nothing where `elm_symbols` lists one of those declarations, and takes along the ones it does not list: in `view : Int -> Int`, then `helper : Int` with no definition, then `view n = n`, moving `view` takes `helper : Int` with it. Where the signature stands below its definition, the tool moves nothing either, and names the line of the signature.
+- **A build that takes longer than 30 seconds.** The wrapper waits 30 seconds for each answer of the language server, and the language server runs the compiler before it answers `elm_diagnostics`. A longer build, a first one that downloads packages for one, fails the call with an answer that says so, and the compiler goes on running. The MCP server keeps its language server, which answers no other call for that project until the compiler ends. The calls that wait in line behind the build and ask the language server fail one after the other, each after 30 seconds of its own, with an answer that says that the compiler of an earlier `elm_diagnostics` call is still running. `elm_format` asks the language server nothing and is answered in its turn, though a harness that gives up on a call sooner, as the MCP SDK's client does after 60 seconds, reports it as failed all the same. Make the call again once the build is done. The command line stops its language server when the command ends, and the compiler goes on in the background without it. A later command starts a language server of its own and is not held up. An `elm_diagnostics` among such commands starts a second compiler beside the first, so wait for the first one to end before you ask for diagnostics again.
+- **Lines that end in CRLF.** A line that a tool adds ends in LF, also in a file whose lines end in CRLF. `elm_move_function` takes the lines of a function to the target with the line ends they had, so a function from such a file leaves lines that end in CRLF in a file whose lines end in LF. The lines that the tool adds around it, the import that it adds to the old module and the blank lines where the function stood end in LF. Both files still compile. `elm_add_variant`, and the import that `elm_apply_code_action` adds, break their lines with LF in the same way, and the file compiles as well. `elm_format` writes a whole file with LF.
+- **Windows.** File paths and the setup script assume a POSIX system.
 
 ## Features
 
@@ -66,7 +145,7 @@ When you install via the marketplace:
 | **Remove Field** | Remove field from type alias with usage updates |
 | **ERD Generation** | Generate Mermaid diagrams from types |
 
-### Smart Type Operations
+### Smart type operations
 
 **Add Variant**: Adds a variant and automatically inserts branches in all case expressions:
 ```elm
@@ -84,14 +163,14 @@ type Route = HomeRoute | AboutRoute | NewRoute
 - Updates record literals, patterns, and field accesses
 - Replaces field access with `Debug.todo`
 
-## MCP Tools (22 total)
+## MCP tools (22 total)
 
 | Tool | Description |
 |------|-------------|
 | `elm_definition` | Go to definition |
 | `elm_references` | Find all references |
 | `elm_symbols` | List file symbols |
-| `elm_diagnostics` | Get compiler errors |
+| `elm_diagnostics` | Get compiler errors for a file and what it imports |
 | `elm_code_actions` | Get available actions |
 | `elm_apply_code_action` | Apply a code action |
 | `elm_format` | Format file |
@@ -111,25 +190,21 @@ type Route = HomeRoute | AboutRoute | NewRoute
 | `elm_remove_field` | Remove field from type alias |
 | `elm_generate_erd` | Generate Mermaid ERD from type |
 
-## Building from Source
+## Building from source
 
 ```bash
 cd elm-lsp-rust
-cargo build --release
+cargo build --release --locked
 
 # Binary at: target/release/elm_lsp
 ```
 
-## Shared MCP Server (Manual HTTP)
+## Shared MCP server (manual HTTP)
 
-Run one MCP server yourself and point multiple Claude Code sessions to it.
+Run one MCP server yourself and point multiple sessions to it.
 
 ```bash
-cd /path/to/elm-lsp-rust
-cargo build --release
-cd mcp-wrapper && npm install
-
-cd /path/to/elm-project
+/path/to/elm-lsp-rust/scripts/setup.sh
 node /path/to/elm-lsp-rust/mcp-wrapper/index.mjs --http --host 127.0.0.1 --port 3333
 ```
 
@@ -147,32 +222,42 @@ Claude Code config example (in `~/.claude.json` or project `.mcp.json`):
 ```
 
 Notes:
-- Start the server from your Elm project root so `elm.json` is present.
-- This shares one LSP per workspace; use the same repo across sessions.
+- Sessions share one language server per Elm project.
 - Disable the stdio server entry to avoid duplicates.
+- On a loopback address, which is the default, the server refuses a request whose `Host` or `Origin` names another site. That is how a web page in a browser on the same machine would reach it. On any other address it answers every client that can connect, and the tools write files, so bind it only on a network you trust.
 
 ## Architecture
 
 ```
 elm-lsp-rust/
 ├── .claude-plugin/
-│   └── plugin.json      # Plugin metadata for marketplace
+│   └── plugin.json       # Plugin metadata for marketplace
 ├── src/
-│   ├── main.rs          # Entry point
-│   ├── server.rs        # LSP protocol (tower-lsp)
-│   ├── workspace.rs     # Indexing, symbols, refactoring
-│   ├── document.rs      # Single file representation
-│   ├── parser.rs        # Tree-sitter parsing
-│   └── diagnostics.rs   # Elm compiler integration
-├── mcp-wrapper/         # MCP server (Node.js)
-│   └── index.mjs        # Translates MCP <-> LSP
+│   ├── main.rs           # Entry point
+│   ├── server.rs         # LSP protocol (tower-lsp)
+│   ├── workspace/        # Indexing, symbols, refactoring
+│   ├── document.rs       # Single file representation
+│   ├── parser.rs         # Tree-sitter parsing
+│   └── diagnostics.rs    # Elm compiler integration
+├── mcp-wrapper/          # Agent-facing layer (Node.js)
+│   ├── tools.mjs         # The tools, defined once
+│   ├── move-function.mjs # elm_move_function, by editing text
+│   ├── index.mjs         # MCP server over stdio or HTTP
+│   ├── cli.mjs           # Command-line interface
+│   ├── doctor.mjs        # The checks of cli.mjs doctor
+│   ├── lsp-client.mjs    # Runs the Rust binary, one per Elm project
+│   ├── workspace.mjs     # Finds a file's project, writes edits
+│   ├── errors.mjs        # ToolError, a failure the agent can act on
+│   └── harnesses.mjs     # Registration for each harness
+├── docs/                 # Harness configuration, agent install guide
 ├── scripts/
-│   └── setup.sh         # Build script run on plugin install
-├── skills/              # Claude Code skills
-└── tests/               # Test suite (228 tests)
+│   └── setup.sh          # Builds the language server
+├── skills/               # Agent skill
+├── benchmarks/           # Agent refactorings with the server and without it
+└── tests/                # Test suites
 ```
 
-### Key Design Decisions
+### Key design decisions
 
 1. **Workspace Indexing**: Indexes all `.elm` files at startup for immediate cross-file operations
 2. **Tree-sitter Parsing**: Fast, incremental, error-tolerant parsing
@@ -182,11 +267,23 @@ elm-lsp-rust/
 ## Testing
 
 ```bash
-# Run all tests (228 tests total)
+# Once per clone: the suites' own dependencies
+(cd tests && npm ci --ignore-scripts)
+
+# Tools and language server, against the fixture and a real project
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs
+
+# MCP server, command line, harness configuration and the benchmark
+node --test tests/*.test.mjs
 ```
 
+The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or newer, two major versions past what the server itself needs. The meetdown suite also needs `lamdera`. The benchmark's tests, which the last command runs with the others, need `git` and a `ps` that lists the machine's processes. They take a few minutes, and longer on a slow network, since the real compiler asks package.elm-lang.org again in each fresh checkout that they build.
+
 Tests cover: definition, references, symbols, rename (functions, types, variants, fields), diagnostics, code actions, move function, file rename/move, add/remove variant, add/remove field, and ERD generation.
+
+## Benchmark
+
+`benchmarks/` measures what the tools are worth to an agent. It gives Claude Code the same Elm refactorings with the language server and without it, on codebases you choose, and compares how often the result is right, what it costs and how long it takes. See [benchmarks/README.md](benchmarks/README.md).
 
 ## Related
 

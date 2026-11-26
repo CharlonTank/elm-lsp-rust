@@ -49,6 +49,20 @@ impl ElmParser {
         symbols
     }
 
+    /// The stretches of a file that the parser could not read: each declaration that is
+    /// a syntax error or holds one. The grammar does not know every layout that the
+    /// compiler accepts, and it reads on through a file that is being edited. Around such
+    /// a stretch a declaration can be missing from the symbols, or begin and end somewhere
+    /// else than its symbol says.
+    pub fn unread_ranges(&self, tree: &Tree) -> Vec<Range> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        root.children(&mut cursor)
+            .filter(|child| child.has_error())
+            .map(|child| self.node_to_range(child))
+            .collect()
+    }
+
     fn parse_type_annotation(
         &self,
         node: tree_sitter::Node,
@@ -230,7 +244,7 @@ impl ElmParser {
         &source[node.byte_range()]
     }
 
-    fn node_to_range(&self, node: tree_sitter::Node) -> Range {
+    pub(crate) fn node_to_range(&self, node: tree_sitter::Node) -> Range {
         let start = node.start_position();
         let end = node.end_position();
         Range {
@@ -243,5 +257,49 @@ impl ElmParser {
 impl Default for ElmParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unread_lines(source: &str) -> Vec<(u32, u32)> {
+        let parser = ElmParser::new();
+        let tree = parser.parse(source).unwrap();
+        parser
+            .unread_ranges(&tree)
+            .iter()
+            .map(|range| (range.start.line, range.end.line))
+            .collect()
+    }
+
+    #[test]
+    fn test_a_file_that_the_parser_reads_has_no_unread_stretch() {
+        let source = "module Main exposing (..)\n\n\none : Int\none =\n    1\n\n\ntwo =\n    2\n";
+        assert_eq!(unread_lines(source), vec![]);
+    }
+
+    #[test]
+    fn test_a_declaration_with_a_syntax_error_is_an_unread_stretch() {
+        let source =
+            "module Main exposing (..)\n\n\none =\n    1\n\n\ntwo =\n    let\n\n\nthree =\n    3\n";
+        let unread = unread_lines(source);
+        assert!(!unread.is_empty());
+        // The first declaration lies above the error and is read
+        assert!(unread.iter().all(|(start, _)| *start >= 7), "{:?}", unread);
+    }
+
+    #[test]
+    fn test_a_layout_that_the_grammar_does_not_know_is_an_unread_stretch() {
+        // The compiler accepts a case in parentheses that close on the line of its last branch
+        let source = "module Main exposing (..)\n\n\none n =\n    n\n        |> (\\p ->\n             case p of\n              1 -> 2\n              _ -> p)\n\n\ntwo =\n    2\n";
+        let unread = unread_lines(source);
+        assert_eq!(
+            unread.first().map(|(start, _)| *start),
+            Some(3),
+            "{:?}",
+            unread
+        );
     }
 }
